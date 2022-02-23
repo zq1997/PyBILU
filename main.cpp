@@ -6,12 +6,16 @@ using namespace std;
 
 void *run(PyCodeObject *);
 
+static Py_ssize_t extra_index;
+
 PyObject *vectorcall(PyObject *callable, PyObject *const *args, size_t nargsf, PyObject *kwnames) {
     assert(PyFunction_Check(callable));
     auto func = reinterpret_cast<PyFunctionObject *>(callable);
-    PyObject *(*jit_func)();
-    _PyCode_GetExtra(func->func_code, 0, reinterpret_cast<void **>(&jit_func));
-    return jit_func();
+    // argument check here
+    // auto nargs = PyVectorcall_NARGS(nargsf);
+    PyObject *(*jit_func)(PyObject *const *);
+    _PyCode_GetExtra(func->func_code, extra_index, reinterpret_cast<void **>(&jit_func));
+    return jit_func(args);
 }
 
 void free_extra(void *extra) {
@@ -25,7 +29,7 @@ PyObject *apply(PyObject *, PyObject *maybe_func) {
         return nullptr;
     }
     auto func = reinterpret_cast<PyFunctionObject *>(maybe_func);
-    _PyCode_SetExtra(func->func_code, 0, run(reinterpret_cast<PyCodeObject *>(func->func_code)));
+    _PyCode_SetExtra(func->func_code, extra_index, run(reinterpret_cast<PyCodeObject *>(func->func_code)));
     func->vectorcall = vectorcall;
     return Py_NewRef(func);
 }
@@ -43,6 +47,10 @@ PyInit_pybilu() {
             -1,
             meth_def
     };
-    _PyEval_RequestCodeExtraIndex(free_extra);
+    extra_index = _PyEval_RequestCodeExtraIndex(free_extra);
+    if (extra_index < 0) {
+        PyErr_SetString(PyExc_TypeError, "failed to setup");
+        return nullptr;
+    }
     return PyModule_Create(&mod_def);
 }

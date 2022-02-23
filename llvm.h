@@ -8,6 +8,7 @@
 #include <llvm/ExecutionEngine/Orc/CompileUtils.h>
 #include <llvm/ExecutionEngine/Orc/ExecutionUtils.h>
 #include <llvm/ExecutionEngine/SectionMemoryManager.h>
+#include <llvm/Object/ELFObjectFile.h>
 
 class MyJIT {
 private:
@@ -35,6 +36,12 @@ public:
     void addModule(std::unique_ptr<llvm::Module> mod, std::unique_ptr<llvm::LLVMContext> ctx) {
         llvm::orc::ThreadSafeModule tmod(std::move(mod), std::move(ctx));
         cantFail(compile_layer.add(dylib, std::move(tmod)));
+    }
+
+    void emitModule(llvm::Module &mod);
+
+    llvm::DataLayout getDL() {
+        return machine->createDataLayout();
     }
 
     llvm::Expected<llvm::JITEvaluatedSymbol> lookup(llvm::StringRef Name) {
