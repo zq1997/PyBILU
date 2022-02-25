@@ -1,6 +1,5 @@
 #include <memory>
 #include <iostream>
-#include <fstream>
 
 
 #include <Python.h>
@@ -25,20 +24,7 @@ void MyJIT::Init() {
     );
 }
 
-
-MyJIT::MyJIT(unique_ptr<TargetMachine> machine_,
-             unique_ptr<SelfExecutorProcessControl> epc) :
-        machine(move(machine_)),
-        sess(move(epc)),
-        object_layer(sess, make_unique<SectionMemoryManager>),
-        compile_layer(sess, object_layer, make_unique<SimpleCompiler>(*machine)),
-        dylib(sess.createBareJITDylib("")) {}
-
 llvm::Expected<unique_ptr<MyJIT>> MyJIT::Create() {
-    auto epc = SelfExecutorProcessControl::Create();
-    if (!epc) {
-        return epc.takeError();
-    }
     auto tm_builder = JITTargetMachineBuilder::detectHost();
     if (!tm_builder) {
         return tm_builder.takeError();
@@ -48,13 +34,7 @@ llvm::Expected<unique_ptr<MyJIT>> MyJIT::Create() {
     if (!tm) {
         return tm.takeError();
     }
-    char prefix = (*tm)->createDataLayout().getGlobalPrefix();
-    auto jit = unique_ptr<MyJIT>(new MyJIT(move(*tm), move(*epc)));
-    auto gen = DynamicLibrarySearchGenerator::GetForCurrentProcess(prefix);
-    if (!gen) {
-        return gen.takeError();
-    }
-    jit->dylib.addGenerator(move(*gen));
+    auto jit = unique_ptr<MyJIT>(new MyJIT(move(*tm)));
     return jit;
 }
 
