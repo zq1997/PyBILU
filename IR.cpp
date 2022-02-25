@@ -51,26 +51,6 @@ public:
                 "PyLong_FromLong",
                 mod.get()
         );
-        auto cpy_PyLong_FromUnsignedLong = Function::Create(
-                FunctionType::get(
-                        Type::getInt64Ty(*context)->getPointerTo(),
-                        {Type::getScalarTy<long>(*context)},
-                        false
-                ),
-                Function::ExternalLinkage,
-                "PyLong_FromUnsignedLong",
-                mod.get()
-        );
-        auto cpy_PyLong_FromSsize_t = Function::Create(
-                FunctionType::get(
-                        Type::getInt64Ty(*context)->getPointerTo(),
-                        {Type::getScalarTy<long>(*context)},
-                        false
-                ),
-                Function::ExternalLinkage,
-                "PyLong_FromSsize_t",
-                mod.get()
-        );
         auto cpy_PyNumber_Add = Function::Create(
                 FunctionType::get(
                         Type::getInt64Ty(*context)->getPointerTo(),
@@ -81,32 +61,13 @@ public:
                 "PyNumber_Add",
                 mod.get()
         );
-        auto cpy_PyNumber_Subtract = Function::Create(
-                FunctionType::get(
-                        Type::getInt64Ty(*context)->getPointerTo(),
-                        {Type::getInt64Ty(*context)->getPointerTo(), Type::getInt64Ty(*context)->getPointerTo()},
-                        false
-                ),
-                Function::ExternalLinkage,
-                "PyNumber_Subtract",
-                mod.get()
-        );
-        auto v1 = builder.CreateCall(cpy_PyLong_FromSsize_t, ConstantInt::get(Type::getScalarTy<long>(*context), 1));
-        auto v2 = builder.CreateCall(cpy_PyLong_FromUnsignedLong, ConstantInt::get(Type::getScalarTy<long>(*context), 2));
-        auto s3 = builder.CreateCall(cpy_PyNumber_Add, {v1, v2});
-        auto v3 = builder.CreateCall(cpy_PyLong_FromLong, ConstantInt::get(Type::getScalarTy<long>(*context), 2));
-        auto s0 = builder.CreateCall(cpy_PyNumber_Subtract, {s3, v3});
-        auto v4 = builder.CreateCall(cpy_PyLong_FromSsize_t, ConstantInt::get(Type::getScalarTy<long>(*context), 4));
-        auto v5 = builder.CreateCall(cpy_PyLong_FromUnsignedLong, ConstantInt::get(Type::getScalarTy<long>(*context), 5));
-        auto s9 = builder.CreateCall(cpy_PyNumber_Add, {v4, v5});
-        auto v10 = builder.CreateCall(cpy_PyLong_FromLong, ConstantInt::get(Type::getScalarTy<long>(*context), 10));
-        auto ret = builder.CreateCall(cpy_PyNumber_Subtract, {v10, s9});
-        builder.CreateRet(ret);
+        auto v1 = builder.CreateCall(cpy_PyLong_FromLong, ConstantInt::get(Type::getScalarTy<long>(*context), 1));
+        auto v2 = builder.CreateCall(cpy_PyLong_FromLong, ConstantInt::get(Type::getScalarTy<long>(*context), 2));
+        auto v3 = builder.CreateCall(cpy_PyLong_FromLong, ConstantInt::get(Type::getScalarTy<long>(*context), 3));
+        auto s1 = builder.CreateCall(cpy_PyNumber_Add, {v1, v2});
+        auto s2 = builder.CreateCall(cpy_PyNumber_Add, {s1, v3});
+        builder.CreateRet(s2);
         assert(!verifyFunction(*func, &errs()));
-
-    }
-
-    void handle_LOAD_FAST(int oparg) {
     }
 };
 
@@ -121,8 +82,8 @@ void *run(PyCodeObject *cpy_ir) {
     ctx = make_unique<MyContext>();
     ctx->mod->setDataLayout(jit->getDL());
     ctx->GenCode(cpy_ir);
-    jit->emitModule(*ctx->mod);
-    jit->addModule(move(ctx->mod), move(ctx->context));
-    auto sym = cantFail(jit->lookup("main"));
-    return reinterpret_cast<void *>(sym.getAddress());
+    return jit->emitModule(*ctx->mod);
+    // jit->addModule(move(ctx->mod), move(ctx->context));
+    // auto sym = cantFail(jit->lookup("main"));
+    // return reinterpret_cast<void *>(sym.getAddress());
 }

@@ -9,9 +9,16 @@
 #include <llvm/ExecutionEngine/Orc/ExecutionUtils.h>
 #include <llvm/ExecutionEngine/SectionMemoryManager.h>
 #include <llvm/Object/ELFObjectFile.h>
+#include <llvm/IR/LegacyPassManager.h>
+#include <llvm/Support/Memory.h>
+#include <llvm/Support/SmallVectorMemoryBuffer.h>
+#include <llvm/ADT/StringMap.h>
 
 class MyJIT {
 private:
+    static std::unique_ptr<llvm::StringMap<void *>> addr_map;
+    static const llvm::StringMap<void *> &addr_map2;
+
     std::unique_ptr<llvm::TargetMachine> machine;
     llvm::orc::ExecutionSession sess;
     llvm::orc::RTDyldObjectLinkingLayer object_layer;
@@ -26,19 +33,11 @@ public:
         cantFail(sess.endSession());
     }
 
-    static void Init() {
-        LLVMInitializeNativeTarget();
-        LLVMInitializeNativeAsmPrinter();
-    }
+    static void Init();
 
     static llvm::Expected<std::unique_ptr<MyJIT>> Create();
 
-    void addModule(std::unique_ptr<llvm::Module> mod, std::unique_ptr<llvm::LLVMContext> ctx) {
-        llvm::orc::ThreadSafeModule tmod(std::move(mod), std::move(ctx));
-        cantFail(compile_layer.add(dylib, std::move(tmod)));
-    }
-
-    void emitModule(llvm::Module &mod);
+    void *emitModule(llvm::Module &mod);
 
     llvm::DataLayout getDL() {
         return machine->createDataLayout();
