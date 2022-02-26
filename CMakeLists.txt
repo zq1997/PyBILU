@@ -14,7 +14,7 @@ ELSE()
     set(CPython_INCLUDE_DIRS "/opt/cpython/build/install-release/include/python3.10")
 ENDIF()
 
-add_library(pybilu SHARED main.cpp JIT.cpp IR.cpp)
+add_library(pybilu SHARED main.cpp JIT.cpp)
 target_include_directories(pybilu PRIVATE ${LLVM_INCLUDE_DIRS} ${CPython_INCLUDE_DIRS})
 separate_arguments(LLVM_DEFINITIONS_LIST NATIVE_COMMAND ${LLVM_DEFINITIONS})
 target_compile_definitions(pybilu PRIVATE ${LLVM_DEFINITIONS_LIST})

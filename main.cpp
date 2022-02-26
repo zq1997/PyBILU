@@ -4,8 +4,9 @@ using namespace std;
 
 #include <Python.h>
 
-void *run(PyCodeObject *);
+#include "JIT.h"
 
+static unique_ptr<MyJIT> jit;
 static Py_ssize_t extra_index;
 
 PyObject *vectorcall(PyObject *callable, PyObject *const *args, size_t nargsf, PyObject *kwnames) {
@@ -29,13 +30,16 @@ PyObject *apply(PyObject *, PyObject *maybe_func) {
         return nullptr;
     }
     auto func = reinterpret_cast<PyFunctionObject *>(maybe_func);
-    _PyCode_SetExtra(func->func_code, extra_index, run(reinterpret_cast<PyCodeObject *>(func->func_code)));
+    _PyCode_SetExtra(func->func_code, extra_index, jit->to_machine_code(func->func_code));
     func->vectorcall = vectorcall;
     return Py_NewRef(func);
 }
 
 PyMODINIT_FUNC
 PyInit_pybilu() {
+    MyJIT::init();
+    jit = make_unique<MyJIT>();
+
     static PyMethodDef meth_def[] = {
             {"apply", apply, METH_O},
             {}

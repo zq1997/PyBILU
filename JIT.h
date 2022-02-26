@@ -15,21 +15,23 @@
 #include <llvm/ADT/StringMap.h>
 
 class MyJIT {
-private:
+public:
     static std::unique_ptr<llvm::StringMap<void *>> addrMap;
+    static std::unique_ptr<llvm::TargetMachine> machine;
 
-    std::unique_ptr<llvm::TargetMachine> machine;
+    // std::unique_ptr<llvm::TargetMachine> machine{};
+    llvm::LLVMContext context{};
+    llvm::IRBuilder<> builder{context};
+    llvm::Module mod{"", context};
+    llvm::Type *t_PyType_Object{};
+    llvm::Type *t_PyObject{};
+    llvm::Type *t_PyObject_p{};
 
-    explicit MyJIT(std::unique_ptr<llvm::TargetMachine> machine_) : machine(move(machine_)) {}
+    MyJIT();
+    ~MyJIT() = default;
 
 public:
     static void init();
 
-    static llvm::Expected<std::unique_ptr<MyJIT>> create();
-
-    void *emitModule(llvm::Module &mod);
-
-    llvm::DataLayout getDL() {
-        return machine->createDataLayout();
-    }
+    void *to_machine_code(void *cpy_ir);
 };

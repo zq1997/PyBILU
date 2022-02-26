@@ -2,13 +2,8 @@ import pybilu
 
 
 @pybilu.apply
-def id1(x):
-    return x
+def add(x, y):
+    pass
 
 
-@pybilu.apply
-def id2(x):
-    return x
-
-
-print(id2(sum([100, 114414])))
+print(add(114414, 100))
