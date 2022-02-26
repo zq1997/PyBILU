@@ -1,8 +1,14 @@
 import pybilu
 
+
 @pybilu.apply
-def add(x, y):
-    return x + y
+def id1(x):
+    return x
 
 
-print(add(3, 4))
+@pybilu.apply
+def id2(x):
+    return x
+
+
+print(id2(sum([100, 114414])))

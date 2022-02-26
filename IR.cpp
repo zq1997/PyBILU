@@ -10,25 +10,25 @@ using namespace llvm;
 
 class MyContext {
 public:
-    unique_ptr<LLVMContext> context;
+    LLVMContext context;
     IRBuilder<> builder;
-    unique_ptr<Module> mod;
-    Type *type_PyObject_p = nullptr;
+    Module mod;
+    Type *t_PyType_Object = nullptr;
+    Type *t_PyObject = nullptr;
+    Type *t_PyObject_p = nullptr;
     Function *func = nullptr;
 
 public:
     MyContext() :
-            context(make_unique<LLVMContext>()),
-            builder(*context),
-            mod(make_unique<Module>("", *context)) {
-        func = Function::Create(
-                FunctionType::get(Type::getInt64Ty(*context)->getPointerTo(), false),
-                Function::ExternalLinkage,
-                "main",
-                mod.get()
-        );
-        BasicBlock *bb = BasicBlock::Create(*context, "entry", func);
-        builder.SetInsertPoint(bb);
+            context(),
+            builder(context),
+            mod("", context) {
+        t_PyType_Object = PointerType::getUnqual(context);
+        t_PyObject = StructType::create({
+                Type::getScalarTy<Py_ssize_t>(context),
+                t_PyType_Object->getPointerTo()
+        });
+        t_PyObject_p = t_PyObject->getPointerTo();
     }
 
     void GenCode(PyCodeObject *cpy_ir) {
@@ -41,32 +41,50 @@ public:
         //     auto opcode = _Py_OPCODE(*iter);
         //     auto oparg = _Py_OPARG(*iter);
         // }
-        auto cpy_PyLong_FromLong = Function::Create(
-                FunctionType::get(
-                        Type::getInt64Ty(*context)->getPointerTo(),
-                        {Type::getScalarTy<long>(*context)},
-                        false
-                ),
+        func = Function::Create(
+                FunctionType::get(t_PyObject_p, {t_PyObject_p->getPointerTo()}, false),
                 Function::ExternalLinkage,
-                "PyLong_FromLong",
-                mod.get()
+                "main",
+                &mod
         );
-        auto cpy_PyNumber_Add = Function::Create(
-                FunctionType::get(
-                        Type::getInt64Ty(*context)->getPointerTo(),
-                        {Type::getInt64Ty(*context)->getPointerTo(), Type::getInt64Ty(*context)->getPointerTo()},
-                        false
-                ),
-                Function::ExternalLinkage,
-                "PyNumber_Add",
-                mod.get()
-        );
-        auto v1 = builder.CreateCall(cpy_PyLong_FromLong, ConstantInt::get(Type::getScalarTy<long>(*context), 1));
-        auto v2 = builder.CreateCall(cpy_PyLong_FromLong, ConstantInt::get(Type::getScalarTy<long>(*context), 2));
-        auto v3 = builder.CreateCall(cpy_PyLong_FromLong, ConstantInt::get(Type::getScalarTy<long>(*context), 3));
-        auto s1 = builder.CreateCall(cpy_PyNumber_Add, {v1, v2});
-        auto s2 = builder.CreateCall(cpy_PyNumber_Add, {s1, v3});
-        builder.CreateRet(s2);
+        BasicBlock *bb = BasicBlock::Create(context, "entry", func);
+        builder.SetInsertPoint(bb);
+
+        auto args = func->getArg(0);
+        auto p = builder.CreateInBoundsGEP(t_PyObject_p, args, ConstantInt::get(Type::getScalarTy<long>(context), 0));
+        auto ret = builder.CreateLoad(t_PyObject_p, p);
+        p = builder.CreateStructGEP(t_PyObject, ret, 0);
+        Value *ref = builder.CreateLoad(Type::getScalarTy<Py_ssize_t>(context), p);
+        ref = builder.CreateNSWAdd(ref, ConstantInt::get(Type::getScalarTy<long>(context), 1));
+        builder.CreateStore(ref, p);
+
+        // auto ret = builder.CreateExtractValue(args, 0);
+        // auto cpy_PyLong_FromLong = Function::Create(
+        //         FunctionType::get(
+        //                 t_PyObject_p,
+        //                 {Type::getScalarTy<long>(context)},
+        //                 false
+        //         ),
+        //         Function::ExternalLinkage,
+        //         "PyLong_FromLong",
+        //         &mod
+        // );
+        // auto cpy_PyNumber_Add = Function::Create(
+        //         FunctionType::get(
+        //                 t_PyObject_p,
+        //                 {t_PyObject_p, t_PyObject_p},
+        //                 false
+        //         ),
+        //         Function::ExternalLinkage,
+        //         "PyNumber_Add",
+        //         mod
+        // );
+        // auto v1 = builder.CreateCall(cpy_PyLong_FromLong, ConstantInt::get(Type::getScalarTy<long>(context), 1));
+        // auto v2 = builder.CreateCall(cpy_PyLong_FromLong, ConstantInt::get(Type::getScalarTy<long>(context), 2));
+        // auto v3 = builder.CreateCall(cpy_PyLong_FromLong, ConstantInt::get(Type::getScalarTy<long>(context), 3));
+        // auto s1 = builder.CreateCall(cpy_PyNumber_Add, {v1, v2});
+        // auto ret = builder.CreateCall(cpy_PyNumber_Add, {s1, v3});
+        builder.CreateRet(ret);
         assert(!verifyFunction(*func, &errs()));
     }
 };
@@ -77,13 +95,16 @@ static unique_ptr<MyContext> ctx;
 
 
 void *run(PyCodeObject *cpy_ir) {
-    MyJIT::Init();
-    jit = cantFail(MyJIT::Create());
-    ctx = make_unique<MyContext>();
-    ctx->mod->setDataLayout(jit->getDL());
+    if (!jit) {
+        MyJIT::init();
+        jit = cantFail(MyJIT::create());
+        ctx = make_unique<MyContext>();
+        ctx->mod.setDataLayout(jit->getDL());
+    } else {
+        ctx->func->removeFromParent();
+        delete ctx->func;
+    }
     ctx->GenCode(cpy_ir);
-    return jit->emitModule(*ctx->mod);
-    // jit->addModule(move(ctx->mod), move(ctx->context));
-    // auto sym = cantFail(jit->lookup("main"));
-    // return reinterpret_cast<void *>(sym.getAddress());
+    ctx->mod.print(outs(), nullptr);
+    return jit->emitModule(ctx->mod);
 }

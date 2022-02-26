@@ -1,4 +1,5 @@
 #include <memory>
+#include <fstream>
 #include <iostream>
 
 
@@ -11,12 +12,12 @@ using namespace std;
 using namespace llvm;
 using namespace llvm::orc;
 
-std::unique_ptr<llvm::StringMap<void *>> MyJIT::addr_map;
+std::unique_ptr<llvm::StringMap<void *>> MyJIT::addrMap;
 
-void MyJIT::Init() {
+void MyJIT::init() {
     LLVMInitializeNativeTarget();
     LLVMInitializeNativeAsmPrinter();
-    addr_map = make_unique<StringMap<void *>, initializer_list<pair<StringRef, void *>>>(
+    addrMap = make_unique<StringMap<void *>, initializer_list<pair<StringRef, void *>>>(
             {
                     {"PyLong_FromLong", reinterpret_cast<void *>(PyLong_FromLong)},
                     {"PyNumber_Add",    reinterpret_cast<void *>(PyNumber_Add)},
@@ -24,7 +25,7 @@ void MyJIT::Init() {
     );
 }
 
-llvm::Expected<unique_ptr<MyJIT>> MyJIT::Create() {
+llvm::Expected<unique_ptr<MyJIT>> MyJIT::create() {
     auto tm_builder = JITTargetMachineBuilder::detectHost();
     if (!tm_builder) {
         return tm_builder.takeError();
@@ -49,35 +50,43 @@ void *MyJIT::emitModule(llvm::Module &mod) {
     SmallVectorMemoryBuffer buf(move(vec));
 
     auto obj = cantFail(object::ObjectFile::createELFObjectFile(buf.getMemBufferRef()));
+    ofstream my_file("/tmp/jit.o");
+    my_file.write(buf.getBufferStart(), buf.getBufferSize());
+
+    auto rel_text_sec = obj->section_end();
+    auto text_sec = obj->section_end();
     for (auto &rel_sec: obj->sections()) {
+        if (rel_sec.isText()) {
+            text_sec = rel_sec;
+        }
         auto sec = cantFail(rel_sec.getRelocatedSection());
         if (sec == obj->section_end() || !sec->isText()) {
             continue;
         }
-        auto sec_data = cantFail(sec->getContents());
-        SmallVector<char, 0> code(sec_data.begin(), sec_data.end());
-        for (auto &sym: rel_sec.relocations()) {
+        text_sec = *sec;
+        rel_text_sec = rel_sec;
+        break;
+    }
+    if (text_sec == obj->section_end()) {
+        cerr << "错误" << endl;
+        return nullptr;
+    }
+    auto code_data = cantFail(text_sec->getContents());
+    SmallVector<char, 0> code(code_data.begin(), code_data.end());
+    if (rel_text_sec != obj->section_end()) {
+        for (auto &sym: rel_text_sec->relocations()) {
             auto name = cantFail(sym.getSymbol()->getName());
             auto offset = sym.getOffset();
-            cout << "    sym: " << name.str()
-                 << " " << offset
-                 << " " << (*addr_map)[name]
-                 << endl;
-            *(void **) (&code[offset]) = (*addr_map)[name];
+            *(void **) (&code[offset]) = (*addrMap)[name];
         }
-        error_code ec;
-        auto llvm_mem = sys::Memory::allocateMappedMemory(
-                code.size(), nullptr, sys::Memory::ProtectionFlags::MF_RWE_MASK, ec);
-        if (ec) {
-            return nullptr;
-        }
-        cout << "allocating: " << code.size() << endl
-             << "ec: " << ec << endl
-             << "allocated: " << llvm_mem.allocatedSize() << " at " << llvm_mem.base() << endl;
-        memcpy(llvm_mem.base(), code.data(), code.size());
-        return llvm_mem.base();
     }
-    return nullptr;
-    // ofstream my_file("/tmp/jit.o");
-    // my_file.write(buf.getBufferStart(), buf.getBufferSize());
+    error_code ec;
+    auto llvm_mem = sys::Memory::allocateMappedMemory(
+            code.size(), nullptr, sys::Memory::ProtectionFlags::MF_RWE_MASK, ec);
+    if (ec) {
+        cerr << "错误" << endl;
+        return nullptr;
+    }
+    memcpy(llvm_mem.base(), code.data(), code.size());
+    return llvm_mem.base();
 }

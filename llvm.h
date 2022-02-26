@@ -16,16 +16,16 @@
 
 class MyJIT {
 private:
-    static std::unique_ptr<llvm::StringMap<void *>> addr_map;
+    static std::unique_ptr<llvm::StringMap<void *>> addrMap;
 
     std::unique_ptr<llvm::TargetMachine> machine;
 
     explicit MyJIT(std::unique_ptr<llvm::TargetMachine> machine_) : machine(move(machine_)) {}
 
 public:
-    static void Init();
+    static void init();
 
-    static llvm::Expected<std::unique_ptr<MyJIT>> Create();
+    static llvm::Expected<std::unique_ptr<MyJIT>> create();
 
     void *emitModule(llvm::Module &mod);
 
