@@ -1,7 +1,7 @@
 #include <memory>
 #include <fstream>
 #include <iostream>
-// #include <stdexcept>
+#include <stdexcept>
 
 #include <Python.h>
 
@@ -10,39 +10,51 @@
 
 using namespace std;
 using namespace llvm;
-using namespace llvm::orc;
 
-std::unique_ptr<StringMap<void *>> MyJIT::addrMap;
-std::unique_ptr<TargetMachine> MyJIT::machine;
-
-// template<typename T>
-// void check(Expected<T> &v) {
-//     if (!v) {
-//         // throw runtime_error(toString(v.takeError()));
-//         throw runtime_error("错误");
-//     }
-// }
+static unique_ptr<StringMap<void *>> addrMap;
+static unique_ptr<TargetMachine> machine;
 
 void MyJIT::init() {
-    LLVMInitializeNativeTarget();
-    LLVMInitializeNativeAsmPrinter();
     addrMap = make_unique<StringMap<void *>, initializer_list<pair<StringRef, void *>>>(
             {
                     {"PyLong_FromLong", reinterpret_cast<void *>(PyLong_FromLong)},
                     {"PyNumber_Add", reinterpret_cast<void *>(PyNumber_Add)},
             }
     );
-    auto tm_builder = JITTargetMachineBuilder::detectHost();
-    if (!tm_builder) {}
-    // check(tm_builder);
-    tm_builder->setCodeGenOptLevel(CodeGenOpt::Aggressive);
-    auto tm = tm_builder->createTargetMachine();
-    if (!tm) {}
-    // check(tm);
-    machine = move(*tm);
+
+    if (LLVMInitializeNativeTarget() || LLVMInitializeNativeAsmPrinter()) {
+        throw runtime_error("err");
+    }
+
+    TargetOptions options;
+    auto triple = sys::getProcessTriple();
+    SubtargetFeatures features;
+    StringMap<bool> feature_map;
+    sys::getHostCPUFeatures(feature_map);
+    for (auto &f: feature_map) {
+        features.AddFeature(f.first(), f.second);
+    }
+
+    std::string err;
+    auto *target = TargetRegistry::lookupTarget(triple, err);
+    if (!target) {
+        throw runtime_error(err);
+    }
+    auto *tm = target->createTargetMachine(
+            triple,
+            sys::getHostCPUName(),
+            features.getString(),
+            options, Reloc::Model::Static, CodeModel::Model::Large,
+            CodeGenOpt::Aggressive, false
+    );
+    if (!tm) {
+        throw runtime_error("");
+    }
+    machine = unique_ptr<TargetMachine>(tm);
 }
 
 MyJIT::MyJIT() {
+    mod.setTargetTriple(machine->getTargetTriple().getTriple());
     mod.setDataLayout(machine->createDataLayout());
 
     t_PyType_Object = PointerType::getUnqual(context);
@@ -53,14 +65,14 @@ MyJIT::MyJIT() {
     t_PyObject_p = t_PyObject->getPointerTo();
 }
 
-void *emitModule(MyJIT &jit) {
+void *emitModule(Module &mod) {
     legacy::PassManager pass;
     SmallVector<char, 0> vec;
     raw_svector_ostream os(vec);
-    if (MyJIT::machine->addPassesToEmitFile(pass, os, nullptr, CodeGenFileType::CGFT_ObjectFile)) {
+    if (machine->addPassesToEmitFile(pass, os, nullptr, CodeGenFileType::CGFT_ObjectFile)) {
         errs() << "TheTargetMachine can't emit a file of this type";
     }
-    pass.run(jit.mod);
+    pass.run(mod);
     SmallVectorMemoryBuffer buf(move(vec));
 
     auto obj = cantFail(object::ObjectFile::createELFObjectFile(buf.getMemBufferRef()));
@@ -91,7 +103,7 @@ void *emitModule(MyJIT &jit) {
         for (auto &sym: rel_text_sec->relocations()) {
             auto name = cantFail(sym.getSymbol()->getName());
             auto offset = sym.getOffset();
-            *(void **) (&code[offset]) = (*MyJIT::addrMap)[name];
+            *(void **) (&code[offset]) = (*addrMap)[name];
         }
     }
     error_code ec;
@@ -121,6 +133,8 @@ void *MyJIT::to_machine_code(void *cpy_ir) {
             "main",
             &mod
     );
+    func->setAttributes(attrs);
+
     BasicBlock *bb = BasicBlock::Create(context, "entry", func);
     builder.SetInsertPoint(bb);
 
@@ -144,7 +158,7 @@ void *MyJIT::to_machine_code(void *cpy_ir) {
     assert(!verifyFunction(*func, &errs()));
     mod.print(llvm::outs(), nullptr);
 
-    auto addr = emitModule(*this);
+    auto addr = emitModule(mod);
     func->removeFromParent();
     delete func;
     return addr;
