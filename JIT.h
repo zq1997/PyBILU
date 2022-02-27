@@ -14,11 +14,17 @@
 #include <llvm/Support/SmallVectorMemoryBuffer.h>
 #include <llvm/ADT/StringMap.h>
 
+#include <llvm/Transforms/InstCombine/InstCombine.h>
+#include <llvm/Transforms/Scalar.h>
+#include <llvm/Transforms/Scalar/GVN.h>
+#include <llvm/Transforms/Scalar/TailRecursionElimination.h>
+
 class MyJIT {
 private:
     llvm::LLVMContext context{};
     llvm::IRBuilder<> builder{context};
     llvm::Module mod{"", context};
+    llvm::legacy::FunctionPassManager opt_pm{&mod};
     llvm::AttributeList attrs{
             llvm::AttributeList::get(context, llvm::AttributeList::FunctionIndex, {llvm::Attribute::NoUnwind})
     };

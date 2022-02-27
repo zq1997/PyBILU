@@ -40,22 +40,28 @@ void MyJIT::init() {
     if (!target) {
         throw runtime_error(err);
     }
-    auto *tm = target->createTargetMachine(
+    machine = unique_ptr<TargetMachine>(target->createTargetMachine(
             triple,
             sys::getHostCPUName(),
             features.getString(),
-            options, Reloc::Model::Static, CodeModel::Model::Large,
-            CodeGenOpt::Aggressive, false
-    );
-    if (!tm) {
+            options, Reloc::Model::ROPI, CodeModel::Model::Large,
+            CodeGenOpt::Aggressive
+    ));
+    if (!machine) {
         throw runtime_error("");
     }
-    machine = unique_ptr<TargetMachine>(tm);
 }
 
 MyJIT::MyJIT() {
     mod.setTargetTriple(machine->getTargetTriple().getTriple());
     mod.setDataLayout(machine->createDataLayout());
+
+    opt_pm.add(createInstructionCombiningPass());
+    opt_pm.add(createReassociatePass());
+    opt_pm.add(createGVNPass());
+    opt_pm.add(createCFGSimplificationPass());
+    opt_pm.add(createTailCallEliminationPass());
+    opt_pm.doInitialization();
 
     t_PyType_Object = PointerType::getUnqual(context);
     t_PyObject = StructType::create({
@@ -65,7 +71,9 @@ MyJIT::MyJIT() {
     t_PyObject_p = t_PyObject->getPointerTo();
 }
 
-void *emitModule(Module &mod) {
+void *emitModule(Module &mod, Function &func) {
+    mod.print(llvm::outs(), nullptr);
+
     legacy::PassManager pass;
     SmallVector<char, 0> vec;
     raw_svector_ostream os(vec);
@@ -75,7 +83,7 @@ void *emitModule(Module &mod) {
     pass.run(mod);
     SmallVectorMemoryBuffer buf(move(vec));
 
-    auto obj = cantFail(object::ObjectFile::createELFObjectFile(buf.getMemBufferRef()));
+    auto obj = cantFail(object::ObjectFile::createObjectFile(buf.getMemBufferRef()));
     ofstream my_file("/tmp/jit.o");
     my_file.write(buf.getBufferStart(), buf.getBufferSize());
 
@@ -103,6 +111,7 @@ void *emitModule(Module &mod) {
         for (auto &sym: rel_text_sec->relocations()) {
             auto name = cantFail(sym.getSymbol()->getName());
             auto offset = sym.getOffset();
+            cout << "sym: " << name.str() << " at " << offset << endl;
             *(void **) (&code[offset]) = (*addrMap)[name];
         }
     }
@@ -127,6 +136,7 @@ void *MyJIT::to_machine_code(void *cpy_ir) {
     //     auto opcode = _Py_OPCODE(*iter);
     //     auto oparg = _Py_OPARG(*iter);
     // }
+
     auto func = Function::Create(
             FunctionType::get(t_PyObject_p, {t_PyObject_p->getPointerTo()}, false),
             Function::ExternalLinkage,
@@ -156,9 +166,9 @@ void *MyJIT::to_machine_code(void *cpy_ir) {
 
     builder.CreateRet(ret);
     assert(!verifyFunction(*func, &errs()));
-    mod.print(llvm::outs(), nullptr);
 
-    auto addr = emitModule(mod);
+    opt_pm.run(*func);
+    auto addr = emitModule(mod, *func);
     func->removeFromParent();
     delete func;
     return addr;
