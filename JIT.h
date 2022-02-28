@@ -7,6 +7,7 @@
 #include <llvm/Target/TargetMachine.h>
 #include <llvm-c/Target.h>
 #include <llvm/Object/ELFObjectFile.h>
+#include <llvm/Passes/PassBuilder.h>
 #include <llvm/IR/LegacyPassManager.h>
 #include <llvm/Support/Host.h>
 #include <llvm/Support/TargetRegistry.h>
@@ -15,7 +16,7 @@
 #include <llvm/ADT/StringMap.h>
 
 #include <llvm/Transforms/InstCombine/InstCombine.h>
-#include <llvm/Transforms/Scalar.h>
+#include <llvm/Transforms/Scalar/InstSimplifyPass.h>
 #include <llvm/Transforms/Scalar/GVN.h>
 #include <llvm/Transforms/Scalar/TailRecursionElimination.h>
 
@@ -24,14 +25,27 @@ private:
     llvm::LLVMContext context{};
     llvm::IRBuilder<> builder{context};
     llvm::Module mod{"", context};
-    llvm::legacy::FunctionPassManager opt_pm{&mod};
+
+    llvm::LoopAnalysisManager opt_lam{};
+    llvm::CGSCCAnalysisManager opt_cgam{};
+    llvm::ModuleAnalysisManager opt_mam{};
+    llvm::FunctionAnalysisManager opt_fam{};
+    llvm::FunctionPassManager opt_fpm{};
+
+    llvm::legacy::PassManager out_pm;
+    llvm::SmallVector<char> out_vec{};
+    llvm::raw_svector_ostream out_stream{out_vec};
+
     llvm::AttributeList attrs{
             llvm::AttributeList::get(context, llvm::AttributeList::FunctionIndex, {llvm::Attribute::NoUnwind})
     };
+
     llvm::Type *t_PyType_Object{};
     llvm::Type *t_PyObject{};
     llvm::Type *t_PyObject_p{};
 
+    llvm::Function *f_PyNumber_Add{};
+    llvm::Function *f_PyLong_FromLong{};
 public:
     static void init();
 

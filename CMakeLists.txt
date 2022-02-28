@@ -11,7 +11,7 @@ IF(CMAKE_BUILD_TYPE MATCHES Debug)
 ELSE()
     find_package(LLVM 13 REQUIRED CONFIG PATHS /opt/llvm/build/compile-release/lib/cmake/llvm/ NO_DEFAULT_PATH)
     add_link_options(-s -Wl,--exclude-libs,ALL,--gc-sections)
-    llvm_map_components_to_libnames(llvm_libs core native orcjit)
+    llvm_map_components_to_libnames(llvm_libs native)
     set(CPython_INCLUDE_DIRS "/opt/cpython/build/install-release/include/python3.10")
 ENDIF()
 
@@ -20,7 +20,7 @@ target_include_directories(pybilu PRIVATE ${LLVM_INCLUDE_DIRS} ${CPython_INCLUDE
 separate_arguments(LLVM_DEFINITIONS_LIST NATIVE_COMMAND ${LLVM_DEFINITIONS})
 target_compile_definitions(pybilu PRIVATE ${LLVM_DEFINITIONS_LIST})
 target_compile_options(pybilu PRIVATE -fno-rtti)
-#target_precompile_headers(pybilu PRIVATE "llvm.h")
+#target_precompile_headers(pybilu PRIVATE "JIT.h")
 target_link_directories(pybilu PRIVATE ${LLVM_LIBRARY_DIRS})
 target_link_libraries(pybilu PRIVATE ${llvm_libs})
 set_target_properties(pybilu PROPERTIES
