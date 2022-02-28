@@ -30,8 +30,12 @@ PyObject *apply(PyObject *, PyObject *maybe_func) {
         return nullptr;
     }
     auto func = reinterpret_cast<PyFunctionObject *>(maybe_func);
-    _PyCode_SetExtra(func->func_code, extra_index, jit->to_machine_code(func->func_code));
-    func->vectorcall = vectorcall;
+    try {
+        _PyCode_SetExtra(func->func_code, extra_index, jit->to_machine_code(func->func_code));
+        func->vectorcall = vectorcall;
+    } catch (runtime_error &err) {
+        cerr << "错误：" << err.what() << endl;
+    }
     return Py_NewRef(func);
 }
 

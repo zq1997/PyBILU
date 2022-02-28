@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 project(PyBILU)
 set(CMAKE_VERBOSE_MAKEFILE ON CACHE BOOL "ON" FORCE)
-set(CMAKE_CXX_STANDARD 14)
+set(CMAKE_CXX_STANDARD 17)
 
 IF(CMAKE_BUILD_TYPE MATCHES Debug)
     find_package(LLVM 13 REQUIRED CONFIG PATHS /opt/llvm/build/compile-debug/lib/cmake/llvm/ NO_DEFAULT_PATH)

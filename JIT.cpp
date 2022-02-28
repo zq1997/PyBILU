@@ -14,6 +14,15 @@ using namespace llvm;
 static unique_ptr<StringMap<char *>> addrMap;
 static unique_ptr<TargetMachine> machine;
 
+template <typename T>
+T check(Expected<T> v) {
+    if (v)
+        return std::move(*v);
+    else {
+        throw runtime_error(toString(v.takeError()));
+    }
+}
+
 void MyJIT::init() {
     addrMap = make_unique<StringMap<char *>, initializer_list<pair<StringRef, char *>>>(
             {
@@ -44,8 +53,11 @@ void MyJIT::init() {
             triple,
             sys::getHostCPUName(),
             features.getString(),
-            options, Reloc::Model::ROPI, CodeModel::Model::Large,
-            CodeGenOpt::Aggressive
+            options,
+            Reloc::Model::ROPI,
+            CodeModel::Model::Large,
+            CodeGenOpt::Aggressive,
+            true
     ));
     if (!machine) {
         throw runtime_error("");
@@ -101,9 +113,7 @@ MyJIT::MyJIT() {
 }
 
 void *emitModule(MemoryBufferRef &buf) {
-    // auto obj = cantFail(object::ObjectFile::createELFObjectFile(buf));
-    auto obj = cantFail(object::ObjectFile::createObjectFile(buf));
-    // TODO: 确保ELF
+    auto obj = check(object::ObjectFile::createObjectFile(buf));
 
     auto rel_text_sec = obj->section_end();
     auto text_sec = obj->section_end();
@@ -111,7 +121,7 @@ void *emitModule(MemoryBufferRef &buf) {
         if (rel_sec.isText()) {
             text_sec = rel_sec;
         }
-        auto sec = cantFail(rel_sec.getRelocatedSection());
+        auto sec = check(rel_sec.getRelocatedSection());
         if (sec == obj->section_end() || !sec->isText()) {
             continue;
         }
@@ -130,13 +140,19 @@ void *emitModule(MemoryBufferRef &buf) {
     auto code = const_cast<char *>(sec_content->data());
     auto code_size = sec_content->size();
 
+    auto[support, resolve] = object::getRelocationResolver(*obj);
+
     if (rel_text_sec != obj->section_end()) {
         for (auto &rel: rel_text_sec->relocations()) {
-            auto name = cantFail(rel.getSymbol()->getName());
+            if (!support(rel.getType())) {
+                throw runtime_error("bad");
+            }
+            auto name = check(rel.getSymbol()->getName());
+            auto sym_at = addrMap->lookup(name);
             auto offset = rel.getOffset();
-            auto addend = cantFail(object::ELFRelocationRef(rel).getAddend());
-            cout << reinterpret_cast<void *>(offset) << ":\t" << name.str() << "+" << addend << endl;
-            *(void **) (&code[offset]) = addrMap->lookup(name) + addend;
+            auto fix = object::resolveRelocation(resolve, rel, reinterpret_cast<uint64_t>(sym_at), 0);
+            cout << reinterpret_cast<void *>(offset) << ":\t" << name.str() << " -> " << fix << endl;
+            *(uint64_t *) (&code[offset]) = fix;
         }
     }
     error_code ec;
@@ -189,7 +205,7 @@ void *MyJIT::to_machine_code(void *cpy_ir) {
 
     // mod.print(llvm::outs(), nullptr);
     opt_fpm.run(*func, opt_fam);
-    // mod.print(llvm::outs(), nullptr);
+    mod.print(llvm::outs(), nullptr);
     out_vec.clear();
     out_pm.run(mod);
     ofstream("/tmp/jit.o").write(out_vec.data(), out_vec.size());

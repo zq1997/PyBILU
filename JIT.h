@@ -6,7 +6,6 @@
 #include <llvm/IR/Verifier.h>
 #include <llvm/Target/TargetMachine.h>
 #include <llvm-c/Target.h>
-#include <llvm/Object/ELFObjectFile.h>
 #include <llvm/Passes/PassBuilder.h>
 #include <llvm/IR/LegacyPassManager.h>
 #include <llvm/Support/Host.h>
@@ -14,11 +13,11 @@
 #include <llvm/Support/Memory.h>
 #include <llvm/Support/SmallVectorMemoryBuffer.h>
 #include <llvm/ADT/StringMap.h>
-
 #include <llvm/Transforms/InstCombine/InstCombine.h>
 #include <llvm/Transforms/Scalar/InstSimplifyPass.h>
 #include <llvm/Transforms/Scalar/GVN.h>
 #include <llvm/Transforms/Scalar/TailRecursionElimination.h>
+#include <llvm/Object/RelocationResolver.h>
 
 class MyJIT {
 private:
@@ -37,7 +36,12 @@ private:
     llvm::raw_svector_ostream out_stream{out_vec};
 
     llvm::AttributeList attrs{
-            llvm::AttributeList::get(context, llvm::AttributeList::FunctionIndex, {llvm::Attribute::NoUnwind})
+            llvm::AttributeList::get(
+                    context, llvm::AttributeList::FunctionIndex,
+                    llvm::AttrBuilder()
+                            .addAttribute(llvm::Attribute::NoUnwind)
+                            .addAttribute("tune-cpu", llvm::sys::getHostCPUName())
+            )
     };
 
     llvm::Type *t_PyType_Object{};
