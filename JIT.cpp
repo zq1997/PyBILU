@@ -16,8 +16,7 @@ static unique_ptr<TargetMachine> machine;
 struct CallTable {
     void *PyNumber_Add{reinterpret_cast<void *>(::PyNumber_Add)};
     void *PyNumber_Multiply{reinterpret_cast<void *>(::PyNumber_Multiply)};
-    void *PyLong_FromLong{reinterpret_cast<void *>(::PyLong_FromLong)};
-} extern const callTable{};
+} extern const call_table{};
 
 template<typename T>
 T check(Expected<T> v) {
@@ -28,12 +27,15 @@ T check(Expected<T> v) {
     }
 }
 
-void MyJIT::init() {
-    if (LLVMInitializeNativeTarget() || LLVMInitializeNativeAsmPrinter()) {
-        throw runtime_error("err");
+inline void throwIf(bool cond, const string &msg) {
+    if (cond) {
+        throw runtime_error(msg);
     }
+}
 
-    TargetOptions options;
+void MyJIT::init() {
+    throwIf(LLVMInitializeNativeTarget() || LLVMInitializeNativeAsmPrinter(), "initialization failed");
+
     auto triple = sys::getProcessTriple();
     SubtargetFeatures features;
     StringMap<bool> feature_map;
@@ -44,21 +46,17 @@ void MyJIT::init() {
 
     std::string err;
     auto *target = TargetRegistry::lookupTarget(triple, err);
-    if (!target) {
-        throw runtime_error(err);
-    }
+    throwIf(!target, err);
     machine = unique_ptr<TargetMachine>(target->createTargetMachine(
             triple,
             sys::getHostCPUName(),
             features.getString(),
-            options,
+            TargetOptions(),
             Reloc::Model::PIC_,
             CodeModel::Model::Small,
             CodeGenOpt::Aggressive
     ));
-    if (!machine) {
-        throw runtime_error("");
-    }
+    throwIf(!machine, "cannot create TargetMachine");
 }
 
 MyJIT::MyJIT() {
@@ -66,60 +64,24 @@ MyJIT::MyJIT() {
     mod.setDataLayout(machine->createDataLayout());
 
     PassBuilder pb{machine.get()};
-    pb.registerModuleAnalyses(opt_mam);
-    pb.registerCGSCCAnalyses(opt_cgam);
-    pb.registerFunctionAnalyses(opt_fam);
-    pb.registerLoopAnalyses(opt_lam);
-    pb.crossRegisterProxies(opt_lam, opt_fam, opt_cgam, opt_mam);
-    opt_fpm = pb.buildFunctionSimplificationPipeline(
+    pb.registerModuleAnalyses(opt_MAM);
+    pb.registerCGSCCAnalyses(opt_CGAM);
+    pb.registerFunctionAnalyses(opt_FAM);
+    pb.registerLoopAnalyses(opt_LAM);
+    pb.crossRegisterProxies(opt_LAM, opt_FAM, opt_CGAM, opt_MAM);
+    opt_FPM = pb.buildFunctionSimplificationPipeline(
             PassBuilder::OptimizationLevel::O3,
             ThinOrFullLTOPhase::None
     );
 
-    if (machine->addPassesToEmitFile(out_pm, out_stream, nullptr, CodeGenFileType::CGFT_ObjectFile)) {
-        throw runtime_error("add emit pass error");
-    }
+    throwIf(machine->addPassesToEmitFile(out_PM, out_stream, nullptr, CodeGenFileType::CGFT_ObjectFile),
+            "add emit pass error");
 }
 
-void *emitModule(MemoryBufferRef &buf) {
-    auto obj = check(object::ObjectFile::createObjectFile(buf));
-
-    auto text_sec = obj->section_end();
-    for (auto &sec: obj->sections()) {
-        assert(sec.relocations().empty());
-        if (sec.isText()) {
-            assert(text_sec == obj->section_end());
-            text_sec = sec;
-        }
-    }
-    assert(text_sec != obj->section_end());
-
-    auto sec_content = text_sec->getContents();
-    if (!sec_content) {
-        throw runtime_error("bad section");
-    }
-    auto code = const_cast<char *>(sec_content->data());
-    auto code_size = sec_content->size();
-
-    error_code ec;
-    auto flag = sys::Memory::ProtectionFlags::MF_RWE_MASK;
-    auto llvm_mem = sys::Memory::allocateMappedMemory(code_size, nullptr, flag, ec);
-    if (ec) {
-        throw runtime_error("allocation error");
-    }
-    memcpy(llvm_mem.base(), code, code_size);
-    return llvm_mem.base();
-}
-
-CallInst *createCall(MyJIT &jit, Value *table, void *const &func, Type *result, initializer_list<Value *> args) {
-    Type *arg_types[args.size()];
-    Type **type = arg_types;
-    for (auto &arg: args) {
-        *type++ = arg->getType();
-    }
-    ArrayRef<Type *> x{arg_types, args.size()};
-    auto bf_type = FunctionType::get(result, x, false);
-    auto offset = reinterpret_cast<const char *>(&func) - reinterpret_cast<const char *>(&callTable);
+CallInst *createCall(MyJIT &jit, Value *table, void *const &func, Type *result,
+        ArrayRef<Type *> arg_types, initializer_list<Value *> args) {
+    auto bf_type = FunctionType::get(result, arg_types, false);
+    auto offset = reinterpret_cast<const char *>(&func) - reinterpret_cast<const char *>(&call_table);
     auto entry = jit.builder.CreateInBoundsGEP(jit.ctype_char, table,
             ConstantInt::get(jit.ctype_ptrdiff, offset));
     entry = jit.builder.CreatePointerCast(entry, bf_type->getPointerTo()->getPointerTo());
@@ -127,7 +89,7 @@ CallInst *createCall(MyJIT &jit, Value *table, void *const &func, Type *result, 
     return jit.builder.CreateCall(bf_type, entry, args);
 }
 
-void *MyJIT::to_machine_code(void *cpy_ir) {
+void *MyJIT::compile(void *cpy_ir) {
     // assert(PyBytes_CheckExact(cpy_ir->co_code));
     // auto instr_arr = PyBytes_AS_STRING(cpy_ir->co_code);
     // auto instr_size = PyBytes_GET_SIZE(cpy_ir->co_code);
@@ -156,21 +118,41 @@ void *MyJIT::to_machine_code(void *cpy_ir) {
     auto args = func->getArg(1);
     auto l = builder.CreateLoad(t_PyObject_p, builder.CreateConstInBoundsGEP1_32(t_PyObject_p, args, 0));
     auto r = builder.CreateLoad(t_PyObject_p, builder.CreateConstInBoundsGEP1_32(t_PyObject_p, args, 1));
-    auto ll = createCall(*this, table, callTable.PyNumber_Multiply, t_PyObject_p, {l, l});
-    auto rr = createCall(*this, table, callTable.PyNumber_Multiply, t_PyObject_p, {r, r});
-    auto ret = createCall(*this, table, callTable.PyNumber_Add, t_PyObject_p, {ll, rr});
+    Type *arg_types[]{t_PyObject_p, t_PyObject_p};
+    auto ll = createCall(*this, table, call_table.PyNumber_Multiply, t_PyObject_p, arg_types, {l, l});
+    auto rr = createCall(*this, table, call_table.PyNumber_Multiply, t_PyObject_p, arg_types, {r, r});
+    auto ret = createCall(*this, table, call_table.PyNumber_Add, t_PyObject_p, arg_types, {ll, rr});
 
     builder.CreateRet(ret);
     assert(!verifyFunction(*func, &errs()));
 
-    opt_fpm.run(*func, opt_fam);
+    opt_FPM.run(*func, opt_FAM);
     // mod.print(llvm::outs(), nullptr);
     out_vec.clear();
-    out_pm.run(mod);
-    ofstream("/tmp/jit.o").write(out_vec.data(), out_vec.size());
-    MemoryBufferRef buf(StringRef(out_vec.data(), out_vec.size()), "");
-    auto addr = emitModule(buf);
+    out_PM.run(mod);
     func->removeFromParent();
     delete func;
-    return addr;
+    ofstream("/tmp/jit.o").write(out_vec.data(), out_vec.size());
+    MemoryBufferRef buf(StringRef(out_vec.data(), out_vec.size()), "");
+
+    auto obj = check(object::ObjectFile::createObjectFile(buf));
+    auto sec = obj->section_end();
+    for (auto &s: obj->sections()) {
+        assert(s.relocations().empty());
+        if (s.isText()) {
+            assert(sec == obj->section_end());
+            sec = s;
+        }
+    }
+    assert(sec != obj->section_end());
+    assert(sec->isText());
+    auto sec_content = check(sec->getContents());
+
+    error_code ec;
+    auto flag = sys::Memory::ProtectionFlags::MF_RWE_MASK;
+    auto llvm_mem = sys::Memory::allocateMappedMemory(sec_content.size(), nullptr, flag, ec);
+    throwIf(bool(ec), ec.message());
+    memcpy(llvm_mem.base(), sec_content.data(), sec_content.size());
+
+    return llvm_mem.base();
 }

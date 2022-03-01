@@ -6,21 +6,21 @@ using namespace std;
 
 #include "JIT.h"
 
-extern const struct CallTable callTable;
+extern const struct CallTable call_table;
 static unique_ptr<MyJIT> jit;
-static Py_ssize_t extra_index;
+static Py_ssize_t code_extra_index;
 
 PyObject *vectorcall(PyObject *callable, PyObject *const *args, size_t nargsf, PyObject *kwnames) {
     assert(PyFunction_Check(callable));
     auto func = reinterpret_cast<PyFunctionObject *>(callable);
     // argument check here
     // auto nargs = PyVectorcall_NARGS(nargsf);
-    PyObject *(*jit_func)(decltype(&callTable), PyObject *const *);
-    _PyCode_GetExtra(func->func_code, extra_index, reinterpret_cast<void **>(&jit_func));
-    return jit_func(&callTable, args);
+    PyObject *(*jit_func)(decltype(&call_table), PyObject *const *);
+    _PyCode_GetExtra(func->func_code, code_extra_index, reinterpret_cast<void **>(&jit_func));
+    return jit_func(&call_table, args);
 }
 
-void free_extra(void *extra) {
+void freeExtra(void *extra) {
     // auto code_extra = reinterpret_cast<CodeExtra *>(extra);
     // cout << "free " << code_extra << endl;
 }
@@ -31,24 +31,28 @@ PyObject *apply(PyObject *, PyObject *maybe_func) {
         return nullptr;
     }
     auto func = reinterpret_cast<PyFunctionObject *>(maybe_func);
+    void *compiled_func;
     try {
-        _PyCode_SetExtra(func->func_code, extra_index, jit->to_machine_code(func->func_code));
-        func->vectorcall = vectorcall;
+        compiled_func = jit->compile(func->func_code);
     } catch (runtime_error &err) {
-        cerr << "错误：" << err.what() << endl;
+        PyErr_SetString(PyExc_RuntimeError, err.what());
+        return nullptr;
     }
+    _PyCode_SetExtra(func->func_code, code_extra_index, compiled_func);
+    func->vectorcall = vectorcall;
     return Py_NewRef(func);
 }
 
-PyMODINIT_FUNC
-PyInit_pybilu() {
-    MyJIT::init();
-    jit = make_unique<MyJIT>();
+PyMODINIT_FUNC PyInit_pybilu() {
+    try {
+        MyJIT::init();
+        jit = make_unique<MyJIT>();
+    } catch (runtime_error &err) {
+        PyErr_SetString(PyExc_RuntimeError, err.what());
+        return nullptr;
+    }
 
-    static PyMethodDef meth_def[] = {
-            {"apply", apply, METH_O},
-            {}
-    };
+    static PyMethodDef meth_def[] = {{"apply", apply, METH_O}, {}};
     static PyModuleDef mod_def = {
             PyModuleDef_HEAD_INIT,
             "pybilu",
@@ -56,8 +60,8 @@ PyInit_pybilu() {
             -1,
             meth_def
     };
-    extra_index = _PyEval_RequestCodeExtraIndex(free_extra);
-    if (extra_index < 0) {
+    code_extra_index = _PyEval_RequestCodeExtraIndex(freeExtra);
+    if (code_extra_index < 0) {
         PyErr_SetString(PyExc_TypeError, "failed to setup");
         return nullptr;
     }

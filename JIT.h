@@ -27,13 +27,13 @@ public:
     llvm::IRBuilder<> builder{context};
     llvm::Module mod{"", context};
 
-    llvm::LoopAnalysisManager opt_lam{};
-    llvm::CGSCCAnalysisManager opt_cgam{};
-    llvm::ModuleAnalysisManager opt_mam{};
-    llvm::FunctionAnalysisManager opt_fam{};
-    llvm::FunctionPassManager opt_fpm{};
+    llvm::LoopAnalysisManager opt_LAM{};
+    llvm::CGSCCAnalysisManager opt_CGAM{};
+    llvm::ModuleAnalysisManager opt_MAM{};
+    llvm::FunctionAnalysisManager opt_FAM{};
+    llvm::FunctionPassManager opt_FPM{};
 
-    llvm::legacy::PassManager out_pm;
+    llvm::legacy::PassManager out_PM;
     llvm::SmallVector<char> out_vec{};
     llvm::raw_svector_ostream out_stream{out_vec};
 
@@ -60,5 +60,5 @@ public:
 
     MyJIT();
 
-    void *to_machine_code(void *cpy_ir);
+    void *compile(void *cpy_ir);
 };
