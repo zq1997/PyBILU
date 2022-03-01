@@ -6,6 +6,7 @@ using namespace std;
 
 #include "JIT.h"
 
+extern const struct CallTable callTable;
 static unique_ptr<MyJIT> jit;
 static Py_ssize_t extra_index;
 
@@ -14,9 +15,9 @@ PyObject *vectorcall(PyObject *callable, PyObject *const *args, size_t nargsf, P
     auto func = reinterpret_cast<PyFunctionObject *>(callable);
     // argument check here
     // auto nargs = PyVectorcall_NARGS(nargsf);
-    PyObject *(*jit_func)(PyObject *const *);
+    PyObject *(*jit_func)(decltype(&callTable), PyObject *const *);
     _PyCode_GetExtra(func->func_code, extra_index, reinterpret_cast<void **>(&jit_func));
-    return jit_func(args);
+    return jit_func(&callTable, args);
 }
 
 void free_extra(void *extra) {

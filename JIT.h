@@ -1,3 +1,5 @@
+#include <climits>
+#include <cstddef>
 #include <memory>
 
 #include <llvm/IR/LLVMContext.h>
@@ -20,7 +22,7 @@
 #include <llvm/Object/RelocationResolver.h>
 
 class MyJIT {
-private:
+public:
     llvm::LLVMContext context{};
     llvm::IRBuilder<> builder{context};
     llvm::Module mod{"", context};
@@ -44,12 +46,15 @@ private:
             )
     };
 
-    llvm::Type *t_PyType_Object{};
-    llvm::Type *t_PyObject{};
-    llvm::Type *t_PyObject_p{};
-
-    llvm::Function *f_PyNumber_Add{};
-    llvm::Function *f_PyLong_FromLong{};
+    llvm::Type *ctype_char{llvm::Type::getIntNTy(context, CHAR_BIT)};
+    llvm::Type *ctype_char_ptr{ctype_char->getPointerTo()};
+    llvm::Type *ctype_ptrdiff{llvm::Type::getIntNTy(context, CHAR_BIT * sizeof(std::ptrdiff_t))};
+    llvm::Type *t_PyType_Object{llvm::PointerType::getUnqual(context)};
+    llvm::Type *t_PyObject{llvm::StructType::create({
+            llvm::Type::getScalarTy<Py_ssize_t>(context),
+            t_PyType_Object->getPointerTo()
+    })};
+    llvm::Type *t_PyObject_p{t_PyObject->getPointerTo()};
 public:
     static void init();
 

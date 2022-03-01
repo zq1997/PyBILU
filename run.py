@@ -1,14 +1,9 @@
 import pybilu
 
 
-# @pybilu.apply
-def foo(x, y):
-    pass
-
-
 @pybilu.apply
-def add(x, y):
-    pass
+def foo(x, y):
+    return x * x + y * y
 
 
-print(add(114414, 100))
+print(foo(3, 4))

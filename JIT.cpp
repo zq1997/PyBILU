@@ -11,26 +11,24 @@
 using namespace std;
 using namespace llvm;
 
-static unique_ptr<StringMap<char *>> addrMap;
 static unique_ptr<TargetMachine> machine;
 
-template <typename T>
+struct CallTable {
+    void *PyNumber_Add{reinterpret_cast<void *>(::PyNumber_Add)};
+    void *PyNumber_Multiply{reinterpret_cast<void *>(::PyNumber_Multiply)};
+    void *PyLong_FromLong{reinterpret_cast<void *>(::PyLong_FromLong)};
+} extern const callTable{};
+
+template<typename T>
 T check(Expected<T> v) {
-    if (v)
+    if (v) {
         return std::move(*v);
-    else {
+    } else {
         throw runtime_error(toString(v.takeError()));
     }
 }
 
 void MyJIT::init() {
-    addrMap = make_unique<StringMap<char *>, initializer_list<pair<StringRef, char *>>>(
-            {
-                    {"PyLong_FromLong", reinterpret_cast<char *>(PyLong_FromLong)},
-                    {"PyNumber_Add", reinterpret_cast<char *>(PyNumber_Add)},
-            }
-    );
-
     if (LLVMInitializeNativeTarget() || LLVMInitializeNativeAsmPrinter()) {
         throw runtime_error("err");
     }
@@ -54,10 +52,9 @@ void MyJIT::init() {
             sys::getHostCPUName(),
             features.getString(),
             options,
-            Reloc::Model::ROPI,
-            CodeModel::Model::Large,
-            CodeGenOpt::Aggressive,
-            true
+            Reloc::Model::PIC_,
+            CodeModel::Model::Small,
+            CodeGenOpt::Aggressive
     ));
     if (!machine) {
         throw runtime_error("");
@@ -82,79 +79,28 @@ MyJIT::MyJIT() {
     if (machine->addPassesToEmitFile(out_pm, out_stream, nullptr, CodeGenFileType::CGFT_ObjectFile)) {
         throw runtime_error("add emit pass error");
     }
-
-    t_PyType_Object = PointerType::getUnqual(context);
-    t_PyObject = StructType::create({
-            Type::getScalarTy<Py_ssize_t>(context),
-            t_PyType_Object->getPointerTo()
-    });
-    t_PyObject_p = t_PyObject->getPointerTo();
-
-    f_PyNumber_Add = Function::Create(
-            FunctionType::get(
-                    t_PyObject_p,
-                    {t_PyObject_p, t_PyObject_p},
-                    false
-            ),
-            Function::ExternalLinkage,
-            "PyNumber_Add",
-            mod
-    );
-    f_PyLong_FromLong = Function::Create(
-            FunctionType::get(
-                    t_PyObject_p,
-                    {builder.getIntNTy(sizeof(long) * CHAR_BIT)},
-                    false
-            ),
-            Function::ExternalLinkage,
-            "PyLong_FromLong",
-            mod
-    );
 }
 
 void *emitModule(MemoryBufferRef &buf) {
     auto obj = check(object::ObjectFile::createObjectFile(buf));
 
-    auto rel_text_sec = obj->section_end();
     auto text_sec = obj->section_end();
-    for (auto &rel_sec: obj->sections()) {
-        if (rel_sec.isText()) {
-            text_sec = rel_sec;
+    for (auto &sec: obj->sections()) {
+        assert(sec.relocations().empty());
+        if (sec.isText()) {
+            assert(text_sec == obj->section_end());
+            text_sec = sec;
         }
-        auto sec = check(rel_sec.getRelocatedSection());
-        if (sec == obj->section_end() || !sec->isText()) {
-            continue;
-        }
-        text_sec = *sec;
-        rel_text_sec = rel_sec;
-        break;
     }
-    if (text_sec == obj->section_end()) {
-        throw runtime_error("cannot find right section");
-    }
+    assert(text_sec != obj->section_end());
 
     auto sec_content = text_sec->getContents();
     if (!sec_content) {
-        throw runtime_error("bad section error");
+        throw runtime_error("bad section");
     }
     auto code = const_cast<char *>(sec_content->data());
     auto code_size = sec_content->size();
 
-    auto[support, resolve] = object::getRelocationResolver(*obj);
-
-    if (rel_text_sec != obj->section_end()) {
-        for (auto &rel: rel_text_sec->relocations()) {
-            if (!support(rel.getType())) {
-                throw runtime_error("bad");
-            }
-            auto name = check(rel.getSymbol()->getName());
-            auto sym_at = addrMap->lookup(name);
-            auto offset = rel.getOffset();
-            auto fix = object::resolveRelocation(resolve, rel, reinterpret_cast<uint64_t>(sym_at), 0);
-            cout << reinterpret_cast<void *>(offset) << ":\t" << name.str() << " -> " << fix << endl;
-            *(uint64_t *) (&code[offset]) = fix;
-        }
-    }
     error_code ec;
     auto flag = sys::Memory::ProtectionFlags::MF_RWE_MASK;
     auto llvm_mem = sys::Memory::allocateMappedMemory(code_size, nullptr, flag, ec);
@@ -163,6 +109,22 @@ void *emitModule(MemoryBufferRef &buf) {
     }
     memcpy(llvm_mem.base(), code, code_size);
     return llvm_mem.base();
+}
+
+CallInst *createCall(MyJIT &jit, Value *table, void *const &func, Type *result, initializer_list<Value *> args) {
+    Type *arg_types[args.size()];
+    Type **type = arg_types;
+    for (auto &arg: args) {
+        *type++ = arg->getType();
+    }
+    ArrayRef<Type *> x{arg_types, args.size()};
+    auto bf_type = FunctionType::get(result, x, false);
+    auto offset = reinterpret_cast<const char *>(&func) - reinterpret_cast<const char *>(&callTable);
+    auto entry = jit.builder.CreateInBoundsGEP(jit.ctype_char, table,
+            ConstantInt::get(jit.ctype_ptrdiff, offset));
+    entry = jit.builder.CreatePointerCast(entry, bf_type->getPointerTo()->getPointerTo());
+    entry = jit.builder.CreateLoad(bf_type->getPointerTo(), entry);
+    return jit.builder.CreateCall(bf_type, entry, args);
 }
 
 void *MyJIT::to_machine_code(void *cpy_ir) {
@@ -177,35 +139,32 @@ void *MyJIT::to_machine_code(void *cpy_ir) {
     // }
 
     auto func = Function::Create(
-            FunctionType::get(t_PyObject_p, {t_PyObject_p->getPointerTo()}, false),
+            FunctionType::get(t_PyObject_p, {
+                    ctype_char_ptr,
+                    t_PyObject_p->getPointerTo()
+            }, false),
             Function::ExternalLinkage,
-            "main",
+            "",
             &mod
     );
     func->setAttributes(attrs);
 
-    BasicBlock *bb = BasicBlock::Create(context, "entry", func);
+    BasicBlock *bb = BasicBlock::Create(context, "", func);
     builder.SetInsertPoint(bb);
 
-    auto args = func->getArg(0);
+    auto table = func->getArg(0);;
+    auto args = func->getArg(1);
     auto l = builder.CreateLoad(t_PyObject_p, builder.CreateConstInBoundsGEP1_32(t_PyObject_p, args, 0));
     auto r = builder.CreateLoad(t_PyObject_p, builder.CreateConstInBoundsGEP1_32(t_PyObject_p, args, 1));
-    auto ret = builder.CreateCall(f_PyNumber_Add, {l, r});
-
-    auto bb2 = BasicBlock::Create(context, "block2", func);
-    builder.CreateBr(bb2);
-    builder.SetInsertPoint(bb2);
-
-    auto b_addr = builder.CreatePtrToInt(BlockAddress::get(bb2), builder.getInt64Ty());
-    auto more = builder.CreateCall(f_PyLong_FromLong, {b_addr});
-    ret = builder.CreateCall(f_PyNumber_Add, {more, ret});
+    auto ll = createCall(*this, table, callTable.PyNumber_Multiply, t_PyObject_p, {l, l});
+    auto rr = createCall(*this, table, callTable.PyNumber_Multiply, t_PyObject_p, {r, r});
+    auto ret = createCall(*this, table, callTable.PyNumber_Add, t_PyObject_p, {ll, rr});
 
     builder.CreateRet(ret);
     assert(!verifyFunction(*func, &errs()));
 
-    // mod.print(llvm::outs(), nullptr);
     opt_fpm.run(*func, opt_fam);
-    mod.print(llvm::outs(), nullptr);
+    // mod.print(llvm::outs(), nullptr);
     out_vec.clear();
     out_pm.run(mod);
     ofstream("/tmp/jit.o").write(out_vec.data(), out_vec.size());
