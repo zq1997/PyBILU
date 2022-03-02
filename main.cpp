@@ -43,7 +43,7 @@ PyObject *apply(PyObject *, PyObject *maybe_func) {
     return Py_NewRef(func);
 }
 
-PyMODINIT_FUNC PyInit_pybilu() {
+PyMODINIT_FUNC PyInit_pynic() {
     try {
         MyJIT::init();
         jit = make_unique<MyJIT>();

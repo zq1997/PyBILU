@@ -1,12 +1,7 @@
-import pybilu
+import pynic
 
 
-@pybilu.apply
-def bar(x, y):
-    return x * x + y * y
-
-
-@pybilu.apply
+@pynic.apply
 def bar(x, y):
     return x * x + y * y
 
@@ -14,7 +9,7 @@ def bar(x, y):
 print(bar(3, 4))
 
 
-@pybilu.apply
+@pynic.apply
 def foo(x, y):
     return x * x + y * y
 
