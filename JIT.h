@@ -27,8 +27,6 @@ public:
     llvm::IRBuilder<> builder{context};
     llvm::Module mod{"", context};
 
-    llvm::LoopAnalysisManager opt_LAM{};
-    llvm::CGSCCAnalysisManager opt_CGAM{};
     llvm::ModuleAnalysisManager opt_MAM{};
     llvm::FunctionAnalysisManager opt_FAM{};
     llvm::FunctionPassManager opt_FPM{};
@@ -46,15 +44,11 @@ public:
             )
     };
 
-    llvm::Type *ctype_char{llvm::Type::getIntNTy(context, CHAR_BIT)};
-    llvm::Type *ctype_char_ptr{ctype_char->getPointerTo()};
-    llvm::Type *ctype_ptrdiff{llvm::Type::getIntNTy(context, CHAR_BIT * sizeof(std::ptrdiff_t))};
-    llvm::Type *t_PyType_Object{llvm::PointerType::getUnqual(context)};
-    llvm::Type *t_PyObject{llvm::StructType::create({
-            llvm::Type::getScalarTy<Py_ssize_t>(context),
-            t_PyType_Object->getPointerTo()
-    })};
-    llvm::Type *t_PyObject_p{t_PyObject->getPointerTo()};
+    llvm::Type *type_char{llvm::Type::getIntNTy(context, CHAR_BIT)};
+    llvm::Type *type_char_p{type_char->getPointerTo()};
+    llvm::Type *type_ptrdiff{llvm::Type::getIntNTy(context, CHAR_BIT * sizeof(std::ptrdiff_t))};
+
+    void compile_function(llvm::Function *func, void *cpy_ir);
 public:
     static void init();
 

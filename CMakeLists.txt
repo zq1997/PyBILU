@@ -13,7 +13,7 @@ IF(CMAKE_BUILD_TYPE MATCHES Debug)
 ELSE()
     find_package(LLVM 13 REQUIRED CONFIG PATHS /opt/llvm/build/compile-release/lib/cmake/llvm/ NO_DEFAULT_PATH)
     add_link_options(-s -Wl,--exclude-libs,ALL,--gc-sections)
-    llvm_map_components_to_libnames(llvm_libs native)
+    llvm_map_components_to_libnames(llvm_libs core native orcjit)
     set(CPython_INCLUDE_DIRS "/opt/cpython/build/install-release/include/python3.10")
 ENDIF()
 

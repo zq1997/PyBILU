@@ -13,13 +13,13 @@ using namespace llvm;
 
 static unique_ptr<TargetMachine> machine;
 
-struct CallTable {
+struct SymbolTable {
     void *PyNumber_Add{reinterpret_cast<void *>(::PyNumber_Add)};
     void *PyNumber_Multiply{reinterpret_cast<void *>(::PyNumber_Multiply)};
-} extern const call_table{};
+} extern const symbol_table{};
 
 template<typename T>
-T check(Expected<T> v) {
+inline T check(Expected<T> v) {
     if (v) {
         return std::move(*v);
     } else {
@@ -27,11 +27,34 @@ T check(Expected<T> v) {
     }
 }
 
-inline void throwIf(bool cond, const string &msg) {
+template <typename T>
+inline void throwIf(const T&cond, const string &msg) {
     if (cond) {
         throw runtime_error(msg);
     }
 }
+
+
+class {
+public:
+    const char *file_name{"/tmp/jit"};
+    bool output{true};
+
+    inline void dump(const string &ext, const char *data, size_t size) const {
+        if (output) {
+            ofstream(file_name + ext).write(data, size);
+        }
+    }
+
+    inline void dump(const string &ext, const Module &mod) const {
+        if (output) {
+            error_code ec;
+            raw_fd_ostream out(file_name + ext, ec);
+            mod.print(out, nullptr);
+            throwIf(ec, "cannnot write file: " + string(file_name) + ext);
+        }
+    }
+} debug;
 
 void MyJIT::init() {
     throwIf(LLVMInitializeNativeTarget() || LLVMInitializeNativeAsmPrinter(), "initialization failed");
@@ -65,10 +88,8 @@ MyJIT::MyJIT() {
 
     PassBuilder pb{machine.get()};
     pb.registerModuleAnalyses(opt_MAM);
-    pb.registerCGSCCAnalyses(opt_CGAM);
     pb.registerFunctionAnalyses(opt_FAM);
-    pb.registerLoopAnalyses(opt_LAM);
-    pb.crossRegisterProxies(opt_LAM, opt_FAM, opt_CGAM, opt_MAM);
+    opt_FAM.registerPass([&] { return ModuleAnalysisManagerFunctionProxy(opt_MAM); });
     opt_FPM = pb.buildFunctionSimplificationPipeline(
             PassBuilder::OptimizationLevel::O3,
             ThinOrFullLTOPhase::None
@@ -81,15 +102,15 @@ MyJIT::MyJIT() {
 CallInst *createCall(MyJIT &jit, Value *table, void *const &func, Type *result,
         ArrayRef<Type *> arg_types, initializer_list<Value *> args) {
     auto bf_type = FunctionType::get(result, arg_types, false);
-    auto offset = reinterpret_cast<const char *>(&func) - reinterpret_cast<const char *>(&call_table);
-    auto entry = jit.builder.CreateInBoundsGEP(jit.ctype_char, table,
-            ConstantInt::get(jit.ctype_ptrdiff, offset));
+    auto offset = reinterpret_cast<const char *>(&func) - reinterpret_cast<const char *>(&symbol_table);
+    auto entry = jit.builder.CreateInBoundsGEP(jit.type_char, table,
+            ConstantInt::get(jit.type_ptrdiff, offset));
     entry = jit.builder.CreatePointerCast(entry, bf_type->getPointerTo()->getPointerTo());
     entry = jit.builder.CreateLoad(bf_type->getPointerTo(), entry);
     return jit.builder.CreateCall(bf_type, entry, args);
 }
 
-void *MyJIT::compile(void *cpy_ir) {
+void MyJIT::compile_function(Function *func, void *cpy_ir) {
     // assert(PyBytes_CheckExact(cpy_ir->co_code));
     // auto instr_arr = PyBytes_AS_STRING(cpy_ir->co_code);
     // auto instr_size = PyBytes_GET_SIZE(cpy_ir->co_code);
@@ -100,59 +121,59 @@ void *MyJIT::compile(void *cpy_ir) {
     //     auto oparg = _Py_OPARG(*iter);
     // }
 
+    auto table = func->getArg(0);;
+    auto args = func->getArg(1);
+    auto l = builder.CreateLoad(type_char_p, builder.CreateConstInBoundsGEP1_32(type_char_p, args, 0));
+    auto r = builder.CreateLoad(type_char_p, builder.CreateConstInBoundsGEP1_32(type_char_p, args, 1));
+    Type *arg_types[]{type_char_p, type_char_p};
+    auto ll = createCall(*this, table, symbol_table.PyNumber_Multiply, type_char_p, arg_types, {l, l});
+    auto rr = createCall(*this, table, symbol_table.PyNumber_Multiply, type_char_p, arg_types, {r, r});
+    auto ret = createCall(*this, table, symbol_table.PyNumber_Add, type_char_p, arg_types, {ll, rr});
+
+    builder.CreateRet(ret);
+}
+
+void *MyJIT::compile(void *cpy_ir) {
     auto func = Function::Create(
-            FunctionType::get(t_PyObject_p, {
-                    ctype_char_ptr,
-                    t_PyObject_p->getPointerTo()
+            FunctionType::get(type_char_p, {
+                    type_char_p,
+                    type_char_p->getPointerTo()
             }, false),
             Function::ExternalLinkage,
             "",
             &mod
     );
     func->setAttributes(attrs);
-
-    BasicBlock *bb = BasicBlock::Create(context, "", func);
-    builder.SetInsertPoint(bb);
-
-    auto table = func->getArg(0);;
-    auto args = func->getArg(1);
-    auto l = builder.CreateLoad(t_PyObject_p, builder.CreateConstInBoundsGEP1_32(t_PyObject_p, args, 0));
-    auto r = builder.CreateLoad(t_PyObject_p, builder.CreateConstInBoundsGEP1_32(t_PyObject_p, args, 1));
-    Type *arg_types[]{t_PyObject_p, t_PyObject_p};
-    auto ll = createCall(*this, table, call_table.PyNumber_Multiply, t_PyObject_p, arg_types, {l, l});
-    auto rr = createCall(*this, table, call_table.PyNumber_Multiply, t_PyObject_p, arg_types, {r, r});
-    auto ret = createCall(*this, table, call_table.PyNumber_Add, t_PyObject_p, arg_types, {ll, rr});
-
-    builder.CreateRet(ret);
+    builder.SetInsertPoint(BasicBlock::Create(context, "", func));
+    compile_function(func, cpy_ir);
     assert(!verifyFunction(*func, &errs()));
 
+    debug.dump(".ll", mod);
     opt_FPM.run(*func, opt_FAM);
-    // mod.print(llvm::outs(), nullptr);
+    debug.dump(".opt.ll", mod);
+    opt_FAM.clear();
     out_vec.clear();
     out_PM.run(mod);
     func->removeFromParent();
     delete func;
-    ofstream("/tmp/jit.o").write(out_vec.data(), out_vec.size());
+    debug.dump(".o", out_vec.data(), out_vec.size());
     MemoryBufferRef buf(StringRef(out_vec.data(), out_vec.size()), "");
 
+    StringRef code{nullptr, 0};
     auto obj = check(object::ObjectFile::createObjectFile(buf));
-    auto sec = obj->section_end();
-    for (auto &s: obj->sections()) {
-        assert(s.relocations().empty());
-        if (s.isText()) {
-            assert(sec == obj->section_end());
-            sec = s;
+    for (auto &sec: obj->sections()) {
+        assert(sec.relocations().empty());
+        if (sec.isText()) {
+            assert(!code.data());
+            code = check(sec.getContents());
         }
     }
-    assert(sec != obj->section_end());
-    assert(sec->isText());
-    auto sec_content = check(sec->getContents());
 
     error_code ec;
     auto flag = sys::Memory::ProtectionFlags::MF_RWE_MASK;
-    auto llvm_mem = sys::Memory::allocateMappedMemory(sec_content.size(), nullptr, flag, ec);
-    throwIf(bool(ec), ec.message());
-    memcpy(llvm_mem.base(), sec_content.data(), sec_content.size());
+    auto llvm_mem = sys::Memory::allocateMappedMemory(code.size(), nullptr, flag, ec);
+    throwIf(ec, ec.message());
+    memcpy(llvm_mem.base(), code.data(), code.size());
 
     return llvm_mem.base();
 }
