@@ -10,18 +10,18 @@ IF(CMAKE_BUILD_TYPE MATCHES Debug)
     set(CPython_INCLUDE_DIRS "/opt/cpython/build/install-debug/include/python3.10d")
 ELSE()
     find_package(LLVM 13 REQUIRED CONFIG PATHS /opt/llvm/build/compile-release/lib/cmake/llvm/ NO_DEFAULT_PATH)
-    add_link_options(-s -Wl,--exclude-libs,ALL,--gc-sections)
+    add_link_options(-Wl,--exclude-libs,ALL,--gc-sections)
     llvm_map_components_to_libnames(llvm_libs core native orcjit)
     set(CPython_INCLUDE_DIRS "/opt/cpython/build/install-release/include/python3.10")
 ENDIF()
 
 add_definitions(${LLVM_DEFINITIONS})
 include_directories(${LLVM_INCLUDE_DIRS} ${CPython_INCLUDE_DIRS})
-add_compile_options(-Wall -Wpedantic -fno-rtti)
+add_compile_options(-Wall -Wpedantic -fno-rtti -g)
 link_directories(${LLVM_LIBRARY_DIRS})
 link_libraries(${llvm_libs})
 
-add_library(pynic SHARED main.cpp JIT.cpp)
+add_library(pynic SHARED main.cpp JIT.cpp converter.cpp)
 set_target_properties(pynic PROPERTIES
         PREFIX ""
         SUFFIX ".so"
@@ -29,4 +29,4 @@ set_target_properties(pynic PROPERTIES
 )
 
 #target_precompile_headers(pynic PRIVATE "JIT.h")
-#add_subdirectory(/opt/cpython cpython EXCLUDE_FROM_ALL)
+add_subdirectory(/opt/cpython cpython EXCLUDE_FROM_ALL)

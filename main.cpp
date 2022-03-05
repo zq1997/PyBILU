@@ -21,8 +21,7 @@ PyObject *vectorcall(PyObject *callable, PyObject *const *args, size_t nargsf, P
 }
 
 void freeExtra(void *extra) {
-    // auto code_extra = reinterpret_cast<CodeExtra *>(extra);
-    // cout << "free " << code_extra << endl;
+    // 没有实现内存管理
 }
 
 PyObject *apply(PyObject *, PyObject *maybe_func) {
@@ -33,7 +32,7 @@ PyObject *apply(PyObject *, PyObject *maybe_func) {
     auto func = reinterpret_cast<PyFunctionObject *>(maybe_func);
     void *compiled_func;
     try {
-        compiled_func = jit->compile(func->func_code);
+        compiled_func = jit->compile(reinterpret_cast<PyCodeObject *>(func->func_code));
     } catch (runtime_error &err) {
         PyErr_SetString(PyExc_RuntimeError, err.what());
         return nullptr;
@@ -55,14 +54,14 @@ PyMODINIT_FUNC PyInit_pynic() {
     static PyMethodDef meth_def[] = {{"apply", apply, METH_O}, {}};
     static PyModuleDef mod_def = {
             PyModuleDef_HEAD_INIT,
-            "pybilu",
-            "PyBILU: Python Bytecode Interpretation Loop Unroller",
+            "pynic",
+            "pynic: Python to Native Code",
             -1,
             meth_def
     };
     code_extra_index = _PyEval_RequestCodeExtraIndex(freeExtra);
     if (code_extra_index < 0) {
-        PyErr_SetString(PyExc_TypeError, "failed to setup");
+        PyErr_SetString(PyExc_RuntimeError, "failed to setup");
         return nullptr;
     }
     return PyModule_Create(&mod_def);

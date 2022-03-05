@@ -27,8 +27,8 @@ inline T check(Expected<T> v) {
     }
 }
 
-template <typename T>
-inline void throwIf(const T&cond, const string &msg) {
+template<typename T>
+inline void throwIf(const T &cond, const string &msg) {
     if (cond) {
         throw runtime_error(msg);
     }
@@ -110,16 +110,9 @@ CallInst *createCall(MyJIT &jit, Value *table, void *const &func, Type *result,
     return jit.builder.CreateCall(bf_type, entry, args);
 }
 
-void MyJIT::compile_function(Function *func, void *cpy_ir) {
-    // assert(PyBytes_CheckExact(cpy_ir->co_code));
-    // auto instr_arr = PyBytes_AS_STRING(cpy_ir->co_code);
-    // auto instr_size = PyBytes_GET_SIZE(cpy_ir->co_code);
-    // auto instr_begin = reinterpret_cast<_Py_CODEUNIT *>(instr_arr);
-    // auto instr_end = reinterpret_cast<_Py_CODEUNIT *>(instr_arr + instr_size);
-    // for (auto iter = instr_begin; iter < instr_end; iter++) {
-    //     auto opcode = _Py_OPCODE(*iter);
-    //     auto oparg = _Py_OPARG(*iter);
-    // }
+void MyJIT::compileFunction(Function *func, PyCodeObject *cpy_ir) {
+    assert(PyBytes_CheckExact(cpy_ir->co_code));
+    parseCFG(cpy_ir);
 
     auto table = func->getArg(0);;
     auto args = func->getArg(1);
@@ -133,7 +126,7 @@ void MyJIT::compile_function(Function *func, void *cpy_ir) {
     builder.CreateRet(ret);
 }
 
-void *MyJIT::compile(void *cpy_ir) {
+void *MyJIT::compile(PyCodeObject *cpy_ir) {
     auto func = Function::Create(
             FunctionType::get(type_char_p, {
                     type_char_p,
@@ -145,7 +138,7 @@ void *MyJIT::compile(void *cpy_ir) {
     );
     func->setAttributes(attrs);
     builder.SetInsertPoint(BasicBlock::Create(context, "", func));
-    compile_function(func, cpy_ir);
+    compileFunction(func, cpy_ir);
     assert(!verifyFunction(*func, &errs()));
 
     debug.dump(".ll", mod);
