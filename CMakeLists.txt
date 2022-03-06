@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 project(pynic)
 set(CMAKE_VERBOSE_MAKEFILE ON CACHE BOOL "ON" FORCE)
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 14)
 
 IF(CMAKE_BUILD_TYPE MATCHES Debug)
     find_package(LLVM 13 REQUIRED CONFIG PATHS /opt/llvm/build/compile-debug/lib/cmake/llvm/ NO_DEFAULT_PATH)
@@ -29,4 +29,4 @@ set_target_properties(pynic PROPERTIES
 )
 
 #target_precompile_headers(pynic PRIVATE "JIT.h")
-add_subdirectory(/opt/cpython cpython EXCLUDE_FROM_ALL)
+#add_subdirectory(/opt/cpython cpython EXCLUDE_FROM_ALL)

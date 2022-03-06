@@ -13,11 +13,6 @@ using namespace llvm;
 
 static unique_ptr<TargetMachine> machine;
 
-struct SymbolTable {
-    void *PyNumber_Add{reinterpret_cast<void *>(::PyNumber_Add)};
-    void *PyNumber_Multiply{reinterpret_cast<void *>(::PyNumber_Multiply)};
-} extern const symbol_table{};
-
 template<typename T>
 inline T check(Expected<T> v) {
     if (v) {
@@ -99,31 +94,22 @@ MyJIT::MyJIT() {
             "add emit pass error");
 }
 
-CallInst *createCall(MyJIT &jit, Value *table, void *const &func, Type *result,
-        ArrayRef<Type *> arg_types, initializer_list<Value *> args) {
-    auto bf_type = FunctionType::get(result, arg_types, false);
-    auto offset = reinterpret_cast<const char *>(&func) - reinterpret_cast<const char *>(&symbol_table);
-    auto entry = jit.builder.CreateInBoundsGEP(jit.type_char, table,
-            ConstantInt::get(jit.type_ptrdiff, offset));
-    entry = jit.builder.CreatePointerCast(entry, bf_type->getPointerTo()->getPointerTo());
-    entry = jit.builder.CreateLoad(bf_type->getPointerTo(), entry);
-    return jit.builder.CreateCall(bf_type, entry, args);
-}
-
 void MyJIT::compileFunction(Function *func, PyCodeObject *cpy_ir) {
     assert(PyBytes_CheckExact(cpy_ir->co_code));
-    parseCFG(cpy_ir);
-
-    auto table = func->getArg(0);;
-    auto args = func->getArg(1);
-    auto l = builder.CreateLoad(type_char_p, builder.CreateConstInBoundsGEP1_32(type_char_p, args, 0));
-    auto r = builder.CreateLoad(type_char_p, builder.CreateConstInBoundsGEP1_32(type_char_p, args, 1));
-    Type *arg_types[]{type_char_p, type_char_p};
-    auto ll = createCall(*this, table, symbol_table.PyNumber_Multiply, type_char_p, arg_types, {l, l});
-    auto rr = createCall(*this, table, symbol_table.PyNumber_Multiply, type_char_p, arg_types, {r, r});
-    auto ret = createCall(*this, table, symbol_table.PyNumber_Add, type_char_p, arg_types, {ll, rr});
-
-    builder.CreateRet(ret);
+    auto translator = parseCFG(cpy_ir);
+    translator->jit = this;
+    translator->py_obj = type_char_p;
+    translator->py_symbol_table = func->getArg(0);;
+    translator->py_fast_locals = func->getArg(1);
+    for (decltype(+translator->block_num) i = 0; i < translator->block_num; i++) {
+        translator->ir_blocks.get()[i] = BasicBlock::Create(context, "", func);
+    }
+    builder.SetInsertPoint(translator->ir_blocks.get()[0]);
+    translator->py_stack = builder.CreateAlloca(type_char_p, builder.getInt32(cpy_ir->co_stacksize));
+    for (decltype(+translator->block_num) i = 0; i < translator->block_num; i++) {
+        builder.SetInsertPoint(translator->ir_blocks.get()[i]);
+        translator->emit_block(i);
+    }
 }
 
 void *MyJIT::compile(PyCodeObject *cpy_ir) {
@@ -137,7 +123,6 @@ void *MyJIT::compile(PyCodeObject *cpy_ir) {
             &mod
     );
     func->setAttributes(attrs);
-    builder.SetInsertPoint(BasicBlock::Create(context, "", func));
     compileFunction(func, cpy_ir);
     assert(!verifyFunction(*func, &errs()));
 

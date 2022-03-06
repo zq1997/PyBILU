@@ -1,7 +1,7 @@
 #include <climits>
 #include <cstddef>
 #include <memory>
-#include <list>
+#include <bitset>
 
 #include <Python.h>
 #include <opcode.h>
@@ -25,7 +25,6 @@
 using PyInstr = const _Py_CODEUNIT;
 using PyOpcode = decltype(_Py_OPCODE(PyInstr{}));
 using PyOparg = decltype(_Py_OPCODE(PyInstr{}));
-using PyOp = std::pair<PyOpcode, PyOparg>;
 constexpr auto EXTENDED_ARG_BITS = 8;
 
 class MyJIT {
@@ -57,9 +56,7 @@ public:
 
     void compileFunction(llvm::Function *func, PyCodeObject *cpy_ir);
 
-    static void parseCFG(PyCodeObject *cpy_ir);
-
-    void addInstr(PyOpcode opcode, PyOparg oparg);
+    static std::unique_ptr<class Translator> parseCFG(PyCodeObject *cpy_ir);
 
 public:
     static void init();
@@ -70,14 +67,15 @@ public:
 };
 
 class PyInstrIter {
-    const PyInstr *first;
+    const PyInstr *base;
     const size_t size;
     size_t offset;
 public:
-    explicit PyInstrIter(PyCodeObject *code) :
-            first(reinterpret_cast<PyInstr *>(PyBytes_AS_STRING(code->co_code))),
-            size(PyBytes_GET_SIZE(code->co_code) / sizeof(PyInstr)),
-            offset(0) {}
+    PyInstrIter(const PyInstr *base_, size_t size_) : base(base_), size(size_), offset(0) {}
+
+    explicit PyInstrIter(PyCodeObject *code) : PyInstrIter(
+            reinterpret_cast<PyInstr *>(PyBytes_AS_STRING(code->co_code)),
+            PyBytes_GET_SIZE(code->co_code) / sizeof(PyInstr)) {}
 
     auto getSize() const { return size; }
 
@@ -89,59 +87,60 @@ public:
         }
         do {
             assert(offset < size);
-            opcode = _Py_OPCODE(first[offset]);
-            oparg = _Py_OPCODE(first[offset]);
+            opcode = _Py_OPCODE(base[offset]);
+            oparg = _Py_OPCODE(base[offset]);
             offset++;
         } while (opcode == EXTENDED_ARG);
         return true;
     }
 };
 
-class NewPyInstr {
-private:
-    char *the_begin;
-    char *the_end;
+
+class BitArray {
 public:
-    class PyInstrIter {
-    private:
-        char *the_current;
-    public:
-        explicit PyInstrIter(char *cur) : the_current(cur) {}
+    using EleType = unsigned long;
+    static constexpr auto EleBits = CHAR_BIT * sizeof(EleType);
 
-        PyInstrIter &operator++() {
-            the_current += sizeof(PyInstr);
-            return *this;
+    explicit BitArray(size_t s) : size(s), data(new EleType[s / EleBits + !!(s % EleBits)]()) {}
+
+    void set(size_t index, bool value = true) {
+        data.get()[index / EleBits] |= EleType{value} << index % EleBits;
+    }
+
+    bool get(size_t index) {
+        return data.get()[index / EleBits] & (EleType{1} << index % EleBits);
+    }
+
+    auto chunkNumber() const { return size / EleBits + !!(size % EleBits); };
+
+    auto count() const {
+        size_t counted = 0;
+        for (auto i = chunkNumber(); i--;) {
+            counted += std::bitset<EleBits>(data.get()[i]).count();
         }
+        return counted;
+    }
 
-        std::pair<PyOpcode, PyOparg> operator*() {
-            auto instr = *reinterpret_cast<_Py_CODEUNIT *>(the_current);
-            return {_Py_OPCODE(instr), _Py_OPARG(instr)};
-        }
-
-        bool operator!=(PyInstrIter other) const { return the_current != other.the_current; }
-    };
-
-    explicit NewPyInstr(PyCodeObject *code) :
-            the_begin(PyBytes_AS_STRING(code->co_code)),
-            the_end(the_begin + PyBytes_GET_SIZE(code->co_code)) {}
-
-    PyInstrIter begin() { return PyInstrIter(the_begin); }
-
-    PyInstrIter end() { return PyInstrIter(the_end); }
+    const size_t size;
+    const std::unique_ptr<EleType> data;
 };
-// class BasicBlock {
-// public:
-//     PyInstr *begin;
-//     PyInstr *end;
-//     BasicBlock *fall_to;
-//     BasicBlock *jump_to;
-// };
-//
-// class BasicBlocks {
-// private:
-//     std::list<BasicBlock> blocks;
-// public:
-//     BasicBlock &append() {
-//         return blocks.emplace_back();
-//     }
-// };
+
+class Translator {
+    friend class MyJIT;
+
+    const unsigned block_num;
+    const std::unique_ptr<unsigned> boundaries;
+    const std::unique_ptr<llvm::BasicBlock *> ir_blocks;
+    PyInstr *py_instructions;
+
+    MyJIT *jit{};
+    llvm::Type *py_obj{};
+    llvm::Value *py_symbol_table{};
+    llvm::Value *py_fast_locals{};
+    llvm::Value *py_stack{};
+
+public:
+    explicit Translator(const BitArray &bit_array, PyInstr *py_instructions);
+
+    void emit_block(unsigned index);
+};
