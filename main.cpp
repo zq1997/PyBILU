@@ -7,8 +7,8 @@ using namespace std;
 
 #include "JIT.h"
 
-extern const struct SymbolTable symbol_table;
-static unique_ptr<MyJIT> jit;
+static unique_ptr<Compiler> compiler;
+static unique_ptr<Translator> translator;
 static Py_ssize_t code_extra_index;
 
 PyObject *vectorcall(PyObject *callable, PyObject *const *args, size_t nargsf, PyObject *kwnames) {
@@ -49,7 +49,7 @@ PyObject *apply(PyObject *, PyObject *maybe_func) {
     auto func = reinterpret_cast<PyFunctionObject *>(maybe_func);
     void *compiled_func;
     try {
-        compiled_func = jit->compile(reinterpret_cast<PyCodeObject *>(func->func_code));
+        compiled_func = (*translator)(*compiler, reinterpret_cast<PyCodeObject *>(func->func_code));
     } catch (runtime_error &err) {
         PyErr_SetString(PyExc_RuntimeError, err.what());
         return nullptr;
@@ -61,8 +61,8 @@ PyObject *apply(PyObject *, PyObject *maybe_func) {
 
 PyMODINIT_FUNC PyInit_pynic() {
     try {
-        MyJIT::init();
-        jit = make_unique<MyJIT>();
+        compiler = make_unique<Compiler>();
+        translator = make_unique<Translator>();
     } catch (runtime_error &err) {
         PyErr_SetString(PyExc_RuntimeError, err.what());
         return nullptr;

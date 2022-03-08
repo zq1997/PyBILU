@@ -27,57 +27,82 @@ using PyOpcode = decltype(_Py_OPCODE(PyInstr{}));
 using PyOparg = decltype(_Py_OPCODE(PyInstr{}));
 constexpr auto EXTENDED_ARG_BITS = 8;
 
-class MyJIT {
+struct SymbolTable {
+    void *PyNumber_Add{reinterpret_cast<void *>(::PyNumber_Add)};
+    void *PyNumber_Multiply{reinterpret_cast<void *>(::PyNumber_Multiply)};
+} extern const symbol_table;
+
+class Compiler {
+    std::unique_ptr<llvm::TargetMachine> machine;
+
+    llvm::ModuleAnalysisManager opt_MAM;
+    llvm::FunctionAnalysisManager opt_FAM;
+    llvm::FunctionPassManager opt_FPM;
+
+    llvm::legacy::PassManager out_PM;
+    llvm::SmallVector<char> out_vec;
+    llvm::raw_svector_ostream out_stream{out_vec};
+
+public:
+    Compiler();
+
+    void *operator()(llvm::Module &mod);
+};
+
+class Translator {
 public:
     llvm::LLVMContext context{};
     llvm::IRBuilder<> builder{context};
+
+    llvm::Type *ctype_char{llvm::Type::getIntNTy(context, CHAR_BIT)};
+    llvm::Type *ctype_ptr{ctype_char->getPointerTo()};
+    llvm::Type *ctype_ptrdiff{llvm::Type::getIntNTy(context, CHAR_BIT * sizeof(std::ptrdiff_t))};
+
     llvm::Module mod{"", context};
 
-    llvm::ModuleAnalysisManager opt_MAM{};
-    llvm::FunctionAnalysisManager opt_FAM{};
-    llvm::FunctionPassManager opt_FPM{};
+    llvm::Function *func{llvm::Function::Create(
+            llvm::FunctionType::get(ctype_ptr, {
+                    ctype_ptr,
+                    ctype_ptr->getPointerTo()
+            }, false),
+            llvm::Function::ExternalLinkage,
+            "",
+            &mod
+    )};
 
-    llvm::legacy::PassManager out_PM;
-    llvm::SmallVector<char> out_vec{};
-    llvm::raw_svector_ostream out_stream{out_vec};
+    PyInstr *py_instructions{};
 
-    llvm::AttributeList attrs{
-            llvm::AttributeList::get(
-                    context, llvm::AttributeList::FunctionIndex,
-                    llvm::AttrBuilder()
-                            .addAttribute(llvm::Attribute::NoUnwind)
-                            .addAttribute("tune-cpu", llvm::sys::getHostCPUName())
-            )
-    };
+    unsigned block_num{};
+    std::unique_ptr<unsigned> boundaries{};
+    std::unique_ptr<llvm::BasicBlock *> ir_blocks{};
 
-    llvm::Type *type_char{llvm::Type::getIntNTy(context, CHAR_BIT)};
-    llvm::Type *type_char_p{type_char->getPointerTo()};
-    llvm::Type *type_ptrdiff{llvm::Type::getIntNTy(context, CHAR_BIT * sizeof(std::ptrdiff_t))};
+    llvm::Value *py_symbol_table{func->getArg(0)};
+    llvm::Value *py_fast_locals{func->getArg(1)};
+    llvm::Value *py_stack{};
 
-    void compileFunction(llvm::Function *func, PyCodeObject *cpy_ir);
+    void parseCFG(PyCodeObject *cpy_ir);
 
-    static std::unique_ptr<class Translator> parseCFG(PyCodeObject *cpy_ir);
+    void emitBlock(unsigned index);
 
 public:
-    static void init();
+    Translator() {
+        func->setAttributes(llvm::AttributeList::get(
+                context, llvm::AttributeList::FunctionIndex,
+                llvm::AttrBuilder()
+                        .addAttribute(llvm::Attribute::NoUnwind)
+                        .addAttribute("tune-cpu", llvm::sys::getHostCPUName())
+        ));
+    }
 
-    MyJIT();
-
-    void *compile(PyCodeObject *cpy_ir);
+    void *operator()(Compiler &compiler, PyCodeObject *cpy_ir);
 };
 
 class PyInstrIter {
     const PyInstr *base;
     const size_t size;
-    size_t offset;
+    size_t offset{0};
 public:
-    PyInstrIter(const PyInstr *base_, size_t size_) : base(base_), size(size_), offset(0) {}
-
-    explicit PyInstrIter(PyCodeObject *code) : PyInstrIter(
-            reinterpret_cast<PyInstr *>(PyBytes_AS_STRING(code->co_code)),
-            PyBytes_GET_SIZE(code->co_code) / sizeof(PyInstr)) {}
-
-    auto getSize() const { return size; }
+    PyInstrIter(const PyInstr *base_, size_t size_) : base(base_), size(size_) {}
 
     auto getOffset() const { return offset; }
 
@@ -123,24 +148,4 @@ public:
 
     const size_t size;
     const std::unique_ptr<EleType> data;
-};
-
-class Translator {
-    friend class MyJIT;
-
-    const unsigned block_num;
-    const std::unique_ptr<unsigned> boundaries;
-    const std::unique_ptr<llvm::BasicBlock *> ir_blocks;
-    PyInstr *py_instructions;
-
-    MyJIT *jit{};
-    llvm::Type *py_obj{};
-    llvm::Value *py_symbol_table{};
-    llvm::Value *py_fast_locals{};
-    llvm::Value *py_stack{};
-
-public:
-    explicit Translator(const BitArray &bit_array, PyInstr *py_instructions);
-
-    void emit_block(unsigned index);
 };

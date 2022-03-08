@@ -51,7 +51,87 @@ public:
     }
 } debug;
 
-void MyJIT::init() {
+
+void *Translator::operator()(Compiler &compiler, PyCodeObject *cpy_ir) {
+    parseCFG(cpy_ir);
+    for (decltype(block_num) i = 0; i < block_num; i++) {
+        ir_blocks.get()[i] = BasicBlock::Create(context, "", func);
+    }
+    builder.SetInsertPoint(ir_blocks.get()[0]);
+    py_stack = builder.CreateAlloca(ctype_ptr, builder.getInt32(cpy_ir->co_stacksize));
+    for (decltype(block_num) i = 0; i < block_num; i++) {
+        builder.SetInsertPoint(ir_blocks.get()[i]);
+        emitBlock(i);
+    }
+    assert(!verifyFunction(*func, &errs()));
+
+    auto result = compiler(mod);
+
+    func->dropAllReferences();
+
+    return result;
+}
+
+void Translator::parseCFG(PyCodeObject *cpy_ir) {
+    py_instructions = reinterpret_cast<PyInstr *>(PyBytes_AS_STRING(cpy_ir->co_code));
+    auto size = PyBytes_GET_SIZE(cpy_ir->co_code) / sizeof(PyInstr);
+
+    PyInstrIter iter(py_instructions, size);
+    BitArray is_boundary(size + 1);
+
+    PyOpcode opcode;
+    PyOparg oparg;
+    while (iter.next(opcode, oparg)) {
+        switch (opcode) {
+            case EXTENDED_ARG:
+                oparg <<= EXTENDED_ARG_BITS;
+                continue;
+            case JUMP_ABSOLUTE:
+            case JUMP_IF_TRUE_OR_POP:
+            case JUMP_IF_FALSE_OR_POP:
+            case POP_JUMP_IF_TRUE:
+            case POP_JUMP_IF_FALSE:
+            case JUMP_IF_NOT_EXC_MATCH:
+                is_boundary.set(iter.getOffset());
+                is_boundary.set(oparg);
+                break;
+            case JUMP_FORWARD:
+            case FOR_ITER:
+                is_boundary.set(iter.getOffset());
+                is_boundary.set(iter.getOffset() + oparg / sizeof(PyInstr));
+                break;
+            case RETURN_VALUE:
+            case RAISE_VARARGS:
+            case RERAISE:
+                is_boundary.set(iter.getOffset());
+            default:
+                break;
+        }
+    }
+
+    is_boundary.set(0, false);
+    assert(is_boundary.get(size));
+
+    block_num = is_boundary.count();
+    boundaries.reset(new unsigned[block_num]);
+    ir_blocks.reset(new BasicBlock *[block_num]);
+
+    unsigned current_num = 0;
+    auto chunks = is_boundary.chunkNumber();
+    for (decltype(chunks) i = 0; i < chunks; i++) {
+        auto bits = is_boundary.data.get()[i];
+        BitArray::EleType tester{1};
+        for (unsigned j = 0; j < BitArray::EleBits; j++) {
+            if (tester & bits) {
+                boundaries.get()[current_num++] = i * BitArray::EleBits + j;
+            }
+            tester <<= 1;
+        }
+    }
+    assert(current_num == block_num);
+}
+
+Compiler::Compiler() {
     throwIf(LLVMInitializeNativeTarget() || LLVMInitializeNativeAsmPrinter(), "initialization failed");
 
     auto triple = sys::getProcessTriple();
@@ -62,7 +142,7 @@ void MyJIT::init() {
         features.AddFeature(f.first(), f.second);
     }
 
-    std::string err;
+    string err;
     auto *target = TargetRegistry::lookupTarget(triple, err);
     throwIf(!target, err);
     machine = unique_ptr<TargetMachine>(target->createTargetMachine(
@@ -75,11 +155,7 @@ void MyJIT::init() {
             CodeGenOpt::Aggressive
     ));
     throwIf(!machine, "cannot create TargetMachine");
-}
 
-MyJIT::MyJIT() {
-    mod.setTargetTriple(machine->getTargetTriple().getTriple());
-    mod.setDataLayout(machine->createDataLayout());
 
     PassBuilder pb{machine.get()};
     pb.registerModuleAnalyses(opt_MAM);
@@ -94,51 +170,21 @@ MyJIT::MyJIT() {
             "add emit pass error");
 }
 
-void MyJIT::compileFunction(Function *func, PyCodeObject *cpy_ir) {
-    assert(PyBytes_CheckExact(cpy_ir->co_code));
-    auto translator = parseCFG(cpy_ir);
-    translator->jit = this;
-    translator->py_obj = type_char_p;
-    translator->py_symbol_table = func->getArg(0);;
-    translator->py_fast_locals = func->getArg(1);
-    for (decltype(+translator->block_num) i = 0; i < translator->block_num; i++) {
-        translator->ir_blocks.get()[i] = BasicBlock::Create(context, "", func);
-    }
-    builder.SetInsertPoint(translator->ir_blocks.get()[0]);
-    translator->py_stack = builder.CreateAlloca(type_char_p, builder.getInt32(cpy_ir->co_stacksize));
-    for (decltype(+translator->block_num) i = 0; i < translator->block_num; i++) {
-        builder.SetInsertPoint(translator->ir_blocks.get()[i]);
-        translator->emit_block(i);
-    }
-}
-
-void *MyJIT::compile(PyCodeObject *cpy_ir) {
-    auto func = Function::Create(
-            FunctionType::get(type_char_p, {
-                    type_char_p,
-                    type_char_p->getPointerTo()
-            }, false),
-            Function::ExternalLinkage,
-            "",
-            &mod
-    );
-    func->setAttributes(attrs);
-    compileFunction(func, cpy_ir);
-    assert(!verifyFunction(*func, &errs()));
-
+void *Compiler::operator()(llvm::Module &mod) {
     debug.dump(".ll", mod);
-    opt_FPM.run(*func, opt_FAM);
-    debug.dump(".opt.ll", mod);
+    for (auto &func: mod) {
+        opt_FPM.run(func, opt_FAM);
+    }
     opt_FAM.clear();
-    out_vec.clear();
-    out_PM.run(mod);
-    func->removeFromParent();
-    delete func;
-    debug.dump(".o", out_vec.data(), out_vec.size());
-    MemoryBufferRef buf(StringRef(out_vec.data(), out_vec.size()), "");
+    debug.dump(".opt.ll", mod);
 
-    StringRef code{nullptr, 0};
-    auto obj = check(object::ObjectFile::createObjectFile(buf));
+    mod.setDataLayout(machine->createDataLayout());
+    out_PM.run(mod);
+    debug.dump(".o", out_vec.data(), out_vec.size());
+
+    StringRef code{};
+    auto obj = check(object::ObjectFile::createObjectFile(
+            MemoryBufferRef(StringRef(out_vec.data(), out_vec.size()), "")));
     for (auto &sec: obj->sections()) {
         assert(sec.relocations().empty());
         if (sec.isText()) {
@@ -153,5 +199,6 @@ void *MyJIT::compile(PyCodeObject *cpy_ir) {
     throwIf(ec, ec.message());
     memcpy(llvm_mem.base(), code.data(), code.size());
 
+    out_vec.clear();
     return llvm_mem.base();
 }
