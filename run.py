@@ -1,13 +1,14 @@
 import pynic
 
 
-@pynic.apply
-def foo(x, y):
-    return x * x + y * y
+# @pynic.apply
+# def foo(x, y):
+#     return x * x + y * y
 
 
 @pynic.apply
 def foo(x, y):
-    return x * x + y * y
+    return x + y
 
-print(foo(3, 4))
+
+print(foo(int('114510'), 4))

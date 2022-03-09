@@ -2,6 +2,7 @@
 #include <cstddef>
 #include <memory>
 #include <bitset>
+#include <tuple>
 
 #include <Python.h>
 #include <opcode.h>
@@ -98,6 +99,13 @@ public:
 };
 
 
+template<typename T, typename M>
+constexpr auto memberOffset(M T::* p) {
+    constexpr T v{};
+    return reinterpret_cast<const char *>(&(v.*p)) - reinterpret_cast<const char *>(&v);
+}
+
+
 class Compiler {
     std::unique_ptr<llvm::TargetMachine> machine;
 
@@ -120,9 +128,11 @@ public:
     llvm::LLVMContext context{};
     llvm::IRBuilder<> builder{context};
 
-    llvm::Type *ctype_char{llvm::Type::getIntNTy(context, CHAR_BIT)};
-    llvm::Type *ctype_ptr{ctype_char->getPointerTo()};
+    llvm::Type *ctype_data{llvm::Type::getIntNTy(context, CHAR_BIT)};
+    llvm::Type *ctype_ptr{ctype_data->getPointerTo()};
     llvm::Type *ctype_ptrdiff{llvm::Type::getIntNTy(context, CHAR_BIT * sizeof(std::ptrdiff_t))};
+    llvm::Type *ctype_objref{llvm::Type::getScalarTy<decltype(PyObject::ob_refcnt)>(context)};
+    llvm::Value *cvalue_objref_1{llvm::ConstantInt::get(ctype_objref, 1)};
 
     llvm::Module mod{"", context};
 
@@ -150,6 +160,17 @@ public:
 
     void emitBlock(unsigned index);
 
+
+    template<typename T, typename M>
+    auto getMemberPointer(M T::* member_pointer, llvm::Value *instance) {
+        return builder.CreateConstInBoundsGEP1_64(ctype_data, instance, memberOffset(member_pointer));
+    }
+
+    void do_Py_INCREF(llvm::Value *v);
+
+    void do_Py_DECREF(llvm::Value *v);
+
+
 public:
     Translator() {
         func->setAttributes(llvm::AttributeList::get(
@@ -167,12 +188,43 @@ class PyInstrIter {
     const PyInstr *base;
     const size_t size;
     size_t offset{0};
+
+    class IterResult {
+        const bool has_next;
+    public:
+        const PyOpcode opcode{};
+        const PyOparg oparg{};
+
+        IterResult(PyOpcode op, PyOparg arg) : has_next{true}, opcode{op}, oparg{arg} {}
+
+        IterResult() : has_next{false} {}
+
+        explicit operator bool() const {
+            return has_next;
+        }
+    };
+
 public:
     PyInstrIter(const PyInstr *base_, size_t size_) : base(base_), size(size_) {}
 
     [[nodiscard]] auto getOffset() const { return offset; }
 
-    bool next(PyOpcode &opcode, PyOparg &oparg) {
+    IterResult next() {
+        PyOpcode opcode{};
+        PyOparg oparg{};
+        if (offset == size) {
+            return {};
+        }
+        do {
+            assert(offset < size);
+            opcode = _Py_OPCODE(base[offset]);
+            oparg = oparg << EXTENDED_ARG_BITS | _Py_OPARG(base[offset]);
+            offset++;
+        } while (opcode == EXTENDED_ARG);
+        return {opcode, oparg};
+    }
+
+    auto next(PyOpcode &opcode, PyOparg &oparg) {
         if (offset == size) {
             return false;
         }
@@ -193,7 +245,7 @@ public:
 
     static auto chunkNumber(size_t size) { return size / BitsPerValue + !!(size % BitsPerValue); };
 
-    explicit BitArray(size_t size) : DynamicArray<ValueType>(chunkNumber(size)) {}
+    explicit BitArray(size_t size) : DynamicArray<ValueType>(chunkNumber(size), true) {}
 
     void set(size_t index, bool value = true) {
         (*this)[index / BitsPerValue] |= ValueType{value} << index % BitsPerValue;
