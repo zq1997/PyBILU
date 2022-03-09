@@ -1,7 +1,5 @@
 #include <iostream>
 
-#include <opcode.h>
-
 #include "JIT.h"
 
 using namespace std;
@@ -21,8 +19,8 @@ CallInst *createCall(Translator &jit, Value *table, void *const &func, Type *res
 }
 
 void Translator::emitBlock(unsigned index) {
-    auto first = index ? boundaries.get()[index - 1] : 0;
-    auto last = boundaries.get()[index];
+    auto first = index ? boundaries[index - 1] : 0;
+    auto last = boundaries[index];
     PyInstrIter iter(py_instructions + first, last - first);
 
     auto l = builder.CreateLoad(ctype_ptr, builder.CreateConstInBoundsGEP1_32(ctype_ptr, py_fast_locals, 0));

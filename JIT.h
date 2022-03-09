@@ -32,6 +32,72 @@ struct SymbolTable {
     void *PyNumber_Multiply{reinterpret_cast<void *>(::PyNumber_Multiply)};
 } extern const symbol_table;
 
+
+template<typename T, typename = void>
+struct HasDereference : std::false_type {};
+template<typename T>
+struct HasDereference<T, std::void_t<decltype(*std::declval<T>())>> : std::true_type {};
+
+
+template<typename Size=size_t, typename Iter=Size>
+class Range {
+    static_assert(std::is_integral<Size>::value);
+    const Iter from;
+    const Iter to;
+public:
+    class Iterator {
+        Iter i;
+    public:
+        explicit Iterator(const Iter &i_) : i{i_} {}
+
+        auto &operator++() {
+            ++i;
+            return *this;
+        }
+
+        auto operator!=(const Iterator &o) const { return o.i != i; }
+
+        auto &operator*() {
+            if constexpr(HasDereference<Iter>::value) {
+                return *i;
+            } else {
+                return i;
+            }
+        }
+    };
+
+    Range(Size n, Iter from) : from{from}, to{from + n} {}
+
+    explicit Range(Size n) : Range(n, Size{}) {}
+
+    auto begin() { return Iterator{from}; }
+
+    auto end() { return Iterator{to}; }
+};
+
+template<typename T>
+class DynamicArray {
+    std::unique_ptr<T[]> data;
+
+public:
+    using ValueType = T;
+
+    DynamicArray() = default;
+
+    explicit DynamicArray(size_t size, bool init = false) : data{init ? new T[size]{} : new T[size]} {};
+
+    void reserve(size_t size, bool init = false) {
+        data.reset(init ? new T[size]{} : new T[size]);
+    }
+
+    auto &operator[](size_t index) { return data[index]; }
+
+    const auto &operator[](size_t index) const { return data[index]; }
+
+    auto &operator*() const { return data[0]; }
+};
+
+
 class Compiler {
     std::unique_ptr<llvm::TargetMachine> machine;
 
@@ -73,8 +139,8 @@ public:
     PyInstr *py_instructions{};
 
     unsigned block_num{};
-    std::unique_ptr<unsigned> boundaries{};
-    std::unique_ptr<llvm::BasicBlock *> ir_blocks{};
+    DynamicArray<unsigned> boundaries{};
+    DynamicArray<llvm::BasicBlock *> ir_blocks{};
 
     llvm::Value *py_symbol_table{func->getArg(0)};
     llvm::Value *py_fast_locals{func->getArg(1)};
@@ -104,7 +170,7 @@ class PyInstrIter {
 public:
     PyInstrIter(const PyInstr *base_, size_t size_) : base(base_), size(size_) {}
 
-    auto getOffset() const { return offset; }
+    [[nodiscard]] auto getOffset() const { return offset; }
 
     bool next(PyOpcode &opcode, PyOparg &oparg) {
         if (offset == size) {
@@ -121,31 +187,27 @@ public:
 };
 
 
-class BitArray {
+class BitArray : public DynamicArray<unsigned long> {
 public:
-    using EleType = unsigned long;
-    static constexpr auto EleBits = CHAR_BIT * sizeof(EleType);
+    static constexpr auto BitsPerValue = CHAR_BIT * sizeof(ValueType);
 
-    explicit BitArray(size_t s) : size(s), data(new EleType[s / EleBits + !!(s % EleBits)]()) {}
+    static auto chunkNumber(size_t size) { return size / BitsPerValue + !!(size % BitsPerValue); };
+
+    explicit BitArray(size_t size) : DynamicArray<ValueType>(chunkNumber(size)) {}
 
     void set(size_t index, bool value = true) {
-        data.get()[index / EleBits] |= EleType{value} << index % EleBits;
+        (*this)[index / BitsPerValue] |= ValueType{value} << index % BitsPerValue;
     }
 
     bool get(size_t index) {
-        return data.get()[index / EleBits] & (EleType{1} << index % EleBits);
+        return (*this)[index / BitsPerValue] & (ValueType{1} << index % BitsPerValue);
     }
 
-    auto chunkNumber() const { return size / EleBits + !!(size % EleBits); };
-
-    auto count() const {
+    [[nodiscard]] auto count(size_t size) const {
         size_t counted = 0;
-        for (auto i = chunkNumber(); i--;) {
-            counted += std::bitset<EleBits>(data.get()[i]).count();
+        for (auto i = chunkNumber(size); i--;) {
+            counted += std::bitset<BitsPerValue>((*this)[i]).count();
         }
         return counted;
     }
-
-    const size_t size;
-    const std::unique_ptr<EleType> data;
 };

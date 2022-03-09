@@ -54,13 +54,13 @@ public:
 
 void *Translator::operator()(Compiler &compiler, PyCodeObject *cpy_ir) {
     parseCFG(cpy_ir);
-    for (decltype(block_num) i = 0; i < block_num; i++) {
-        ir_blocks.get()[i] = BasicBlock::Create(context, "", func);
+    for (auto &b : Range(block_num, &*ir_blocks)) {
+        b = BasicBlock::Create(context, "", func);
     }
-    builder.SetInsertPoint(ir_blocks.get()[0]);
+    builder.SetInsertPoint(*ir_blocks);
     py_stack = builder.CreateAlloca(ctype_ptr, builder.getInt32(cpy_ir->co_stacksize));
-    for (decltype(block_num) i = 0; i < block_num; i++) {
-        builder.SetInsertPoint(ir_blocks.get()[i]);
+    for (auto &i : Range(block_num)) {
+        builder.SetInsertPoint(ir_blocks[i]);
         emitBlock(i);
     }
     assert(!verifyFunction(*func, &errs()));
@@ -112,18 +112,17 @@ void Translator::parseCFG(PyCodeObject *cpy_ir) {
     is_boundary.set(0, false);
     assert(is_boundary.get(size));
 
-    block_num = is_boundary.count();
-    boundaries.reset(new unsigned[block_num]);
-    ir_blocks.reset(new BasicBlock *[block_num]);
+    block_num = is_boundary.count(size);
+    boundaries.reserve(block_num);
+    ir_blocks.reserve(block_num);
 
     unsigned current_num = 0;
-    auto chunks = is_boundary.chunkNumber();
-    for (decltype(chunks) i = 0; i < chunks; i++) {
-        auto bits = is_boundary.data.get()[i];
-        BitArray::EleType tester{1};
-        for (unsigned j = 0; j < BitArray::EleBits; j++) {
+    for (auto i : Range(BitArray::chunkNumber(size))) {
+        auto bits = is_boundary[i];
+        BitArray::ValueType tester{1};
+        for (unsigned j = 0; j < BitArray::BitsPerValue; j++) {
             if (tester & bits) {
-                boundaries.get()[current_num++] = i * BitArray::EleBits + j;
+                boundaries[current_num++] = i * BitArray::BitsPerValue + j;
             }
             tester <<= 1;
         }

@@ -68,8 +68,7 @@ PyMODINIT_FUNC PyInit_pynic() {
         return nullptr;
     }
 
-    static PyMethodDef meth_def[] = {{"apply", apply, METH_O},
-                                     {}};
+    static PyMethodDef meth_def[] = {{"apply", apply, METH_O}, {}};
     static PyModuleDef mod_def = {
             PyModuleDef_HEAD_INIT,
             "pynic",
