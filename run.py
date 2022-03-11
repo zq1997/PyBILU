@@ -8,7 +8,9 @@ import pynic
 
 @pynic.apply
 def foo(x, y):
-    return x + y
+    xx = x * x
+    yy = y * y
+    return xx + yy
 
 
-print(foo(int('114510'), 4))
+print(foo(3, 4))

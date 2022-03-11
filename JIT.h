@@ -28,10 +28,19 @@ using PyOpcode = decltype(_Py_OPCODE(PyInstr{}));
 using PyOparg = decltype(_Py_OPCODE(PyInstr{}));
 constexpr auto EXTENDED_ARG_BITS = 8;
 
+using FuncPtr = void (*)();
+
+// Casting a function pointer to void * is undefined behavior! Use FuncPtr instead.
 struct SymbolTable {
-    void *PyNumber_Add{reinterpret_cast<void *>(::PyNumber_Add)};
-    void *PyNumber_Multiply{reinterpret_cast<void *>(::PyNumber_Multiply)};
-} extern const symbol_table;
+    FuncPtr PyNumber_Add{reinterpret_cast<FuncPtr>(::PyNumber_Add)};
+    FuncPtr PyNumber_Multiply{reinterpret_cast<FuncPtr>(::PyNumber_Multiply)};
+} extern const global_symbol_table;
+
+
+template<typename T1, typename T2>
+inline auto calcDistance(T1 &from, T2 &to) {
+    return reinterpret_cast<const char *>(&to) - reinterpret_cast<const char *>(&from);
+}
 
 
 template<typename T, typename = void>
@@ -99,13 +108,6 @@ public:
 };
 
 
-template<typename T, typename M>
-constexpr auto memberOffset(M T::* p) {
-    constexpr T v{};
-    return reinterpret_cast<const char *>(&(v.*p)) - reinterpret_cast<const char *>(&v);
-}
-
-
 class Compiler {
     std::unique_ptr<llvm::TargetMachine> machine;
 
@@ -124,12 +126,11 @@ public:
 };
 
 class Translator {
-public:
     llvm::LLVMContext context{};
     llvm::IRBuilder<> builder{context};
 
     llvm::Type *ctype_data{llvm::Type::getIntNTy(context, CHAR_BIT)};
-    llvm::Type *ctype_ptr{ctype_data->getPointerTo()};
+    llvm::PointerType *ctype_ptr{ctype_data->getPointerTo()};
     llvm::Type *ctype_ptrdiff{llvm::Type::getIntNTy(context, CHAR_BIT * sizeof(std::ptrdiff_t))};
     llvm::Type *ctype_objref{llvm::Type::getScalarTy<decltype(PyObject::ob_refcnt)>(context)};
     llvm::Value *cvalue_objref_1{llvm::ConstantInt::get(ctype_objref, 1)};
@@ -155,30 +156,46 @@ public:
     llvm::Value *py_symbol_table{func->getArg(0)};
     llvm::Value *py_fast_locals{func->getArg(1)};
     llvm::Value *py_stack{};
+    std::ptrdiff_t stack_height{};
 
-    void parseCFG(PyCodeObject *cpy_ir);
+    auto getPointer(llvm::Value *base, size_t offset) {
+        return builder.CreateConstInBoundsGEP1_64(ctype_data, base, offset);
+    }
 
-    void emitBlock(unsigned index);
-
+    auto getPointer(llvm::Value *base, size_t offset, llvm::Type *cast_to) {
+        return builder.CreatePointerCast(getPointer(base, offset), cast_to);
+    }
 
     template<typename T, typename M>
     auto getMemberPointer(M T::* member_pointer, llvm::Value *instance) {
-        return builder.CreateConstInBoundsGEP1_64(ctype_data, instance, memberOffset(member_pointer));
+        T dummy;
+        return getPointer(instance, calcDistance(dummy, dummy.*member_pointer));
     }
 
-    void do_Py_INCREF(llvm::Value *v);
+    auto readData(llvm::Value *base, size_t offset, llvm::Type *data_type) {
+        auto p = builder.CreatePointerCast(getPointer(base, offset), data_type->getPointerTo());
+        return builder.CreateLoad(data_type, p);
+    }
 
+    void parseCFG(PyCodeObject *cpy_ir);
+    void emitBlock(unsigned index);
+    llvm::Value *do_GETLOCAL(PyOparg oparg);
+    void do_SETLOCAL(PyOparg oparg, llvm::Value *value);
+    llvm::Value *do_POP();
+    void do_PUSH(llvm::Value *value);
+    void do_Py_INCREF(llvm::Value *v);
     void do_Py_DECREF(llvm::Value *v);
+
+    llvm::CallInst *do_Call(FuncPtr SymbolTable::* callee, llvm::Type *result, llvm::ArrayRef<llvm::Type *> arg_types,
+            std::initializer_list<llvm::Value *> args);
 
 
 public:
     Translator() {
-        func->setAttributes(llvm::AttributeList::get(
-                context, llvm::AttributeList::FunctionIndex,
-                llvm::AttrBuilder()
+        func->setAttributes(
+                llvm::AttributeList::get(context, llvm::AttributeList::FunctionIndex, llvm::AttrBuilder()
                         .addAttribute(llvm::Attribute::NoUnwind)
-                        .addAttribute("tune-cpu", llvm::sys::getHostCPUName())
-        ));
+                        .addAttribute("tune-cpu", llvm::sys::getHostCPUName())));
     }
 
     void *operator()(Compiler &compiler, PyCodeObject *cpy_ir);
@@ -190,14 +207,14 @@ class PyInstrIter {
     size_t offset{0};
 
     class IterResult {
-        const bool has_next;
+        const bool has_next{false};
     public:
         const PyOpcode opcode{};
         const PyOparg oparg{};
 
         IterResult(PyOpcode op, PyOparg arg) : has_next{true}, opcode{op}, oparg{arg} {}
 
-        IterResult() : has_next{false} {}
+        IterResult() = default;
 
         explicit operator bool() const {
             return has_next;
@@ -210,8 +227,8 @@ public:
     [[nodiscard]] auto getOffset() const { return offset; }
 
     IterResult next() {
-        PyOpcode opcode{};
-        PyOparg oparg{};
+        PyOpcode opcode;
+        PyOparg oparg = 0;
         if (offset == size) {
             return {};
         }
@@ -222,19 +239,6 @@ public:
             offset++;
         } while (opcode == EXTENDED_ARG);
         return {opcode, oparg};
-    }
-
-    auto next(PyOpcode &opcode, PyOparg &oparg) {
-        if (offset == size) {
-            return false;
-        }
-        do {
-            assert(offset < size);
-            opcode = _Py_OPCODE(base[offset]);
-            oparg = _Py_OPCODE(base[offset]);
-            offset++;
-        } while (opcode == EXTENDED_ARG);
-        return true;
     }
 };
 

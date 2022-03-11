@@ -79,13 +79,8 @@ void Translator::parseCFG(PyCodeObject *cpy_ir) {
     PyInstrIter iter(py_instructions, size);
     BitArray is_boundary(size + 1);
 
-    PyOpcode opcode;
-    PyOparg oparg;
-    while (iter.next(opcode, oparg)) {
-        switch (opcode) {
-            case EXTENDED_ARG:
-                oparg <<= EXTENDED_ARG_BITS;
-                continue;
+    while (auto instr = iter.next()) {
+        switch (instr.opcode) {
             case JUMP_ABSOLUTE:
             case JUMP_IF_TRUE_OR_POP:
             case JUMP_IF_FALSE_OR_POP:
@@ -93,12 +88,12 @@ void Translator::parseCFG(PyCodeObject *cpy_ir) {
             case POP_JUMP_IF_FALSE:
             case JUMP_IF_NOT_EXC_MATCH:
                 is_boundary.set(iter.getOffset());
-                is_boundary.set(oparg);
+                is_boundary.set(instr.oparg);
                 break;
             case JUMP_FORWARD:
             case FOR_ITER:
                 is_boundary.set(iter.getOffset());
-                is_boundary.set(iter.getOffset() + oparg / sizeof(PyInstr));
+                is_boundary.set(iter.getOffset() + instr.oparg / sizeof(PyInstr));
                 break;
             case RETURN_VALUE:
             case RAISE_VARARGS:
