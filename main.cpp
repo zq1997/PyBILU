@@ -32,8 +32,8 @@ PyObject *eval_func(PyThreadState *tstate, PyFrameObject *frame, int throwflag) 
     }
     // TODO: support generator and throwflag
     assert(!throwflag);
-    return reinterpret_cast<PyObject *(*)(decltype(&global_symbol_table), PyObject **)>(jit_func)(
-            &global_symbol_table, frame->f_localsplus
+    return reinterpret_cast<PyObject *(*)(decltype(&global_symbol_table), PyObject **, PyObject **)>(jit_func)(
+            &global_symbol_table, frame->f_localsplus, &PyTuple_GET_ITEM(frame->f_code->co_consts, 0)
     );
 }
 

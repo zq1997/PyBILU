@@ -11,9 +11,7 @@
 using namespace std;
 using namespace llvm;
 
-static unique_ptr<TargetMachine> machine;
-
-template<typename T>
+template <typename T>
 inline T check(Expected<T> v) {
     if (v) {
         return std::move(*v);
@@ -22,7 +20,7 @@ inline T check(Expected<T> v) {
     }
 }
 
-template<typename T>
+template <typename T>
 inline void throwIf(const T &cond, const string &msg) {
     if (cond) {
         throw runtime_error(msg);
@@ -60,10 +58,8 @@ void *Translator::operator()(Compiler &compiler, PyCodeObject *cpy_ir) {
     builder.SetInsertPoint(*ir_blocks);
     py_stack = builder.CreateAlloca(ctype_ptr, builder.getInt32(cpy_ir->co_stacksize));
     for (auto &i : Range(block_num)) {
-        builder.SetInsertPoint(ir_blocks[i]);
         emitBlock(i);
     }
-    assert(!verifyFunction(*func, &errs()));
 
     auto result = compiler(mod);
 
@@ -81,26 +77,28 @@ void Translator::parseCFG(PyCodeObject *cpy_ir) {
 
     while (auto instr = iter.next()) {
         switch (instr.opcode) {
-            case JUMP_ABSOLUTE:
-            case JUMP_IF_TRUE_OR_POP:
-            case JUMP_IF_FALSE_OR_POP:
-            case POP_JUMP_IF_TRUE:
-            case POP_JUMP_IF_FALSE:
-            case JUMP_IF_NOT_EXC_MATCH:
-                is_boundary.set(iter.getOffset());
-                is_boundary.set(instr.oparg);
-                break;
-            case JUMP_FORWARD:
-            case FOR_ITER:
-                is_boundary.set(iter.getOffset());
-                is_boundary.set(iter.getOffset() + instr.oparg / sizeof(PyInstr));
-                break;
-            case RETURN_VALUE:
-            case RAISE_VARARGS:
-            case RERAISE:
-                is_boundary.set(iter.getOffset());
-            default:
-                break;
+        case JUMP_ABSOLUTE:
+        case JUMP_IF_TRUE_OR_POP:
+        case JUMP_IF_FALSE_OR_POP:
+        case POP_JUMP_IF_TRUE:
+        case POP_JUMP_IF_FALSE:
+        case JUMP_IF_NOT_EXC_MATCH:
+            is_boundary.set(iter.getOffset());
+            is_boundary.set(instr.oparg);
+            break;
+        case JUMP_FORWARD:
+            is_boundary.set(iter.getOffset());
+            is_boundary.set(iter.getOffset() + instr.oparg);
+            break;
+        case FOR_ITER:
+            is_boundary.set(iter.getOffset() + instr.oparg);
+            break;
+        case RETURN_VALUE:
+        case RAISE_VARARGS:
+        case RERAISE:
+            is_boundary.set(iter.getOffset());
+        default:
+            break;
         }
     }
 
@@ -132,7 +130,7 @@ Compiler::Compiler() {
     SubtargetFeatures features;
     StringMap<bool> feature_map;
     sys::getHostCPUFeatures(feature_map);
-    for (auto &f: feature_map) {
+    for (auto &f : feature_map) {
         features.AddFeature(f.first(), f.second);
     }
 
@@ -154,7 +152,10 @@ Compiler::Compiler() {
     PassBuilder pb{machine.get()};
     pb.registerModuleAnalyses(opt_MAM);
     pb.registerFunctionAnalyses(opt_FAM);
+    pb.registerLoopAnalyses(opt_LAM);
     opt_FAM.registerPass([&] { return ModuleAnalysisManagerFunctionProxy(opt_MAM); });
+    opt_FAM.registerPass([&] { return LoopAnalysisManagerFunctionProxy(opt_LAM); });
+    opt_LAM.registerPass([&] { return FunctionAnalysisManagerLoopProxy(opt_FAM); });
     opt_FPM = pb.buildFunctionSimplificationPipeline(
             PassBuilder::OptimizationLevel::O3,
             ThinOrFullLTOPhase::None
@@ -166,9 +167,11 @@ Compiler::Compiler() {
 
 void *Compiler::operator()(llvm::Module &mod) {
     debug.dump(".ll", mod);
-    for (auto &func: mod) {
+    for (auto &func : mod) {
+        assert(!verifyFunction(func, &errs()));
         opt_FPM.run(func, opt_FAM);
     }
+    opt_LAM.clear();
     opt_FAM.clear();
     debug.dump(".opt.ll", mod);
 
@@ -179,7 +182,7 @@ void *Compiler::operator()(llvm::Module &mod) {
     StringRef code{};
     auto obj = check(object::ObjectFile::createObjectFile(
             MemoryBufferRef(StringRef(out_vec.data(), out_vec.size()), "")));
-    for (auto &sec: obj->sections()) {
+    for (auto &sec : obj->sections()) {
         assert(sec.relocations().empty());
         if (sec.isText()) {
             assert(!code.data());

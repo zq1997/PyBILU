@@ -5,6 +5,7 @@
 #include <tuple>
 #include <array>
 #include <type_traits>
+#include <algorithm>
 
 #include <Python.h>
 #include <opcode.h>
@@ -25,31 +26,13 @@
 #include <llvm/Object/ObjectFile.h>
 #include <llvm/MC/SubtargetFeature.h>
 
+#include "shared_symbols.h"
+
 using PyInstr = const _Py_CODEUNIT;
 using PyOpcode = decltype(_Py_OPCODE(PyInstr{}));
 using PyOparg = decltype(_Py_OPCODE(PyInstr{}));
 constexpr auto EXTENDED_ARG_BITS = 8;
 
-
-template <typename Ret, typename ...Args>
-union SymbolEntry {
-public:
-    Ret (*func_addr)(Args...);
-    llvm::FunctionType *func_type;
-
-    explicit SymbolEntry(Ret(*addr)(Args...)) noexcept: func_addr{addr} {}
-
-    auto &operator=(const SymbolEntry &other) noexcept {
-        assert(this != &other);
-        func_type = nullptr;
-        return *this;
-    }
-};
-
-struct SymbolTable {
-    decltype(SymbolEntry{::PyNumber_Add}) PyNumber_Add{::PyNumber_Add};
-    decltype(SymbolEntry{::PyNumber_Add}) PyNumber_Multiply{::PyNumber_Multiply};
-} extern const global_symbol_table;
 
 template <typename T1, typename T2>
 inline auto calcDistance(T1 &from, T2 &to) {
@@ -127,6 +110,7 @@ class Compiler {
 
     llvm::ModuleAnalysisManager opt_MAM;
     llvm::FunctionAnalysisManager opt_FAM;
+    llvm::LoopAnalysisManager opt_LAM;
     llvm::FunctionPassManager opt_FPM;
 
     llvm::legacy::PassManager out_PM;
@@ -156,6 +140,7 @@ class Translator {
     llvm::Function *func{llvm::Function::Create(
             llvm::FunctionType::get(ctype_ptr, {
                     ctype_ptr,
+                    ctype_ptr->getPointerTo(),
                     ctype_ptr->getPointerTo()
             }, false),
             llvm::Function::ExternalLinkage,
@@ -171,6 +156,7 @@ class Translator {
 
     llvm::Value *py_symbol_table{func->getArg(0)};
     llvm::Value *py_fast_locals{func->getArg(1)};
+    llvm::Value *py_consts{func->getArg(2)};
     llvm::Value *py_stack{};
     std::ptrdiff_t stack_height{};
 
@@ -189,6 +175,24 @@ class Translator {
         return getPointer(instance, calcDistance(dummy, dummy.*member_pointer));
     }
 
+    // TODO: 递归方法自动构造类型，或者通过模板，强大地构造
+    template <typename T, typename M>
+    auto getMemberPointerAndLoad(M T::* member_pointer, llvm::Value *instance) {
+        auto ptr = getMemberPointer(member_pointer, instance);
+        llvm::PointerType *type;
+        if constexpr(std::is_pointer<M>::value) {
+            type = llvm::Type::getIntNPtrTy(context, CHAR_BIT);
+        } else {
+            if constexpr(std::is_scalar<M>::value) {
+                type = llvm::Type::getScalarTy<M>(context);
+            } else {
+                return;
+            }
+        }
+        ptr = builder.CreatePointerCast(ptr, type->getPointerTo());
+        return builder.CreateLoad(type, ptr);
+    }
+
     auto readData(llvm::Value *base, ptrdiff_t offset, llvm::Type *data_type) {
         auto p = builder.CreatePointerCast(getPointer(base, offset), data_type->getPointerTo());
         return builder.CreateLoad(data_type, p);
@@ -204,8 +208,12 @@ class Translator {
     void do_Py_DECREF(llvm::Value *v);
 
     template <typename RetT, typename ...ArgTs, typename ...Args>
-    std::enable_if_t<std::conjunction<std::is_same<llvm::Value *, Args>...>::value, llvm::CallInst *>
-    do_Call(SymbolEntry<RetT, ArgTs...> SymbolTable::* entry, Args... args);
+    // std::enable_if_t<std::conjunction<std::is_base_of<llvm::Value *, Args>...>::value, llvm::CallInst *>
+    llvm::CallInst *do_Call(SymbolEntry<RetT, ArgTs...> SymbolTable::* entry, Args... args);
+
+    template <typename RetT, typename ...ArgTs, typename ...Args>
+    // std::enable_if_t<std::conjunction<std::is_base_of<llvm::Value *, Args>...>::value, llvm::CallInst *>
+    llvm::CallInst *do_Call(RetT (*)(ArgTs...), llvm::Value *callee, Args... args);
 
 
 public:
