@@ -7,14 +7,36 @@ using namespace llvm;
 
 const SymbolTable global_symbol_table{};
 
+template <typename T>
+inline auto getType(llvm::LLVMContext &context) {
+    if constexpr(std::is_pointer<T>::value) {
+        return llvm::Type::getIntNPtrTy(context, CHAR_BIT);
+    } else {
+        if constexpr(std::is_scalar<T>::value) {
+            return llvm::Type::getScalarTy<T>(context);
+        } else {
+            return;
+        }
+    }
+}
 
-llvm::CallInst *Translator::do_Call(FuncPtr SymbolTable::* entry, llvm::Type *result,
-        llvm::ArrayRef<llvm::Type *> arg_types,
-        std::initializer_list<llvm::Value *> args) {
-    auto callee_type = FunctionType::get(result, arg_types, false);
-    auto offset = calcDistance(global_symbol_table, global_symbol_table.*entry);
-    auto func_ptr = readData(py_symbol_table, offset, callee_type->getPointerTo());
-    return builder.CreateCall(callee_type, func_ptr, args);
+template <typename RetT, typename ...ArgTs, typename ...Args>
+enable_if_t<std::conjunction<is_same<Value *, Args>...>::value, CallInst *>
+Translator::do_Call(SymbolEntry<RetT, ArgTs...> SymbolTable::* entry, Args... args) {
+    auto &callee_type = (func_type_table.*entry).func_type;
+    if (!callee_type) {
+        callee_type = llvm::FunctionType::get(
+                getType<RetT>(context),
+                {getType<ArgTs>(context)...},
+                false
+        );
+    }
+    auto offset = calcDistance(global_symbol_table, (global_symbol_table.*entry).func_addr);
+    return builder.CreateCall(
+            callee_type,
+            readData(py_symbol_table, offset, callee_type->getPointerTo()),
+            {args...}
+    );
 }
 
 void Translator::do_Py_INCREF(Value *py_obj) {
@@ -66,7 +88,6 @@ void Translator::emitBlock(unsigned index) {
     auto first = index ? boundaries[index - 1] : 0;
     auto last = boundaries[index];
     PyInstrIter iter(py_instructions + first, last - first);
-    Type *arg_types[]{ctype_ptr, ctype_ptr};
     while (auto instr = iter.next()) {
         switch (instr.opcode) {
         case LOAD_FAST: {
@@ -83,7 +104,7 @@ void Translator::emitBlock(unsigned index) {
         case BINARY_MULTIPLY: {
             auto right = do_POP();
             auto left = do_POP();
-            auto res = do_Call(&SymbolTable::PyNumber_Multiply, ctype_ptr, arg_types, {left, right});
+            auto res = do_Call(&SymbolTable::PyNumber_Multiply, left, right);
             do_Py_DECREF(left);
             do_Py_DECREF(right);
             do_PUSH(res);
@@ -92,7 +113,7 @@ void Translator::emitBlock(unsigned index) {
         case BINARY_ADD: {
             auto right = do_POP();
             auto left = do_POP();
-            auto res = do_Call(&SymbolTable::PyNumber_Add, ctype_ptr, arg_types, {left, right});
+            auto res = do_Call(&SymbolTable::PyNumber_Add, left, right);
             do_Py_DECREF(left);
             do_Py_DECREF(right);
             do_PUSH(res);

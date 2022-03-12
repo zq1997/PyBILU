@@ -3,6 +3,8 @@
 #include <memory>
 #include <bitset>
 #include <tuple>
+#include <array>
+#include <type_traits>
 
 #include <Python.h>
 #include <opcode.h>
@@ -28,28 +30,40 @@ using PyOpcode = decltype(_Py_OPCODE(PyInstr{}));
 using PyOparg = decltype(_Py_OPCODE(PyInstr{}));
 constexpr auto EXTENDED_ARG_BITS = 8;
 
-using FuncPtr = void (*)();
 
-// Casting a function pointer to void * is undefined behavior! Use FuncPtr instead.
+template <typename Ret, typename ...Args>
+union SymbolEntry {
+public:
+    Ret (*func_addr)(Args...);
+    llvm::FunctionType *func_type;
+
+    explicit SymbolEntry(Ret(*addr)(Args...)) noexcept: func_addr{addr} {}
+
+    auto &operator=(const SymbolEntry &other) noexcept {
+        assert(this != &other);
+        func_type = nullptr;
+        return *this;
+    }
+};
+
 struct SymbolTable {
-    FuncPtr PyNumber_Add{reinterpret_cast<FuncPtr>(::PyNumber_Add)};
-    FuncPtr PyNumber_Multiply{reinterpret_cast<FuncPtr>(::PyNumber_Multiply)};
+    decltype(SymbolEntry{::PyNumber_Add}) PyNumber_Add{::PyNumber_Add};
+    decltype(SymbolEntry{::PyNumber_Add}) PyNumber_Multiply{::PyNumber_Multiply};
 } extern const global_symbol_table;
 
-
-template<typename T1, typename T2>
+template <typename T1, typename T2>
 inline auto calcDistance(T1 &from, T2 &to) {
     return reinterpret_cast<const char *>(&to) - reinterpret_cast<const char *>(&from);
 }
 
 
-template<typename T, typename = void>
+template <typename T, typename = void>
 struct HasDereference : std::false_type {};
-template<typename T>
+template <typename T>
 struct HasDereference<T, std::void_t<decltype(*std::declval<T>())>> : std::true_type {};
 
 
-template<typename Size=size_t, typename Iter=Size>
+template <typename Size=size_t, typename Iter=Size>
 class Range {
     static_assert(std::is_integral<Size>::value);
     const Iter from;
@@ -85,7 +99,7 @@ public:
     auto end() { return Iterator{to}; }
 };
 
-template<typename T>
+template <typename T>
 class DynamicArray {
     std::unique_ptr<T[]> data;
 
@@ -129,6 +143,8 @@ class Translator {
     llvm::LLVMContext context{};
     llvm::IRBuilder<> builder{context};
 
+    SymbolTable func_type_table{};
+
     llvm::Type *ctype_data{llvm::Type::getIntNTy(context, CHAR_BIT)};
     llvm::PointerType *ctype_ptr{ctype_data->getPointerTo()};
     llvm::Type *ctype_ptrdiff{llvm::Type::getIntNTy(context, CHAR_BIT * sizeof(std::ptrdiff_t))};
@@ -158,21 +174,22 @@ class Translator {
     llvm::Value *py_stack{};
     std::ptrdiff_t stack_height{};
 
-    auto getPointer(llvm::Value *base, size_t offset) {
-        return builder.CreateConstInBoundsGEP1_64(ctype_data, base, offset);
+    auto getPointer(llvm::Value *base, ptrdiff_t offset) {
+        auto offset_value = llvm::ConstantInt::get(ctype_ptrdiff, offset);
+        return builder.CreateInBoundsGEP(ctype_data, base, offset_value);
     }
 
-    auto getPointer(llvm::Value *base, size_t offset, llvm::Type *cast_to) {
+    auto getPointer(llvm::Value *base, ptrdiff_t offset, llvm::Type *cast_to) {
         return builder.CreatePointerCast(getPointer(base, offset), cast_to);
     }
 
-    template<typename T, typename M>
+    template <typename T, typename M>
     auto getMemberPointer(M T::* member_pointer, llvm::Value *instance) {
         T dummy;
         return getPointer(instance, calcDistance(dummy, dummy.*member_pointer));
     }
 
-    auto readData(llvm::Value *base, size_t offset, llvm::Type *data_type) {
+    auto readData(llvm::Value *base, ptrdiff_t offset, llvm::Type *data_type) {
         auto p = builder.CreatePointerCast(getPointer(base, offset), data_type->getPointerTo());
         return builder.CreateLoad(data_type, p);
     }
@@ -186,8 +203,9 @@ class Translator {
     void do_Py_INCREF(llvm::Value *v);
     void do_Py_DECREF(llvm::Value *v);
 
-    llvm::CallInst *do_Call(FuncPtr SymbolTable::* callee, llvm::Type *result, llvm::ArrayRef<llvm::Type *> arg_types,
-            std::initializer_list<llvm::Value *> args);
+    template <typename RetT, typename ...ArgTs, typename ...Args>
+    std::enable_if_t<std::conjunction<std::is_same<llvm::Value *, Args>...>::value, llvm::CallInst *>
+    do_Call(SymbolEntry<RetT, ArgTs...> SymbolTable::* entry, Args... args);
 
 
 public:
@@ -196,6 +214,7 @@ public:
                 llvm::AttributeList::get(context, llvm::AttributeList::FunctionIndex, llvm::AttrBuilder()
                         .addAttribute(llvm::Attribute::NoUnwind)
                         .addAttribute("tune-cpu", llvm::sys::getHostCPUName())));
+        func_type_table = global_symbol_table;
     }
 
     void *operator()(Compiler &compiler, PyCodeObject *cpy_ir);
