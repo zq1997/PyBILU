@@ -50,6 +50,8 @@ CallInst *Translator::do_Call(RetT (*)(ArgTs...), llvm::Value *callee, Args... a
 }
 
 void Translator::do_Py_INCREF(Value *py_obj) {
+    auto ctype_objref = llvm::Type::getScalarTy<decltype(PyObject::ob_refcnt)>(context);
+    auto *cvalue_objref_1 = llvm::ConstantInt::get(ctype_objref, 1);
     auto ref = builder.CreatePointerCast(
             getMemberPointer(&PyObject::ob_refcnt, py_obj),
             ctype_objref->getPointerTo()
@@ -58,6 +60,8 @@ void Translator::do_Py_INCREF(Value *py_obj) {
 }
 
 void Translator::do_Py_DECREF(Value *py_obj) {
+    auto ctype_objref = llvm::Type::getScalarTy<decltype(PyObject::ob_refcnt)>(context);
+    auto *cvalue_objref_1 = llvm::ConstantInt::get(ctype_objref, 1);
     auto ref = builder.CreatePointerCast(
             getMemberPointer(&PyObject::ob_refcnt, py_obj),
             ctype_objref->getPointerTo()
@@ -142,6 +146,42 @@ void Translator::emitBlock(unsigned index) {
             auto right = do_POP();
             auto left = do_POP();
             auto res = do_Call(&SymbolTable::PyNumber_Add, left, right);
+            do_Py_DECREF(left);
+            do_Py_DECREF(right);
+            do_PUSH(res);
+            break;
+        }
+        case BINARY_SUBTRACT: {
+            auto right = do_POP();
+            auto left = do_POP();
+            auto res = do_Call(&SymbolTable::PyNumber_Substract, left, right);
+            do_Py_DECREF(left);
+            do_Py_DECREF(right);
+            do_PUSH(res);
+            break;
+        }
+        case BINARY_TRUE_DIVIDE: {
+            auto right = do_POP();
+            auto left = do_POP();
+            auto res = do_Call(&SymbolTable::PyNumber_TrueDivide, left, right);
+            do_Py_DECREF(left);
+            do_Py_DECREF(right);
+            do_PUSH(res);
+            break;
+        }
+        case BINARY_FLOOR_DIVIDE: {
+            auto right = do_POP();
+            auto left = do_POP();
+            auto res = do_Call(&SymbolTable::PyNumber_FloorDivide, left, right);
+            do_Py_DECREF(left);
+            do_Py_DECREF(right);
+            do_PUSH(res);
+            break;
+        }
+        case BINARY_MODULO: {
+            auto right = do_POP();
+            auto left = do_POP();
+            auto res = do_Call(&SymbolTable::PyNumber_Remainder, left, right);
             do_Py_DECREF(left);
             do_Py_DECREF(right);
             do_PUSH(res);

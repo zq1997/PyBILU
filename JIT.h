@@ -127,13 +127,11 @@ class Translator {
     llvm::LLVMContext context{};
     llvm::IRBuilder<> builder{context};
 
-    SymbolTable func_type_table{};
+    SymbolTable func_type_table{SymbolTable::getEmpty()};
 
     llvm::Type *ctype_data{llvm::Type::getIntNTy(context, CHAR_BIT)};
     llvm::PointerType *ctype_ptr{ctype_data->getPointerTo()};
     llvm::Type *ctype_ptrdiff{llvm::Type::getIntNTy(context, CHAR_BIT * sizeof(std::ptrdiff_t))};
-    llvm::Type *ctype_objref{llvm::Type::getScalarTy<decltype(PyObject::ob_refcnt)>(context)};
-    llvm::Value *cvalue_objref_1{llvm::ConstantInt::get(ctype_objref, 1)};
 
     llvm::Module mod{"", context};
 
@@ -222,7 +220,6 @@ public:
                 llvm::AttributeList::get(context, llvm::AttributeList::FunctionIndex, llvm::AttrBuilder()
                         .addAttribute(llvm::Attribute::NoUnwind)
                         .addAttribute("tune-cpu", llvm::sys::getHostCPUName())));
-        func_type_table = global_symbol_table;
     }
 
     void *operator()(Compiler &compiler, PyCodeObject *cpy_ir);
