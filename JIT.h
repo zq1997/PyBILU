@@ -35,10 +35,9 @@ constexpr auto EXTENDED_ARG_BITS = 8;
 
 
 template <typename T1, typename T2>
-inline auto calcDistance(T1 &from, T2 &to) {
+inline auto dataDistance(T1 &from, T2 &to) {
     return reinterpret_cast<const char *>(&to) - reinterpret_cast<const char *>(&from);
 }
-
 
 template <typename T, typename = void>
 struct HasDereference : std::false_type {};
@@ -170,7 +169,7 @@ class Translator {
     template <typename T, typename M>
     auto getMemberPointer(M T::* member_pointer, llvm::Value *instance) {
         T dummy;
-        return getPointer(instance, calcDistance(dummy, dummy.*member_pointer));
+        return getPointer(instance, dataDistance(dummy, dummy.*member_pointer));
     }
 
     // TODO: 递归方法自动构造类型，或者通过模板，强大地构造
@@ -205,12 +204,10 @@ class Translator {
     void do_Py_INCREF(llvm::Value *v);
     void do_Py_DECREF(llvm::Value *v);
 
-    template <typename RetT, typename ...ArgTs, typename ...Args>
-    // std::enable_if_t<std::conjunction<std::is_base_of<llvm::Value *, Args>...>::value, llvm::CallInst *>
-    llvm::CallInst *do_Call(SymbolEntry<RetT, ArgTs...> SymbolTable::* entry, Args... args);
+    template <typename T, typename ...Args>
+    llvm::CallInst *do_Call(SymbolEntry<T> SymbolTable::* entry, Args... args);
 
     template <typename RetT, typename ...ArgTs, typename ...Args>
-    // std::enable_if_t<std::conjunction<std::is_base_of<llvm::Value *, Args>...>::value, llvm::CallInst *>
     llvm::CallInst *do_Call(RetT (*)(ArgTs...), llvm::Value *callee, Args... args);
 
 

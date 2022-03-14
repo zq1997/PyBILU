@@ -5,46 +5,19 @@
 using namespace std;
 using namespace llvm;
 
-template <typename T>
-inline auto getType(llvm::LLVMContext &context) {
-    if constexpr(std::is_pointer<T>::value) {
-        return llvm::Type::getIntNPtrTy(context, CHAR_BIT);
-    } else {
-        if constexpr(std::is_scalar<T>::value) {
-            return llvm::Type::getScalarTy<T>(context);
-        } else {
-            return;
-        }
-    }
+
+template <typename T, typename ...Args>
+CallInst *Translator::do_Call(SymbolEntry<T> SymbolTable::* entry, Args... args) {
+    auto callee_type = global_symbol_table.getType(entry, func_type_table, context);
+    auto callee = readData(py_symbol_table,
+            dataDistance(global_symbol_table, global_symbol_table.*entry),
+            callee_type->getPointerTo());
+    return builder.CreateCall(callee_type, callee, {args...});
 }
 
 template <typename RetT, typename ...ArgTs, typename ...Args>
-// enable_if_t<std::conjunction<is_base_of<Value *, Args>...>::value, CallInst *>
-CallInst *Translator::do_Call(SymbolEntry<RetT, ArgTs...> SymbolTable::* entry, Args... args) {
-    auto &callee_type = (func_type_table.*entry).func_type;
-    if (!callee_type) {
-        callee_type = llvm::FunctionType::get(
-                getType<RetT>(context),
-                {getType<ArgTs>(context)...},
-                false
-        );
-    }
-    auto offset = calcDistance(global_symbol_table, (global_symbol_table.*entry).func_addr);
-    return builder.CreateCall(
-            callee_type,
-            readData(py_symbol_table, offset, callee_type->getPointerTo()),
-            {args...}
-    );
-}
-
-template <typename RetT, typename ...ArgTs, typename ...Args>
-// std::enable_if_t<std::conjunction<std::is_base_of<llvm::Value *, Args>...>::value, llvm::CallInst *>
-CallInst *Translator::do_Call(RetT (*)(ArgTs...), llvm::Value *callee, Args... args) {
-    auto callee_type = llvm::FunctionType::get(
-            getType<RetT>(context),
-            {getType<ArgTs>(context)...},
-            false
-    );
+CallInst *Translator::do_Call(RetT (*func_pointer)(ArgTs...), llvm::Value *callee, Args... args) {
+    auto callee_type = getFunctionType(func_pointer, context);
     callee = builder.CreatePointerCast(callee, callee_type->getPointerTo());
     return builder.CreateCall(callee_type, callee, {args...});
 }
@@ -190,8 +163,7 @@ void Translator::emitBlock(unsigned index) {
         case COMPARE_OP: {
             auto right = do_POP();
             auto left = do_POP();
-            auto res = do_Call(&SymbolTable::PyObject_RichCompare, left, right,
-                    ConstantInt::get(Type::getScalarTy<int>(context), instr.oparg));
+            auto res = do_Call(&SymbolTable::PyObject_RichCompare, left, right, castToLLVMValue(instr.oparg, context));
             do_Py_DECREF(left);
             do_Py_DECREF(right);
             do_PUSH(res);
