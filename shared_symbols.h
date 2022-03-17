@@ -4,6 +4,7 @@
 
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/Function.h>
+#include <llvm/IR/BasicBlock.h>
 
 using PyInstr = const _Py_CODEUNIT;
 using PyOpcode = decltype(_Py_OPCODE(PyInstr{}));
@@ -139,14 +140,29 @@ public:
 };
 
 using RegisteredLLVMTypes = TypeRegisister<LLVMType,
-        PyOparg,
+        char,
         ptrdiff_t,
-        PyObject,
+        PyOparg,
+        Py_ssize_t,
+        Py_ssize_t *,
+        PyTypeObject *,
+        PyTypeObject **,
         PyObject *,
+        PyObject **,
         int(PyObject *),
+        int(*)(PyObject *),
+        int(**)(PyObject *),
+        PyObject *(*)(PyObject *),
+        PyObject *(**)(PyObject *),
         PyObject *(PyObject *),
+        PyObject *(*)(PyObject *),
+        PyObject *(**)(PyObject *),
         PyObject *(PyObject *, PyObject *),
-        PyObject *(PyObject *, PyObject *, int)
+        PyObject *(*)(PyObject *, PyObject *),
+        PyObject *(**)(PyObject *, PyObject *),
+        PyObject *(PyObject *, PyObject *, int),
+        PyObject *(*)(PyObject *, PyObject *, int),
+        PyObject *(**)(PyObject *, PyObject *, int)
 >;
 
 template <typename T>

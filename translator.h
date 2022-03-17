@@ -78,7 +78,7 @@ class Translator {
 
     auto getPointer(llvm::Value *base, ptrdiff_t offset) {
         auto offset_value = castToLLVMValue(offset, types);
-        return builder.CreateInBoundsGEP(types.get<PyObject>(), base, offset_value);
+        return builder.CreateInBoundsGEP(types.get<char>(), base, offset_value);
     }
 
     auto getPointer(llvm::Value *base, ptrdiff_t offset, llvm::Type *cast_to) {
@@ -86,32 +86,23 @@ class Translator {
     }
 
     template <typename T, typename M>
-    auto getMemberPointer(M T::* member_pointer, llvm::Value *instance) {
+    auto getPointer(llvm::Value *instance, M T::* member_pointer) {
+        llvm::Type *cast_to = types.get<std::add_pointer_t<M>>();
         T dummy;
-        return getPointer(instance, dataDistance(dummy, dummy.*member_pointer));
+        const auto offset = dataDistance(dummy, dummy.*member_pointer);
+        return getPointer(instance, offset, cast_to);
     }
 
-    // TODO: 递归方法自动构造类型，或者通过模板，强大地构造
+    template <typename T>
+    auto readData(llvm::Value *base, ptrdiff_t offset) {
+        auto ptr = getPointer(base, offset, types.get<std::add_pointer_t<T>>());
+        return builder.CreateLoad(types.get<T>(), ptr);
+    }
+
     template <typename T, typename M>
-    auto getMemberPointerAndLoad(M T::* member_pointer, llvm::Value *instance) {
-        auto ptr = getMemberPointer(member_pointer, instance);
-        llvm::PointerType *type;
-        if constexpr(std::is_pointer<M>::value) {
-            type = llvm::Type::getIntNPtrTy(context, CHAR_BIT);
-        } else {
-            if constexpr(std::is_scalar<M>::value) {
-                type = llvm::Type::getScalarTy<M>(context);
-            } else {
-                return;
-            }
-        }
-        ptr = builder.CreatePointerCast(ptr, type->getPointerTo());
-        return builder.CreateLoad(type, ptr);
-    }
-
-    auto readData(llvm::Value *base, ptrdiff_t offset, llvm::Type *data_type) {
-        auto p = builder.CreatePointerCast(getPointer(base, offset), data_type->getPointerTo());
-        return builder.CreateLoad(data_type, p);
+    auto readData(M T::* member_pointer, llvm::Value *instance) {
+        auto ptr = getPointer(instance, member_pointer);
+        return builder.CreateLoad(types.get<M>(), ptr);
     }
 
     void parseCFG(PyCodeObject *cpy_ir);
@@ -135,8 +126,26 @@ class Translator {
     llvm::CallInst *do_Call(T *SymbolTable::* entry, Args... args) {
         auto callee_type = types.get<T>();
         auto offset = dataDistance(shared_symbol_table, shared_symbol_table.*entry);
-        auto callee = readData(py_symbol_table, offset, callee_type->getPointerTo());
+        auto callee = readData<T *>(py_symbol_table, offset);
         return builder.CreateCall(callee_type, callee, {args...});
+    }
+
+    void do_if(llvm::Value *cond,
+            const std::function<void()> &create_then,
+            const std::function<void()> &create_else = {}) {
+        auto b_then = llvm::BasicBlock::Create(context, "", func);
+        auto b_end = llvm::BasicBlock::Create(context, "", func);
+        auto b_else = create_else ? llvm::BasicBlock::Create(context, "", func) : b_end;
+        builder.CreateCondBr(cond, b_then, b_end);
+        builder.SetInsertPoint(b_then);
+        create_then();
+        builder.CreateBr(b_end);
+        if (create_else) {
+            builder.SetInsertPoint(b_else);
+            create_else();
+            builder.CreateBr(b_end);
+        }
+        builder.SetInsertPoint(b_end);
     }
 
 
