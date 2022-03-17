@@ -56,7 +56,7 @@ void *Translator::operator()(Compiler &compiler, PyCodeObject *cpy_ir) {
         b = BasicBlock::Create(context, "", func);
     }
     builder.SetInsertPoint(*ir_blocks);
-    py_stack = builder.CreateAlloca(ctype_ptr, builder.getInt32(cpy_ir->co_stacksize));
+    py_stack = builder.CreateAlloca(types.get<PyObject *>(), builder.getInt32(cpy_ir->co_stacksize));
     for (auto &i : Range(block_num)) {
         emitBlock(i);
     }

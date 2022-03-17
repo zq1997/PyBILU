@@ -28,11 +28,6 @@
 
 #include "shared_symbols.h"
 
-using PyInstr = const _Py_CODEUNIT;
-using PyOpcode = decltype(_Py_OPCODE(PyInstr{}));
-using PyOparg = decltype(_Py_OPCODE(PyInstr{}));
-constexpr auto EXTENDED_ARG_BITS = 8;
-
 
 template <typename T1, typename T2>
 inline auto dataDistance(T1 &from, T2 &to) {
@@ -124,22 +119,11 @@ public:
 
 class Translator {
     llvm::LLVMContext context{};
+    RegisteredLLVMTypes types{context};
     llvm::IRBuilder<> builder{context};
-
-    SymbolTable func_type_table{SymbolTable::getEmpty()};
-
-    llvm::Type *ctype_data{llvm::Type::getIntNTy(context, CHAR_BIT)};
-    llvm::PointerType *ctype_ptr{ctype_data->getPointerTo()};
-    llvm::Type *ctype_ptrdiff{llvm::Type::getIntNTy(context, CHAR_BIT * sizeof(std::ptrdiff_t))};
-
     llvm::Module mod{"", context};
-
     llvm::Function *func{llvm::Function::Create(
-            llvm::FunctionType::get(ctype_ptr, {
-                    ctype_ptr,
-                    ctype_ptr->getPointerTo(),
-                    ctype_ptr->getPointerTo()
-            }, false),
+            NormalizedLLVMType<PyObject *(PyObject *, PyObject **, PyObject **)>(context)(),
             llvm::Function::ExternalLinkage,
             "",
             &mod
@@ -158,8 +142,8 @@ class Translator {
     std::ptrdiff_t stack_height{};
 
     auto getPointer(llvm::Value *base, ptrdiff_t offset) {
-        auto offset_value = llvm::ConstantInt::get(ctype_ptrdiff, offset);
-        return builder.CreateInBoundsGEP(ctype_data, base, offset_value);
+        auto offset_value = castToLLVMValue(offset, types);
+        return builder.CreateInBoundsGEP(types.get<PyObject>(), base, offset_value);
     }
 
     auto getPointer(llvm::Value *base, ptrdiff_t offset, llvm::Type *cast_to) {
@@ -205,10 +189,20 @@ class Translator {
     void do_Py_DECREF(llvm::Value *v);
 
     template <typename T, typename ...Args>
-    llvm::CallInst *do_Call(SymbolEntry<T> SymbolTable::* entry, Args... args);
+    llvm::CallInst *do_Call(llvm::Value *callee, Args... args) {
+        // TODO: remove_pointer_t太丑了
+        auto callee_type = types.get<std::remove_pointer_t<T>>();
+        callee = builder.CreatePointerCast(callee, callee_type->getPointerTo());
+        return builder.CreateCall(callee_type, callee, {args...});
+    }
 
-    template <typename RetT, typename ...ArgTs, typename ...Args>
-    llvm::CallInst *do_Call(RetT (*)(ArgTs...), llvm::Value *callee, Args... args);
+    template <typename T, typename ...Args>
+    llvm::CallInst *do_Call(T *SymbolTable::* entry, Args... args) {
+        auto callee_type = types.get<T>();
+        auto offset = dataDistance(shared_symbol_table, shared_symbol_table.*entry);
+        auto callee = readData(py_symbol_table, offset, callee_type->getPointerTo());
+        return builder.CreateCall(callee_type, callee, {args...});
+    }
 
 
 public:

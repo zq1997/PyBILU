@@ -7,6 +7,8 @@ using namespace std;
 
 #include "JIT.h"
 
+const SymbolTable shared_symbol_table{};
+
 static unique_ptr<Compiler> compiler;
 static unique_ptr<Translator> translator;
 static Py_ssize_t code_extra_index;
@@ -16,9 +18,9 @@ PyObject *vectorcall(PyObject *callable, PyObject *const *args, size_t nargsf, P
     auto func = reinterpret_cast<PyFunctionObject *>(callable);
     // argument check here
     // auto nargs = PyVectorcall_NARGS(nargsf);
-    PyObject *(*jit_func)(decltype(&global_symbol_table), PyObject *const *);
+    PyObject *(*jit_func)(decltype(&shared_symbol_table), PyObject *const *);
     _PyCode_GetExtra(func->func_code, code_extra_index, reinterpret_cast<void **>(&jit_func));
-    return jit_func(&global_symbol_table, args);
+    return jit_func(&shared_symbol_table, args);
 }
 
 PyObject *eval_func(PyThreadState *tstate, PyFrameObject *frame, int throwflag) {
@@ -32,8 +34,8 @@ PyObject *eval_func(PyThreadState *tstate, PyFrameObject *frame, int throwflag) 
     }
     // TODO: support generator and throwflag
     assert(!throwflag);
-    return reinterpret_cast<PyObject *(*)(decltype(&global_symbol_table), PyObject **, PyObject **)>(jit_func)(
-            &global_symbol_table, frame->f_localsplus, &PyTuple_GET_ITEM(frame->f_code->co_consts, 0)
+    return reinterpret_cast<PyObject *(*)(decltype(&shared_symbol_table), PyObject **, PyObject **)>(jit_func)(
+            &shared_symbol_table, frame->f_localsplus, &PyTuple_GET_ITEM(frame->f_code->co_consts, 0)
     );
 }
 

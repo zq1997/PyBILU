@@ -6,22 +6,6 @@ using namespace std;
 using namespace llvm;
 
 
-template <typename T, typename ...Args>
-CallInst *Translator::do_Call(SymbolEntry<T> SymbolTable::* entry, Args... args) {
-    auto callee_type = global_symbol_table.getType(entry, func_type_table, context);
-    auto callee = readData(py_symbol_table,
-            dataDistance(global_symbol_table, global_symbol_table.*entry),
-            callee_type->getPointerTo());
-    return builder.CreateCall(callee_type, callee, {args...});
-}
-
-template <typename RetT, typename ...ArgTs, typename ...Args>
-CallInst *Translator::do_Call(RetT (*func_pointer)(ArgTs...), llvm::Value *callee, Args... args) {
-    auto callee_type = getFunctionType(func_pointer, context);
-    callee = builder.CreatePointerCast(callee, callee_type->getPointerTo());
-    return builder.CreateCall(callee_type, callee, {args...});
-}
-
 void Translator::do_Py_INCREF(Value *py_obj) {
     auto ctype_objref = llvm::Type::getScalarTy<decltype(PyObject::ob_refcnt)>(context);
     auto *cvalue_objref_1 = llvm::ConstantInt::get(ctype_objref, 1);
@@ -43,17 +27,17 @@ void Translator::do_Py_DECREF(Value *py_obj) {
 }
 
 Value *Translator::do_GETLOCAL(PyOparg oparg) {
-    auto ptr = builder.CreateConstInBoundsGEP1_64(ctype_ptr, py_fast_locals, oparg);
-    return builder.CreateLoad(ctype_ptr, ptr);
+    auto ptr = builder.CreateConstInBoundsGEP1_64(types.get<PyObject *>(), py_fast_locals, oparg);
+    return builder.CreateLoad(types.get<PyObject *>(), ptr);
 }
 
 void Translator::do_SETLOCAL(PyOparg oparg, llvm::Value *value) {
-    auto ptr = builder.CreateConstInBoundsGEP1_64(ctype_ptr, py_fast_locals, oparg);
-    auto old_value = builder.CreateLoad(ctype_ptr, ptr);
+    auto ptr = builder.CreateConstInBoundsGEP1_64(types.get<PyObject *>(), py_fast_locals, oparg);
+    auto old_value = builder.CreateLoad(types.get<PyObject *>(), ptr);
     builder.CreateStore(value, ptr);
     auto b_decref = BasicBlock::Create(context, "", func);
     auto b_end = BasicBlock::Create(context, "", func);
-    auto old_is_not_empty = builder.CreateICmpNE(old_value, ConstantPointerNull::get(ctype_ptr));
+    auto old_is_not_empty = builder.CreateICmpNE(old_value, ConstantPointerNull::get(types.get<PyObject *>()));
     builder.CreateCondBr(old_is_not_empty, b_decref, b_end);
     builder.SetInsertPoint(b_decref);
     do_Py_DECREF(old_value);
@@ -62,12 +46,12 @@ void Translator::do_SETLOCAL(PyOparg oparg, llvm::Value *value) {
 }
 
 llvm::Value *Translator::do_POP() {
-    auto ptr = builder.CreateConstInBoundsGEP1_64(ctype_ptr, py_stack, --stack_height);
-    return builder.CreateLoad(ctype_ptr, ptr);
+    auto ptr = builder.CreateConstInBoundsGEP1_64(types.get<PyObject *>(), py_stack, --stack_height);
+    return builder.CreateLoad(types.get<PyObject *>(), ptr);
 }
 
 void Translator::do_PUSH(llvm::Value *value) {
-    auto ptr = builder.CreateConstInBoundsGEP1_64(ctype_ptr, py_stack, stack_height++);
+    auto ptr = builder.CreateConstInBoundsGEP1_64(types.get<PyObject *>(), py_stack, stack_height++);
     builder.CreateStore(value, ptr);
 }
 
@@ -89,8 +73,8 @@ void Translator::emitBlock(unsigned index) {
             break;
         }
         case LOAD_CONST: {
-            auto value = builder.CreateConstInBoundsGEP1_64(ctype_ptr, py_consts, instr.oparg);
-            value = builder.CreateLoad(ctype_ptr, value);
+            auto value = builder.CreateConstInBoundsGEP1_64(types.get<PyObject *>(), py_consts, instr.oparg);
+            value = builder.CreateLoad(types.get<PyObject *>(), value);
             do_Py_INCREF(value);
             do_PUSH(value);
             break;
@@ -127,7 +111,7 @@ void Translator::emitBlock(unsigned index) {
         case BINARY_SUBTRACT: {
             auto right = do_POP();
             auto left = do_POP();
-            auto res = do_Call(&SymbolTable::PyNumber_Substract, left, right);
+            auto res = do_Call(&SymbolTable::PyNumber_Subtract, left, right);
             do_Py_DECREF(left);
             do_Py_DECREF(right);
             do_PUSH(res);
@@ -163,7 +147,7 @@ void Translator::emitBlock(unsigned index) {
         case COMPARE_OP: {
             auto right = do_POP();
             auto left = do_POP();
-            auto res = do_Call(&SymbolTable::PyObject_RichCompare, left, right, castToLLVMValue(instr.oparg, context));
+            auto res = do_Call(&SymbolTable::PyObject_RichCompare, left, right, castToLLVMValue(instr.oparg, types));
             do_Py_DECREF(left);
             do_Py_DECREF(right);
             do_PUSH(res);
@@ -207,8 +191,8 @@ void Translator::emitBlock(unsigned index) {
             auto iter = do_POP();
             auto the_type = getMemberPointerAndLoad(&PyObject::ob_type, iter);
             auto tp_iternext = getMemberPointerAndLoad(&PyTypeObject::tp_iternext, the_type);
-            auto next = do_Call(PyLong_Type.tp_iternext, tp_iternext, iter);
-            auto cmp = builder.CreateICmpEQ(next, ConstantPointerNull::get(ctype_ptr));
+            auto next = do_Call<decltype(PyTypeObject::tp_iternext)>(tp_iternext, iter);
+            auto cmp = builder.CreateICmpEQ(next, ConstantPointerNull::get(types.get<PyObject *>()));
             auto b_continue = BasicBlock::Create(context, "", func);
             auto b_break = BasicBlock::Create(context, "", func);
             builder.CreateCondBr(cmp, b_break, b_continue);
