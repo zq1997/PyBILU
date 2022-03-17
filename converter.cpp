@@ -1,6 +1,6 @@
 #include <iostream>
 
-#include "JIT.h"
+#include "translator.h"
 
 using namespace std;
 using namespace llvm;

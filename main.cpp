@@ -5,7 +5,7 @@ using namespace std;
 #include <Python.h>
 #include <frameobject.h>
 
-#include "JIT.h"
+#include "translator.h"
 
 const SymbolTable shared_symbol_table{};
 

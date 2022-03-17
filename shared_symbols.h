@@ -28,17 +28,17 @@ struct TypeWrapper {
 };
 
 template <typename T>
-constexpr auto NormalizeType();
+constexpr auto Normalizer();
 template <typename T>
-using NormalizedType = typename decltype(NormalizeType<T>())::type;
+using NormalizedType = typename decltype(Normalizer<T>())::type;
 
 template <typename Ret, typename... Args>
-constexpr auto NormalizeType(TypeWrapper<Ret(Args...)>) {
+constexpr auto Normalizer(TypeWrapper<Ret(Args...)>) {
     return TypeWrapper<NormalizedType<Ret>(NormalizedType<Args>...)>{};
 }
 
 template <typename T>
-constexpr auto NormalizeType() {
+constexpr auto Normalizer() {
     if constexpr(std::is_const_v<T> || std::is_volatile_v<T>) {
         return TypeWrapper<NormalizedType<std::remove_cv_t<T>>>{};
     } else {
@@ -53,7 +53,7 @@ constexpr auto NormalizeType() {
             return TypeWrapper<std::add_pointer_t<NormalizedType<std::remove_pointer_t<T>>>>{};
         }
         if constexpr(std::is_function_v<T>) {
-            return NormalizeType(TypeWrapper<T>{});
+            return Normalizer(TypeWrapper<T>{});
         }
         if constexpr(std::is_class_v<T>) {
             return TypeWrapper<unsigned char>{};
@@ -63,13 +63,13 @@ constexpr auto NormalizeType() {
 
 
 template <typename T>
-struct LLVMType {
+struct LLVMTypeImpl {
 private:
     template <typename Ret, typename... Args>
     static auto createTypeForFunction(llvm::LLVMContext &context, TypeWrapper<Ret(Args...)>) {
         return llvm::FunctionType::get(
-                LLVMType<Ret>(context)(),
-                {LLVMType<Args>(context)()...},
+                LLVMTypeImpl<Ret>(context)(),
+                {LLVMTypeImpl<Args>(context)()...},
                 false
         );
     }
@@ -85,7 +85,7 @@ private:
             return llvm::Type::getDoubleTy(context);
         }
         if constexpr(std::is_pointer_v<T>) {
-            return LLVMType<std::remove_pointer_t<T>>(context)()->getPointerTo();
+            return LLVMTypeImpl<std::remove_pointer_t<T>>(context)()->getPointerTo();
         }
         if constexpr(std::is_function_v<T>) {
             return createTypeForFunction(context, TypeWrapper<T>{});
@@ -94,17 +94,19 @@ private:
 
     std::invoke_result_t<decltype(createType), llvm::LLVMContext &> const data;
 public:
-    explicit LLVMType(llvm::LLVMContext &context) : data(createType(context)) {}
+    explicit LLVMTypeImpl(llvm::LLVMContext &context) : data(createType(context)) {}
 
     auto &operator()() const { return data; }
 };
 
+template <typename T>
+using LLVMType = LLVMTypeImpl<NormalizedType<T>>;
 
 template <typename T, typename...>
-struct UniqueTuple;
+struct TypeFilter;
 
 template <typename... Ts>
-struct UniqueTuple<std::tuple<Ts...>> {
+struct TypeFilter<std::tuple<Ts...>> {
     using type = std::tuple<Ts...>;
 
     template <typename... Args>
@@ -114,28 +116,29 @@ struct UniqueTuple<std::tuple<Ts...>> {
 };
 
 template <typename... Ts, typename T, typename... Us>
-struct UniqueTuple<std::tuple<Ts...>, T, Us...> :
+struct TypeFilter<std::tuple<Ts...>, T, Us...> :
         std::conditional_t<(std::is_same_v<Ts, T> || ...),
-                UniqueTuple<std::tuple<Ts...>, Us...>,
-                UniqueTuple<std::tuple<T, Ts...>, Us...>> {
+                TypeFilter<std::tuple<Ts...>, Us...>,
+                TypeFilter<std::tuple<T, Ts...>, Us...>> {
 };
 
 template <template <typename> typename W, typename... Ts>
-class WrappedUniqueTuple {
-    using maker = UniqueTuple<std::tuple<>, W<Ts>...>;
+class TypeRegisister {
+    using filter = TypeFilter<std::tuple<>, W<Ts>...>;
 public:
-    typename maker::type data;
+    typename filter::type data;
 
     template <typename... Args>
-    explicit WrappedUniqueTuple(Args &&... args) : data{maker::create(std::forward<Args>(args)...)} {}
+    explicit TypeRegisister(Args &&... args) : data{filter::create(std::forward<Args>(args)...)} {}
 
     template <typename T>
-    [[nodiscard]] auto &get() const { return std::get<W<T>>(data)(); }
+    [[nodiscard]] auto &get() const {
+        static_assert((std::is_same_v<Ts, T> || ...), "type is not registered");
+        return std::get<W<T>>(data)();
+    }
 };
 
-template <typename T>
-using NormalizedLLVMType = LLVMType<NormalizedType<T>>;
-using RegisteredLLVMTypes = WrappedUniqueTuple<NormalizedLLVMType,
+using RegisteredLLVMTypes = TypeRegisister<LLVMType,
         PyOparg,
         ptrdiff_t,
         PyObject,
@@ -146,7 +149,6 @@ using RegisteredLLVMTypes = WrappedUniqueTuple<NormalizedLLVMType,
         PyObject *(PyObject *, PyObject *, int)
 >;
 
-
 template <typename T>
 std::enable_if_t<std::is_integral_v<T>, llvm::Value *>
 castToLLVMValue(T t, RegisteredLLVMTypes &types) {
@@ -155,7 +157,7 @@ castToLLVMValue(T t, RegisteredLLVMTypes &types) {
 
 template <typename T>
 std::enable_if_t<std::is_base_of_v<llvm::Value, std::remove_pointer_t<T>>, llvm::Value *>
-castToLLVMValue(T t, RegisteredLLVMTypes &types) {
+castToLLVMValue(llvm::Value *t, RegisteredLLVMTypes &types) {
     return t;
 }
 

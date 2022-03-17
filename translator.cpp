@@ -5,7 +5,7 @@
 
 #include <Python.h>
 
-#include "JIT.h"
+#include "translator.h"
 
 
 using namespace std;
