@@ -51,14 +51,12 @@ constexpr auto Normalizer() {
             }
         }
         if constexpr(std::is_pointer_v<T>) {
-            return TypeWrapper<std::add_pointer_t<NormalizedType<std::remove_pointer_t<T>>>>{};
+            return TypeWrapper<void *>{}; // opaque pointer
         }
         if constexpr(std::is_function_v<T>) {
             return Normalizer(TypeWrapper<T>{});
         }
-        if constexpr(std::is_class_v<T>) {
-            return TypeWrapper<unsigned char>{};
-        }
+        // Return void here to raise a compile error for unsupported types
     }
 }
 
@@ -86,7 +84,7 @@ private:
             return llvm::Type::getDoubleTy(context);
         }
         if constexpr(std::is_pointer_v<T>) {
-            return LLVMTypeImpl<std::remove_pointer_t<T>>(context)()->getPointerTo();
+            return llvm::PointerType::getUnqual(context);
         }
         if constexpr(std::is_function_v<T>) {
             return createTypeForFunction(context, TypeWrapper<T>{});
@@ -134,35 +132,21 @@ public:
 
     template <typename T>
     [[nodiscard]] auto &get() const {
-        static_assert((std::is_same_v<Ts, T> || ...), "type is not registered");
+        static_assert((std::is_same_v<W<Ts>, W<T>> || ...), "type is not registered");
         return std::get<W<T>>(data)();
     }
 };
 
 using RegisteredLLVMTypes = TypeRegisister<LLVMType,
+        void *,
         char,
         ptrdiff_t,
         PyOparg,
         Py_ssize_t,
-        Py_ssize_t *,
-        PyTypeObject *,
-        PyTypeObject **,
-        PyObject *,
-        PyObject **,
         int(PyObject *),
-        int(*)(PyObject *),
-        int(**)(PyObject *),
-        PyObject *(*)(PyObject *),
-        PyObject *(**)(PyObject *),
         PyObject *(PyObject *),
-        PyObject *(*)(PyObject *),
-        PyObject *(**)(PyObject *),
         PyObject *(PyObject *, PyObject *),
-        PyObject *(*)(PyObject *, PyObject *),
-        PyObject *(**)(PyObject *, PyObject *),
-        PyObject *(PyObject *, PyObject *, int),
-        PyObject *(*)(PyObject *, PyObject *, int),
-        PyObject *(**)(PyObject *, PyObject *, int)
+        PyObject *(PyObject *, PyObject *, int)
 >;
 
 template <typename T>

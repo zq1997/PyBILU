@@ -19,9 +19,9 @@ def bar(L):
 
 def stat(name, func):
     t0 = time.time()
-    func(range(5000000))
+    func(range(500000))
     t1 = time.time()
-    print('%s: %.2fs' % (name, t1 - t0))
+    print('%s: %.3fs' % (name, t1 - t0))
 
 
 stat('无优化', foo)

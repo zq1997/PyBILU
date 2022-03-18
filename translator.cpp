@@ -157,7 +157,7 @@ Compiler::Compiler() {
     opt_FAM.registerPass([&] { return LoopAnalysisManagerFunctionProxy(opt_LAM); });
     opt_LAM.registerPass([&] { return FunctionAnalysisManagerLoopProxy(opt_FAM); });
     opt_FPM = pb.buildFunctionSimplificationPipeline(
-            PassBuilder::OptimizationLevel::O3,
+            OptimizationLevel::O3,
             ThinOrFullLTOPhase::None
     );
 

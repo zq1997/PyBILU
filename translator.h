@@ -19,11 +19,11 @@
 #include <llvm-c/Target.h>
 #include <llvm/Passes/PassBuilder.h>
 #include <llvm/Support/Host.h>
-#include <llvm/Support/TargetRegistry.h>
 #include <llvm/Support/Memory.h>
 #include <llvm/Support/SmallVectorMemoryBuffer.h>
 #include <llvm/ADT/StringMap.h>
 #include <llvm/Object/ObjectFile.h>
+#include <llvm/MC/TargetRegistry.h>
 #include <llvm/MC/SubtargetFeature.h>
 
 #include "shared_symbols.h"
@@ -35,15 +35,15 @@ inline auto dataDistance(T1 &from, T2 &to) {
 }
 
 class Compiler {
-    std::unique_ptr<llvm::TargetMachine> machine;
+    std::unique_ptr<llvm::TargetMachine> machine{};
 
-    llvm::ModuleAnalysisManager opt_MAM;
-    llvm::FunctionAnalysisManager opt_FAM;
-    llvm::LoopAnalysisManager opt_LAM;
-    llvm::FunctionPassManager opt_FPM;
+    llvm::ModuleAnalysisManager opt_MAM{};
+    llvm::FunctionAnalysisManager opt_FAM{};
+    llvm::LoopAnalysisManager opt_LAM{};
+    llvm::FunctionPassManager opt_FPM{};
 
-    llvm::legacy::PassManager out_PM;
-    llvm::SmallVector<char> out_vec;
+    llvm::legacy::PassManager out_PM{};
+    llvm::SmallVector<char> out_vec{};
     llvm::raw_svector_ostream out_stream{out_vec};
 
 public:
@@ -54,7 +54,7 @@ public:
 
 class Translator {
     llvm::LLVMContext context{};
-    RegisteredLLVMTypes types{context};
+    RegisteredLLVMTypes types{(context.enableOpaquePointers(), context)};
     llvm::IRBuilder<> builder{context};
     llvm::Module mod{"", context};
     llvm::Function *func{llvm::Function::Create(
@@ -76,33 +76,27 @@ class Translator {
     llvm::Value *py_stack{};
     std::ptrdiff_t stack_height{};
 
-    auto getPointer(llvm::Value *base, ptrdiff_t offset) {
-        auto offset_value = castToLLVMValue(offset, types);
+    template <typename T=char>
+    auto getPointer(llvm::Value *base, ptrdiff_t index) {
+        auto offset_value = castToLLVMValue(sizeof(T) * index, types);
         return builder.CreateInBoundsGEP(types.get<char>(), base, offset_value);
     }
 
-    auto getPointer(llvm::Value *base, ptrdiff_t offset, llvm::Type *cast_to) {
-        return builder.CreatePointerCast(getPointer(base, offset), cast_to);
-    }
-
     template <typename T, typename M>
-    auto getPointer(llvm::Value *instance, M T::* member_pointer) {
-        llvm::Type *cast_to = types.get<std::add_pointer_t<M>>();
+    auto getPointer(llvm::Value *instance, M T::* member) {
         T dummy;
-        const auto offset = dataDistance(dummy, dummy.*member_pointer);
-        return getPointer(instance, offset, cast_to);
+        auto offset = reinterpret_cast<const char *>(&(dummy.*member)) - reinterpret_cast<const char *>(&dummy);
+        return getPointer(instance, offset);
     }
 
     template <typename T>
-    auto readData(llvm::Value *base, ptrdiff_t offset) {
-        auto ptr = getPointer(base, offset, types.get<std::add_pointer_t<T>>());
-        return builder.CreateLoad(types.get<T>(), ptr);
+    auto readData(llvm::Value *base, ptrdiff_t index) {
+        return builder.CreateLoad(types.get<T>(), getPointer<T>(base, index));
     }
 
     template <typename T, typename M>
-    auto readData(M T::* member_pointer, llvm::Value *instance) {
-        auto ptr = getPointer(instance, member_pointer);
-        return builder.CreateLoad(types.get<M>(), ptr);
+    auto readData(llvm::Value *instance, M T::* member) {
+        return builder.CreateLoad(types.get<M>(), getPointer(instance, member));
     }
 
     void parseCFG(PyCodeObject *cpy_ir);
@@ -118,15 +112,13 @@ class Translator {
     llvm::CallInst *do_Call(llvm::Value *callee, Args... args) {
         // TODO: remove_pointer_t太丑了
         auto callee_type = types.get<std::remove_pointer_t<T>>();
-        callee = builder.CreatePointerCast(callee, callee_type->getPointerTo());
         return builder.CreateCall(callee_type, callee, {args...});
     }
 
     template <typename T, typename ...Args>
-    llvm::CallInst *do_Call(T *SymbolTable::* entry, Args... args) {
+    llvm::CallInst *do_Call(T *const SymbolTable::* entry, Args... args) {
         auto callee_type = types.get<T>();
-        auto offset = dataDistance(shared_symbol_table, shared_symbol_table.*entry);
-        auto callee = readData<T *>(py_symbol_table, offset);
+        auto callee = readData(py_symbol_table, entry);
         return builder.CreateCall(callee_type, callee, {args...});
     }
 
@@ -151,10 +143,12 @@ class Translator {
 
 public:
     Translator() {
+        // llvm::Attribute::AttrKind x = llvm::Attribute::get(context, "tune-cpu", llvm::sys::getHostCPUName());
         func->setAttributes(
-                llvm::AttributeList::get(context, llvm::AttributeList::FunctionIndex, llvm::AttrBuilder()
-                        .addAttribute(llvm::Attribute::NoUnwind)
-                        .addAttribute("tune-cpu", llvm::sys::getHostCPUName())));
+                llvm::AttributeList::get(context, llvm::AttributeList::FunctionIndex,
+                        llvm::AttrBuilder(context)
+                                .addAttribute(llvm::Attribute::NoUnwind)
+                                .addAttribute("tune-cpu", llvm::sys::getHostCPUName())));
     }
 
     void *operator()(Compiler &compiler, PyCodeObject *cpy_ir);

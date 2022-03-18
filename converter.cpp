@@ -7,30 +7,30 @@ using namespace llvm;
 
 
 void Translator::do_Py_INCREF(Value *py_obj) {
-    auto ctype_objref = llvm::Type::getScalarTy<decltype(PyObject::ob_refcnt)>(context);
-    auto *cvalue_objref_1 = llvm::ConstantInt::get(ctype_objref, 1);
+    auto *const_1 = castToLLVMValue(decltype(PyObject::ob_refcnt){1}, types);
     auto ref = getPointer(py_obj, &PyObject::ob_refcnt);
-    builder.CreateStore(builder.CreateAdd(builder.CreateLoad(ctype_objref, ref), cvalue_objref_1), ref);
+    auto old_value = builder.CreateLoad(const_1->getType(), ref);
+    builder.CreateStore(builder.CreateAdd(old_value, const_1), ref);
 }
 
 void Translator::do_Py_DECREF(Value *py_obj) {
-    auto ctype_objref = llvm::Type::getScalarTy<decltype(PyObject::ob_refcnt)>(context);
-    auto *cvalue_objref_1 = llvm::ConstantInt::get(ctype_objref, 1);
+    auto *const_1 = castToLLVMValue(decltype(PyObject::ob_refcnt){1}, types);
     auto ref = getPointer(py_obj, &PyObject::ob_refcnt);
-    builder.CreateStore(builder.CreateSub(builder.CreateLoad(ctype_objref, ref), cvalue_objref_1), ref);
+    auto old_value = builder.CreateLoad(const_1->getType(), ref);
+    builder.CreateStore(builder.CreateSub(old_value, const_1), ref);
 }
 
 Value *Translator::do_GETLOCAL(PyOparg oparg) {
-    auto ptr = builder.CreateConstInBoundsGEP1_64(types.get<PyObject *>(), py_fast_locals, oparg);
-    return builder.CreateLoad(types.get<PyObject *>(), ptr);
+    return readData<PyObject *>(py_fast_locals, oparg);
 }
 
 void Translator::do_SETLOCAL(PyOparg oparg, llvm::Value *value) {
-    auto ptr = builder.CreateConstInBoundsGEP1_64(types.get<PyObject *>(), py_fast_locals, oparg);
+    auto ptr = getPointer<PyObject *>(py_fast_locals, oparg);
     auto old_value = builder.CreateLoad(types.get<PyObject *>(), ptr);
     builder.CreateStore(value, ptr);
-    auto old_is_not_empty = builder.CreateICmpNE(old_value, ConstantPointerNull::get(types.get<PyObject *>()));
-    do_if(old_is_not_empty, [&]() {
+    auto null = ConstantPointerNull::get(types.get<PyObject *>());
+    auto not_empty = builder.CreateICmpNE(old_value, null);
+    do_if(not_empty, [&]() {
         do_Py_DECREF(old_value);
     });
 }
@@ -179,8 +179,8 @@ void Translator::emitBlock(unsigned index) {
             auto dest = instr_iter.getOffset() + instr.oparg;
             auto i = distance(&*boundaries, lower_bound(&*boundaries, &boundaries[block_num], dest));
             auto iter = do_POP();
-            auto the_type = readData(&PyObject::ob_type, iter);
-            auto tp_iternext = readData(&PyTypeObject::tp_iternext, the_type);
+            auto the_type = readData(iter, &PyObject::ob_type);
+            auto tp_iternext = readData(the_type, &PyTypeObject::tp_iternext);
             auto next = do_Call<decltype(PyTypeObject::tp_iternext)>(tp_iternext, iter);
             auto cmp = builder.CreateICmpEQ(next, ConstantPointerNull::get(types.get<PyObject *>()));
             auto b_continue = BasicBlock::Create(context, "", func);
