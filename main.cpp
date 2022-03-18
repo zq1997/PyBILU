@@ -8,34 +8,34 @@ using namespace std;
 #include "translator.h"
 
 const SymbolTable shared_symbol_table{};
-
 static unique_ptr<Compiler> compiler;
 static unique_ptr<Translator> translator;
 static Py_ssize_t code_extra_index;
 
-PyObject *vectorcall(PyObject *callable, PyObject *const *args, size_t nargsf, PyObject *kwnames) {
-    assert(PyFunction_Check(callable));
-    auto func = reinterpret_cast<PyFunctionObject *>(callable);
-    // argument check here
-    // auto nargs = PyVectorcall_NARGS(nargsf);
-    PyObject *(*jit_func)(decltype(&shared_symbol_table), PyObject *const *);
-    _PyCode_GetExtra(func->func_code, code_extra_index, reinterpret_cast<void **>(&jit_func));
-    return jit_func(&shared_symbol_table, args);
-}
+
+// PyObject *vectorcall(PyObject *callable, PyObject *const *args, size_t nargsf, PyObject *kwnames) {
+//     assert(PyFunction_Check(callable));
+//     auto func = reinterpret_cast<PyFunctionObject *>(callable);
+//     // argument check here
+//     // auto nargs = PyVectorcall_NARGS(nargsf);
+// }
 
 PyObject *eval_func(PyThreadState *tstate, PyFrameObject *frame, int throwflag) {
     // TODO: manually implement set/get extra
-    void *jit_func;
-    if (_PyCode_GetExtra(reinterpret_cast<PyObject *>(frame->f_code), code_extra_index, &jit_func) == -1) {
+    void *jit_callee;
+    if (_PyCode_GetExtra(reinterpret_cast<PyObject *>(frame->f_code), code_extra_index, &jit_callee) == -1) {
         return nullptr;
     }
-    if (!jit_func) {
+    if (!jit_callee) {
         return _PyEval_EvalFrameDefault(tstate, frame, throwflag);
     }
     // TODO: support generator and throwflag
     assert(!throwflag);
-    return reinterpret_cast<PyObject *(*)(decltype(&shared_symbol_table), PyObject **, PyObject **)>(jit_func)(
-            &shared_symbol_table, frame->f_localsplus, &PyTuple_GET_ITEM(frame->f_code->co_consts, 0)
+    // Strictly speaking, converting void* to a function pointer is undefined behavior in C++
+    return reinterpret_cast<TranslatedFunctionType *>(jit_callee)(
+            &shared_symbol_table,
+            frame->f_localsplus,
+            &PyTuple_GET_ITEM(frame->f_code->co_consts, 0)
     );
 }
 
@@ -57,7 +57,6 @@ PyObject *apply(PyObject *, PyObject *maybe_func) {
         return nullptr;
     }
     _PyCode_SetExtra(func->func_code, code_extra_index, compiled_func);
-    // func->vectorcall = vectorcall;
     return Py_NewRef(func);
 }
 

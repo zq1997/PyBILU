@@ -1,4 +1,5 @@
-#include <cstdlib>
+#ifndef PYNIC_SHARED_SYMBOLS
+#define PYNIC_SHARED_SYMBOLS
 
 #include <Python.h>
 
@@ -131,10 +132,7 @@ public:
     explicit TypeRegisister(Args &&... args) : data{filter::create(std::forward<Args>(args)...)} {}
 
     template <typename T>
-    [[nodiscard]] auto &get() const {
-        static_assert((std::is_same_v<W<Ts>, W<T>> || ...), "type is not registered");
-        return std::get<W<T>>(data)();
-    }
+    [[nodiscard]] auto &get() const { return std::get<W<T>>(data)(); }
 };
 
 using RegisteredLLVMTypes = TypeRegisister<LLVMType,
@@ -161,3 +159,4 @@ castToLLVMValue(llvm::Value *t, RegisteredLLVMTypes &types) {
     return t;
 }
 
+#endif

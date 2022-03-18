@@ -4,50 +4,13 @@
 #include <stdexcept>
 
 #include <Python.h>
+#include <llvm/IR/Verifier.h>
 
 #include "translator.h"
 
 
 using namespace std;
 using namespace llvm;
-
-template <typename T>
-inline T check(Expected<T> v) {
-    if (v) {
-        return std::move(*v);
-    } else {
-        throw runtime_error(toString(v.takeError()));
-    }
-}
-
-template <typename T>
-inline void throwIf(const T &cond, const string &msg) {
-    if (cond) {
-        throw runtime_error(msg);
-    }
-}
-
-
-class {
-public:
-    const char *file_name{"/tmp/jit"};
-    bool output{true};
-
-    inline void dump(const string &ext, const char *data, size_t size) const {
-        if (output) {
-            ofstream(file_name + ext).write(data, size);
-        }
-    }
-
-    inline void dump(const string &ext, const Module &mod) const {
-        if (output) {
-            error_code ec;
-            raw_fd_ostream out(file_name + ext, ec);
-            mod.print(out, nullptr);
-            throwIf(ec, "cannnot write file: " + string(file_name) + ext);
-        }
-    }
-} debug;
 
 
 void *Translator::operator()(Compiler &compiler, PyCodeObject *cpy_ir) {
@@ -61,6 +24,7 @@ void *Translator::operator()(Compiler &compiler, PyCodeObject *cpy_ir) {
         emitBlock(i);
     }
 
+    assert(!verifyFunction(*func, &errs()));
     auto result = compiler(mod);
 
     func->dropAllReferences();
@@ -123,79 +87,208 @@ void Translator::parseCFG(PyCodeObject *cpy_ir) {
     assert(current_num == block_num);
 }
 
-Compiler::Compiler() {
-    throwIf(LLVMInitializeNativeTarget() || LLVMInitializeNativeAsmPrinter(), "initialization failed");
 
-    auto triple = sys::getProcessTriple();
-    SubtargetFeatures features;
-    StringMap<bool> feature_map;
-    sys::getHostCPUFeatures(feature_map);
-    for (auto &f : feature_map) {
-        features.AddFeature(f.first(), f.second);
-    }
-
-    string err;
-    auto *target = TargetRegistry::lookupTarget(triple, err);
-    throwIf(!target, err);
-    machine = unique_ptr<TargetMachine>(target->createTargetMachine(
-            triple,
-            sys::getHostCPUName(),
-            features.getString(),
-            TargetOptions(),
-            Reloc::Model::PIC_,
-            CodeModel::Model::Small,
-            CodeGenOpt::Aggressive
-    ));
-    throwIf(!machine, "cannot create TargetMachine");
-
-
-    PassBuilder pb{machine.get()};
-    pb.registerModuleAnalyses(opt_MAM);
-    pb.registerFunctionAnalyses(opt_FAM);
-    pb.registerLoopAnalyses(opt_LAM);
-    opt_FAM.registerPass([&] { return ModuleAnalysisManagerFunctionProxy(opt_MAM); });
-    opt_FAM.registerPass([&] { return LoopAnalysisManagerFunctionProxy(opt_LAM); });
-    opt_LAM.registerPass([&] { return FunctionAnalysisManagerLoopProxy(opt_FAM); });
-    opt_FPM = pb.buildFunctionSimplificationPipeline(
-            OptimizationLevel::O3,
-            ThinOrFullLTOPhase::None
-    );
-
-    throwIf(machine->addPassesToEmitFile(out_PM, out_stream, nullptr, CodeGenFileType::CGFT_ObjectFile),
-            "add emit pass error");
+void Translator::do_Py_INCREF(Value *py_obj) {
+    auto *const_1 = castToLLVMValue(decltype(PyObject::ob_refcnt){1}, types);
+    auto ref = getPointer(py_obj, &PyObject::ob_refcnt);
+    auto old_value = builder.CreateLoad(const_1->getType(), ref);
+    builder.CreateStore(builder.CreateAdd(old_value, const_1), ref);
 }
 
-void *Compiler::operator()(llvm::Module &mod) {
-    debug.dump(".ll", mod);
-    for (auto &func : mod) {
-        assert(!verifyFunction(func, &errs()));
-        opt_FPM.run(func, opt_FAM);
-    }
-    opt_LAM.clear();
-    opt_FAM.clear();
-    debug.dump(".opt.ll", mod);
+void Translator::do_Py_DECREF(Value *py_obj) {
+    auto *const_1 = castToLLVMValue(decltype(PyObject::ob_refcnt){1}, types);
+    auto ref = getPointer(py_obj, &PyObject::ob_refcnt);
+    auto old_value = builder.CreateLoad(const_1->getType(), ref);
+    builder.CreateStore(builder.CreateSub(old_value, const_1), ref);
+}
 
-    mod.setDataLayout(machine->createDataLayout());
-    out_PM.run(mod);
-    debug.dump(".o", out_vec.data(), out_vec.size());
+Value *Translator::do_GETLOCAL(PyOparg oparg) {
+    return readData<PyObject *>(py_fast_locals, oparg);
+}
 
-    StringRef code{};
-    auto obj = check(object::ObjectFile::createObjectFile(
-            MemoryBufferRef(StringRef(out_vec.data(), out_vec.size()), "")));
-    for (auto &sec : obj->sections()) {
-        assert(sec.relocations().empty());
-        if (sec.isText()) {
-            assert(!code.data());
-            code = check(sec.getContents());
+void Translator::do_SETLOCAL(PyOparg oparg, llvm::Value *value) {
+    auto ptr = getPointer<PyObject *>(py_fast_locals, oparg);
+    auto old_value = builder.CreateLoad(types.get<PyObject *>(), ptr);
+    builder.CreateStore(value, ptr);
+    auto null = ConstantPointerNull::get(types.get<PyObject *>());
+    auto not_empty = builder.CreateICmpNE(old_value, null);
+    do_if(not_empty, [&]() {
+        do_Py_DECREF(old_value);
+    });
+}
+
+llvm::Value *Translator::do_POP() {
+    auto ptr = builder.CreateConstInBoundsGEP1_64(types.get<PyObject *>(), py_stack, --stack_height);
+    return builder.CreateLoad(types.get<PyObject *>(), ptr);
+}
+
+void Translator::do_PUSH(llvm::Value *value) {
+    auto ptr = builder.CreateConstInBoundsGEP1_64(types.get<PyObject *>(), py_stack, stack_height++);
+    builder.CreateStore(value, ptr);
+}
+
+void Translator::emitBlock(unsigned index) {
+    builder.SetInsertPoint(ir_blocks[index]);
+    bool fall_through = true;
+
+    auto first = index ? boundaries[index - 1] : 0;
+    auto last = boundaries[index];
+    PyInstrIter instr_iter(py_instructions + first, last - first);
+    while (auto instr = instr_iter.next()) {
+        switch (instr.opcode) {
+        case NOP: {
+            break;
+        }
+        case POP_TOP: {
+            auto value = do_POP();
+            do_Py_DECREF(value);
+            break;
+        }
+        case LOAD_CONST: {
+            auto value = builder.CreateConstInBoundsGEP1_64(types.get<PyObject *>(), py_consts, instr.oparg);
+            value = builder.CreateLoad(types.get<PyObject *>(), value);
+            do_Py_INCREF(value);
+            do_PUSH(value);
+            break;
+        }
+        case LOAD_FAST: {
+            auto value = do_GETLOCAL(instr.oparg);
+            do_Py_INCREF(value);
+            do_PUSH(value);
+            break;
+        }
+        case STORE_FAST: {
+            auto value = do_POP();
+            do_SETLOCAL(instr.oparg, value);
+            break;
+        }
+        case BINARY_MULTIPLY: {
+            auto right = do_POP();
+            auto left = do_POP();
+            auto res = do_Call(&SymbolTable::PyNumber_Multiply, left, right);
+            do_Py_DECREF(left);
+            do_Py_DECREF(right);
+            do_PUSH(res);
+            break;
+        }
+        case BINARY_ADD: {
+            auto right = do_POP();
+            auto left = do_POP();
+            auto res = do_Call(&SymbolTable::PyNumber_Add, left, right);
+            do_Py_DECREF(left);
+            do_Py_DECREF(right);
+            do_PUSH(res);
+            break;
+        }
+        case BINARY_SUBTRACT: {
+            auto right = do_POP();
+            auto left = do_POP();
+            auto res = do_Call(&SymbolTable::PyNumber_Subtract, left, right);
+            do_Py_DECREF(left);
+            do_Py_DECREF(right);
+            do_PUSH(res);
+            break;
+        }
+        case BINARY_TRUE_DIVIDE: {
+            auto right = do_POP();
+            auto left = do_POP();
+            auto res = do_Call(&SymbolTable::PyNumber_TrueDivide, left, right);
+            do_Py_DECREF(left);
+            do_Py_DECREF(right);
+            do_PUSH(res);
+            break;
+        }
+        case BINARY_FLOOR_DIVIDE: {
+            auto right = do_POP();
+            auto left = do_POP();
+            auto res = do_Call(&SymbolTable::PyNumber_FloorDivide, left, right);
+            do_Py_DECREF(left);
+            do_Py_DECREF(right);
+            do_PUSH(res);
+            break;
+        }
+        case BINARY_MODULO: {
+            auto right = do_POP();
+            auto left = do_POP();
+            auto res = do_Call(&SymbolTable::PyNumber_Remainder, left, right);
+            do_Py_DECREF(left);
+            do_Py_DECREF(right);
+            do_PUSH(res);
+            break;
+        }
+        case COMPARE_OP: {
+            auto right = do_POP();
+            auto left = do_POP();
+            auto res = do_Call(&SymbolTable::PyObject_RichCompare, left, right, castToLLVMValue(instr.oparg, types));
+            do_Py_DECREF(left);
+            do_Py_DECREF(right);
+            do_PUSH(res);
+            break;
+        }
+        case JUMP_ABSOLUTE: {
+            auto dest = 0;
+            auto i = distance(&*boundaries, lower_bound(&*boundaries, &boundaries[block_num], dest));
+            builder.CreateBr(ir_blocks[i + 1]);
+            fall_through = false;
+            break;
+        }
+        case JUMP_FORWARD: {
+            auto dest = instr_iter.getOffset() + instr.oparg / sizeof(PyInstr);
+            auto i = distance(&*boundaries, lower_bound(&*boundaries, &boundaries[block_num], dest));
+            builder.CreateBr(ir_blocks[i + i]);
+            fall_through = false;
+            break;
+        }
+        case POP_JUMP_IF_FALSE: {
+            auto cond = do_POP();
+            auto err = do_Call(&SymbolTable::PyObject_IsTrue, cond);
+            do_Py_DECREF(cond);
+            auto dest = instr_iter.getOffset() + instr.oparg / sizeof(PyInstr);
+            auto i = distance(&*boundaries, lower_bound(&*boundaries, &boundaries[block_num], dest));
+            auto cmp = builder.CreateICmpEQ(err, ConstantInt::get(err->getType(), 0));
+            builder.CreateCondBr(cmp, ir_blocks[i + i], ir_blocks[index + 1]);
+            fall_through = false;
+            break;
+        }
+        case GET_ITER: {
+            auto iterable = do_POP();
+            auto iter = do_Call(&SymbolTable::PyObject_GetIter, iterable);
+            do_Py_DECREF(iterable);
+            do_PUSH(iter);
+            break;
+        }
+        case FOR_ITER: {
+            auto dest = instr_iter.getOffset() + instr.oparg;
+            auto i = distance(&*boundaries, lower_bound(&*boundaries, &boundaries[block_num], dest));
+            auto iter = do_POP();
+            auto the_type = readData(iter, &PyObject::ob_type);
+            auto tp_iternext = readData(the_type, &PyTypeObject::tp_iternext);
+            auto next = do_Call<decltype(PyTypeObject::tp_iternext)>(tp_iternext, iter);
+            auto cmp = builder.CreateICmpEQ(next, ConstantPointerNull::get(types.get<PyObject *>()));
+            auto b_continue = BasicBlock::Create(context, "", func);
+            auto b_break = BasicBlock::Create(context, "", func);
+            builder.CreateCondBr(cmp, b_break, b_continue);
+            builder.SetInsertPoint(b_break);
+            do_Py_DECREF(iter);
+            builder.CreateBr(ir_blocks[i + 1]);
+            builder.SetInsertPoint(b_continue);
+            do_PUSH(iter);
+            do_PUSH(next);
+            fall_through = false;
+            break;
+        }
+        case RETURN_VALUE: {
+            auto retval = do_POP();
+            do_Py_INCREF(retval);
+            builder.CreateRet(retval);
+            fall_through = false;
+            break;
+        }
+        default:
+            throw runtime_error("unsupported opcode");
         }
     }
-
-    error_code ec;
-    auto flag = sys::Memory::ProtectionFlags::MF_RWE_MASK;
-    auto llvm_mem = sys::Memory::allocateMappedMemory(code.size(), nullptr, flag, ec);
-    throwIf(ec, ec.message());
-    memcpy(llvm_mem.base(), code.data(), code.size());
-
-    out_vec.clear();
-    return llvm_mem.base();
+    if (fall_through) {
+        builder.CreateBr(ir_blocks[index + 1]);
+    }
 }

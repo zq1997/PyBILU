@@ -20,7 +20,7 @@ add_compile_options(-Wall -Wpedantic -fno-rtti)
 link_directories(${LLVM_LIBRARY_DIRS})
 link_libraries(${llvm_libs})
 
-add_library(pynic SHARED main.cpp translator.cpp converter.cpp general_utilities.h)
+add_library(pynic SHARED main.cpp translator.cpp compiler.cpp)
 set_target_properties(pynic PROPERTIES
         PREFIX ""
         SUFFIX ".so"

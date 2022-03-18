@@ -1,11 +1,12 @@
-#include <memory>
+#ifndef PYNIC_GENERAL_UTILITIES
+#define PYNIC_GENERAL_UTILITIES
+
 #include <type_traits>
 
 template <typename T, typename = void>
 struct HasDereference : std::false_type {};
 template <typename T>
 struct HasDereference<T, std::void_t<decltype(*std::declval<T>())>> : std::true_type {};
-
 
 template <typename Size=size_t, typename Iter=Size>
 class Range {
@@ -89,3 +90,5 @@ public:
         return counted;
     }
 };
+
+#endif

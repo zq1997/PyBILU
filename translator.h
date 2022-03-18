@@ -1,11 +1,5 @@
-#include <climits>
-#include <cstddef>
-#include <memory>
-#include <bitset>
-#include <tuple>
-#include <array>
-#include <type_traits>
-#include <algorithm>
+#ifndef PYNIC_TRANSLATOR
+#define PYNIC_TRANSLATOR
 
 #include <Python.h>
 #include <opcode.h>
@@ -13,44 +7,13 @@
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/IRBuilder.h>
-#include <llvm/IR/Verifier.h>
-#include <llvm/IR/LegacyPassManager.h>
-#include <llvm/Target/TargetMachine.h>
-#include <llvm-c/Target.h>
-#include <llvm/Passes/PassBuilder.h>
 #include <llvm/Support/Host.h>
-#include <llvm/Support/Memory.h>
-#include <llvm/Support/SmallVectorMemoryBuffer.h>
-#include <llvm/ADT/StringMap.h>
-#include <llvm/Object/ObjectFile.h>
-#include <llvm/MC/TargetRegistry.h>
-#include <llvm/MC/SubtargetFeature.h>
 
 #include "shared_symbols.h"
 #include "general_utilities.h"
+#include "compiler.h"
 
-template <typename T1, typename T2>
-inline auto dataDistance(T1 &from, T2 &to) {
-    return reinterpret_cast<const char *>(&to) - reinterpret_cast<const char *>(&from);
-}
-
-class Compiler {
-    std::unique_ptr<llvm::TargetMachine> machine{};
-
-    llvm::ModuleAnalysisManager opt_MAM{};
-    llvm::FunctionAnalysisManager opt_FAM{};
-    llvm::LoopAnalysisManager opt_LAM{};
-    llvm::FunctionPassManager opt_FPM{};
-
-    llvm::legacy::PassManager out_PM{};
-    llvm::SmallVector<char> out_vec{};
-    llvm::raw_svector_ostream out_stream{out_vec};
-
-public:
-    Compiler();
-
-    void *operator()(llvm::Module &mod);
-};
+using TranslatedFunctionType = PyObject *(const SymbolTable *, PyObject **, PyObject **);
 
 class Translator {
     llvm::LLVMContext context{};
@@ -58,7 +21,7 @@ class Translator {
     llvm::IRBuilder<> builder{context};
     llvm::Module mod{"", context};
     llvm::Function *func{llvm::Function::Create(
-            LLVMType<PyObject *(PyObject *, PyObject **, PyObject **)>(context)(),
+            LLVMType<TranslatedFunctionType>(context)(),
             llvm::Function::ExternalLinkage,
             "",
             &mod
@@ -194,3 +157,5 @@ public:
         return {opcode, oparg};
     }
 };
+
+#endif
