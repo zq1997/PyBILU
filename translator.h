@@ -13,31 +13,51 @@
 #include "general_utilities.h"
 #include "compiler.h"
 
+#ifdef NDEBUG
+constexpr auto debug_build = false;
+#else
+constexpr auto debug_build = true;
+#endif
+
+constexpr auto name(const char *n) {
+    if constexpr (debug_build) {
+        return n;
+    } else {
+        return "";
+    }
+}
+
 using TranslatedFunctionType = PyObject *(const SymbolTable *, PyObject **, PyObject **);
 
 class Translator {
     llvm::LLVMContext context{};
     RegisteredLLVMTypes types{(context.enableOpaquePointers(), context)};
     llvm::IRBuilder<> builder{context};
-    llvm::Module mod{"", context};
+    llvm::Module mod{name("the_only_module"), context};
     llvm::Function *func{llvm::Function::Create(
             LLVMType<TranslatedFunctionType>(context)(),
             llvm::Function::ExternalLinkage,
-            "",
+            name("the_only_function"),
             &mod
     )};
+
+    llvm::MDNode *likely_true{};
 
     PyInstr *py_instructions{};
 
     unsigned block_num{};
     DynamicArray<unsigned> boundaries{};
     DynamicArray<llvm::BasicBlock *> ir_blocks{};
+    llvm::BasicBlock *entry_block{};
+    llvm::BasicBlock *unwind_block{};
 
+    llvm::Constant *null{llvm::ConstantPointerNull::get(types.get<void *>())};
     llvm::Value *py_symbol_table{func->getArg(0)};
     llvm::Value *py_fast_locals{func->getArg(1)};
     llvm::Value *py_consts{func->getArg(2)};
     llvm::Value *py_stack{};
-    std::ptrdiff_t stack_height{};
+    llvm::Value *stack_height_value{};
+    ptrdiff_t stack_height{};
 
     template <typename T=char>
     auto getPointer(llvm::Value *base, ptrdiff_t index) {
@@ -60,6 +80,21 @@ class Translator {
     template <typename T, typename M>
     auto readData(llvm::Value *instance, M T::* member) {
         return builder.CreateLoad(types.get<M>(), getPointer(instance, member));
+    }
+
+    template <typename T>
+    auto writeData(llvm::Value *base, ptrdiff_t index, llvm::Value *value) {
+        return builder.CreateStore(value, getPointer<T>(base, index));
+    }
+
+    template <typename T, typename M>
+    auto writeData(llvm::Value *instance, M T::* member, llvm::Value *value) {
+        return builder.CreateStore(value, getPointer(instance, member));
+    }
+
+    template <typename T>
+    auto asValue(T value) {
+        return castToLLVMValue(value, types);
     }
 
     void parseCFG(PyCodeObject *cpy_ir);
@@ -106,7 +141,12 @@ class Translator {
 
 public:
     Translator() {
-        // llvm::Attribute::AttrKind x = llvm::Attribute::get(context, "tune-cpu", llvm::sys::getHostCPUName());
+        likely_true = llvm::MDNode::get(context, {
+                llvm::MDString::get(context, "branch_weights"),
+                llvm::ConstantAsMetadata::get(builder.getInt32(INT32_MAX)), // i32 required
+                llvm::ConstantAsMetadata::get(builder.getInt32(1)), // i32 required
+        });
+
         func->setAttributes(
                 llvm::AttributeList::get(context, llvm::AttributeList::FunctionIndex,
                         llvm::AttrBuilder(context)

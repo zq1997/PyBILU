@@ -1,6 +1,4 @@
 #include <memory>
-#include <fstream>
-#include <iostream>
 #include <stdexcept>
 
 #include <Python.h>
@@ -15,14 +13,26 @@ using namespace llvm;
 
 void *Translator::operator()(Compiler &compiler, PyCodeObject *cpy_ir) {
     parseCFG(cpy_ir);
+    entry_block = BasicBlock::Create(context, name("entry"), func);
+    unwind_block = BasicBlock::Create(context, name("unwind"), func);
     for (auto &b : Range(block_num, &*ir_blocks)) {
         b = BasicBlock::Create(context, "", func);
     }
-    builder.SetInsertPoint(*ir_blocks);
-    py_stack = builder.CreateAlloca(types.get<PyObject *>(), builder.getInt32(cpy_ir->co_stacksize));
+
+    builder.SetInsertPoint(entry_block);
+    py_stack = builder.CreateAlloca(types.get<PyObject *>(),
+            castToLLVMValue(cpy_ir->co_stacksize, types),
+            name("stack")
+    );
+    stack_height_value = builder.CreateAlloca(types.get<decltype(stack_height)>(), castToLLVMValue(0, types));
+    builder.CreateBr(ir_blocks[0]);
+
     for (auto &i : Range(block_num)) {
         emitBlock(i);
     }
+    builder.SetInsertPoint(unwind_block);
+    builder.CreateRet(do_Call(&SymbolTable::unwindFrame, py_stack,
+            builder.CreateLoad(types.get<ptrdiff_t>(), stack_height_value)));
 
     assert(!verifyFunction(*func, &errs()));
     auto result = compiler(mod);
@@ -110,21 +120,21 @@ void Translator::do_SETLOCAL(PyOparg oparg, llvm::Value *value) {
     auto ptr = getPointer<PyObject *>(py_fast_locals, oparg);
     auto old_value = builder.CreateLoad(types.get<PyObject *>(), ptr);
     builder.CreateStore(value, ptr);
-    auto null = ConstantPointerNull::get(types.get<PyObject *>());
-    auto not_empty = builder.CreateICmpNE(old_value, null);
-    do_if(not_empty, [&]() {
+    auto not_null = builder.CreateICmpNE(old_value, null);
+    do_if(not_null, [&]() {
         do_Py_DECREF(old_value);
     });
 }
 
 llvm::Value *Translator::do_POP() {
-    auto ptr = builder.CreateConstInBoundsGEP1_64(types.get<PyObject *>(), py_stack, --stack_height);
-    return builder.CreateLoad(types.get<PyObject *>(), ptr);
+    auto value = readData<PyObject *>(py_stack, --stack_height);
+    builder.CreateStore(castToLLVMValue(stack_height, types), stack_height_value);
+    return value;
 }
 
 void Translator::do_PUSH(llvm::Value *value) {
-    auto ptr = builder.CreateConstInBoundsGEP1_64(types.get<PyObject *>(), py_stack, stack_height++);
-    builder.CreateStore(value, ptr);
+    writeData<PyObject *>(py_stack, stack_height++, value);
+    builder.CreateStore(castToLLVMValue(stack_height, types), stack_height_value);
 }
 
 void Translator::emitBlock(unsigned index) {
@@ -145,14 +155,18 @@ void Translator::emitBlock(unsigned index) {
             break;
         }
         case LOAD_CONST: {
-            auto value = builder.CreateConstInBoundsGEP1_64(types.get<PyObject *>(), py_consts, instr.oparg);
-            value = builder.CreateLoad(types.get<PyObject *>(), value);
+            auto value = readData<PyObject *>(py_consts, instr.oparg);
             do_Py_INCREF(value);
             do_PUSH(value);
             break;
         }
         case LOAD_FAST: {
             auto value = do_GETLOCAL(instr.oparg);
+            auto is_not_null = builder.CreateICmpNE(value, null);
+            auto bb = BasicBlock::Create(context, "", func);
+            builder.CreateCondBr(is_not_null, bb, unwind_block)
+                    ->setMetadata(LLVMContext::MD_prof, likely_true);
+            builder.SetInsertPoint(bb);
             do_Py_INCREF(value);
             do_PUSH(value);
             break;

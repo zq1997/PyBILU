@@ -12,6 +12,8 @@ using PyOpcode = decltype(_Py_OPCODE(PyInstr{}));
 using PyOparg = decltype(_Py_OPCODE(PyInstr{}));
 constexpr auto EXTENDED_ARG_BITS = 8;
 
+PyObject *unwindFrame(PyObject **stack, ptrdiff_t stack_height);
+
 struct SymbolTable {
     decltype(::PyNumber_Add) *PyNumber_Add{::PyNumber_Add};
     decltype(::PyNumber_Subtract) *PyNumber_Subtract{::PyNumber_Subtract};
@@ -22,7 +24,9 @@ struct SymbolTable {
     decltype(::PyObject_RichCompare) *PyObject_RichCompare{::PyObject_RichCompare};
     decltype(::PyObject_GetIter) *PyObject_GetIter{::PyObject_GetIter};
     decltype(::PyObject_IsTrue) *PyObject_IsTrue{::PyObject_IsTrue};
-} extern const shared_symbol_table;
+
+    decltype(::unwindFrame) *unwindFrame{::unwindFrame};
+};
 
 template <typename T>
 struct TypeWrapper {
@@ -144,11 +148,12 @@ using RegisteredLLVMTypes = TypeRegisister<LLVMType,
         int(PyObject *),
         PyObject *(PyObject *),
         PyObject *(PyObject *, PyObject *),
-        PyObject *(PyObject *, PyObject *, int)
+        PyObject *(PyObject *, PyObject *, int),
+        decltype(unwindFrame)
 >;
 
 template <typename T>
-std::enable_if_t<std::is_integral_v<T>, llvm::Value *>
+std::enable_if_t<std::is_integral_v<T>, llvm::Constant *>
 castToLLVMValue(T t, RegisteredLLVMTypes &types) {
     return llvm::ConstantInt::get(types.get<T>(), t);
 }

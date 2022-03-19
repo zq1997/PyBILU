@@ -10,7 +10,7 @@ IF(CMAKE_BUILD_TYPE MATCHES Debug)
 ELSE()
     find_package(LLVM 14 REQUIRED CONFIG PATHS /opt/llvm/build/compile-release/lib/cmake/llvm/ NO_DEFAULT_PATH)
     add_link_options(-Wl,--exclude-libs,ALL,--gc-sections)
-    llvm_map_components_to_libnames(llvm_libs core native)
+    llvm_map_components_to_libnames(llvm_libs core native passes)
     set(CPython_INCLUDE_DIRS "/opt/cpython/build/install-release/include/python3.10")
 ENDIF()
 
@@ -20,7 +20,7 @@ add_compile_options(-Wall -Wpedantic -fno-rtti)
 link_directories(${LLVM_LIBRARY_DIRS})
 link_libraries(${llvm_libs})
 
-add_library(pynic SHARED main.cpp translator.cpp compiler.cpp)
+add_library(pynic SHARED main.cpp translator.cpp compiler.cpp shared_subroutines.cpp)
 set_target_properties(pynic PROPERTIES
         PREFIX ""
         SUFFIX ".so"
