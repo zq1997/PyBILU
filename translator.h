@@ -27,6 +27,18 @@ constexpr auto name(const char *n) {
     }
 }
 
+template <typename T>
+std::enable_if_t<std::is_integral_v<T>, llvm::Constant *>
+castToLLVMValue(T t, RegisteredLLVMTypes &types) {
+    return llvm::ConstantInt::get(types.get<T>(), t);
+}
+
+template <typename T>
+std::enable_if_t<std::is_base_of_v<llvm::Value, std::remove_pointer_t<T>>, llvm::Value *>
+castToLLVMValue(llvm::Value *t, RegisteredLLVMTypes &types) {
+    return t;
+}
+
 using TranslatedFunctionType = PyObject *(const SymbolTable *, PyObject **, PyObject **);
 
 class Translator {
@@ -118,6 +130,15 @@ class Translator {
         auto callee_type = types.get<T>();
         auto callee = readData(py_symbol_table, entry);
         return builder.CreateCall(callee_type, callee, {args...});
+    }
+
+    void handle_BINARY_OP(PyObject *(*const SymbolTable::* entry)(PyObject *, PyObject *)) {
+        auto right = do_POP();
+        auto left = do_POP();
+        auto res = do_Call(entry, left, right);
+        do_Py_DECREF(left);
+        do_Py_DECREF(right);
+        do_PUSH(res);
     }
 
     void do_if(llvm::Value *cond,

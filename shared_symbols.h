@@ -13,6 +13,8 @@ using PyOparg = decltype(_Py_OPCODE(PyInstr{}));
 constexpr auto EXTENDED_ARG_BITS = 8;
 
 PyObject *unwindFrame(PyObject **stack, ptrdiff_t stack_height);
+PyObject *calcBinaryPower(PyObject *base, PyObject *exp);
+PyObject *calcInPlacePower(PyObject *base, PyObject *exp);
 
 struct SymbolTable {
     decltype(::PyNumber_Add) *PyNumber_Add{::PyNumber_Add};
@@ -21,9 +23,31 @@ struct SymbolTable {
     decltype(::PyNumber_TrueDivide) *PyNumber_TrueDivide{::PyNumber_TrueDivide};
     decltype(::PyNumber_FloorDivide) *PyNumber_FloorDivide{::PyNumber_FloorDivide};
     decltype(::PyNumber_Remainder) *PyNumber_Remainder{::PyNumber_Remainder};
-    decltype(::PyObject_RichCompare) *PyObject_RichCompare{::PyObject_RichCompare};
+    decltype(::calcBinaryPower) *calcBinaryPower{::calcBinaryPower};
+    decltype(::PyNumber_MatrixMultiply) *PyNumber_MatrixMultiply{::PyNumber_MatrixMultiply};
+    decltype(::PyNumber_Lshift) *PyNumber_Lshift{::PyNumber_Lshift};
+    decltype(::PyNumber_Rshift) *PyNumber_Rshift{::PyNumber_Rshift};
+    decltype(::PyNumber_And) *PyNumber_And{::PyNumber_And};
+    decltype(::PyNumber_Or) *PyNumber_Or{::PyNumber_Or};
+    decltype(::PyNumber_Xor) *PyNumber_Xor{::PyNumber_Xor};
+
+    decltype(::PyNumber_InPlaceAdd) *PyNumber_InPlaceAdd{::PyNumber_InPlaceAdd};
+    decltype(::PyNumber_InPlaceSubtract) *PyNumber_InPlaceSubtract{::PyNumber_InPlaceSubtract};
+    decltype(::PyNumber_InPlaceMultiply) *PyNumber_InPlaceMultiply{::PyNumber_InPlaceMultiply};
+    decltype(::PyNumber_InPlaceTrueDivide) *PyNumber_InPlaceTrueDivide{::PyNumber_InPlaceTrueDivide};
+    decltype(::PyNumber_InPlaceFloorDivide) *PyNumber_InPlaceFloorDivide{::PyNumber_InPlaceFloorDivide};
+    decltype(::PyNumber_InPlaceRemainder) *PyNumber_InPlaceRemainder{::PyNumber_InPlaceRemainder};
+    decltype(::calcInPlacePower) *calcInPlacePower{::calcInPlacePower};
+    decltype(::PyNumber_InPlaceMatrixMultiply) *PyNumber_InPlaceMatrixMultiply{::PyNumber_InPlaceMatrixMultiply};
+    decltype(::PyNumber_InPlaceLshift) *PyNumber_InPlaceLshift{::PyNumber_InPlaceLshift};
+    decltype(::PyNumber_InPlaceRshift) *PyNumber_InPlaceRshift{::PyNumber_InPlaceRshift};
+    decltype(::PyNumber_InPlaceAnd) *PyNumber_InPlaceAnd{::PyNumber_InPlaceAnd};
+    decltype(::PyNumber_InPlaceOr) *PyNumber_InPlaceOr{::PyNumber_InPlaceOr};
+    decltype(::PyNumber_InPlaceXor) *PyNumber_InPlaceXor{::PyNumber_InPlaceXor};
+
     decltype(::PyObject_GetIter) *PyObject_GetIter{::PyObject_GetIter};
     decltype(::PyObject_IsTrue) *PyObject_IsTrue{::PyObject_IsTrue};
+    decltype(::PyObject_RichCompare) *PyObject_RichCompare{::PyObject_RichCompare};
 
     decltype(::unwindFrame) *unwindFrame{::unwindFrame};
 };
@@ -148,20 +172,9 @@ using RegisteredLLVMTypes = TypeRegisister<LLVMType,
         int(PyObject *),
         PyObject *(PyObject *),
         PyObject *(PyObject *, PyObject *),
+        PyObject *(PyObject *, PyObject *, PyObject *),
         PyObject *(PyObject *, PyObject *, int),
         decltype(unwindFrame)
 >;
-
-template <typename T>
-std::enable_if_t<std::is_integral_v<T>, llvm::Constant *>
-castToLLVMValue(T t, RegisteredLLVMTypes &types) {
-    return llvm::ConstantInt::get(types.get<T>(), t);
-}
-
-template <typename T>
-std::enable_if_t<std::is_base_of_v<llvm::Value, std::remove_pointer_t<T>>, llvm::Value *>
-castToLLVMValue(llvm::Value *t, RegisteredLLVMTypes &types) {
-    return t;
-}
 
 #endif

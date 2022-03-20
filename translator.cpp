@@ -21,10 +21,10 @@ void *Translator::operator()(Compiler &compiler, PyCodeObject *cpy_ir) {
 
     builder.SetInsertPoint(entry_block);
     py_stack = builder.CreateAlloca(types.get<PyObject *>(),
-            castToLLVMValue(cpy_ir->co_stacksize, types),
+            asValue(cpy_ir->co_stacksize),
             name("stack")
     );
-    stack_height_value = builder.CreateAlloca(types.get<decltype(stack_height)>(), castToLLVMValue(0, types));
+    stack_height_value = builder.CreateAlloca(types.get<decltype(stack_height)>());
     builder.CreateBr(ir_blocks[0]);
 
     for (auto &i : Range(block_num)) {
@@ -99,14 +99,14 @@ void Translator::parseCFG(PyCodeObject *cpy_ir) {
 
 
 void Translator::do_Py_INCREF(Value *py_obj) {
-    auto *const_1 = castToLLVMValue(decltype(PyObject::ob_refcnt){1}, types);
+    auto *const_1 = asValue(decltype(PyObject::ob_refcnt){1});
     auto ref = getPointer(py_obj, &PyObject::ob_refcnt);
     auto old_value = builder.CreateLoad(const_1->getType(), ref);
     builder.CreateStore(builder.CreateAdd(old_value, const_1), ref);
 }
 
 void Translator::do_Py_DECREF(Value *py_obj) {
-    auto *const_1 = castToLLVMValue(decltype(PyObject::ob_refcnt){1}, types);
+    auto *const_1 = asValue(decltype(PyObject::ob_refcnt){1});
     auto ref = getPointer(py_obj, &PyObject::ob_refcnt);
     auto old_value = builder.CreateLoad(const_1->getType(), ref);
     builder.CreateStore(builder.CreateSub(old_value, const_1), ref);
@@ -128,13 +128,13 @@ void Translator::do_SETLOCAL(PyOparg oparg, llvm::Value *value) {
 
 llvm::Value *Translator::do_POP() {
     auto value = readData<PyObject *>(py_stack, --stack_height);
-    builder.CreateStore(castToLLVMValue(stack_height, types), stack_height_value);
+    builder.CreateStore(asValue(stack_height), stack_height_value);
     return value;
 }
 
 void Translator::do_PUSH(llvm::Value *value) {
     writeData<PyObject *>(py_stack, stack_height++, value);
-    builder.CreateStore(castToLLVMValue(stack_height, types), stack_height_value);
+    builder.CreateStore(asValue(stack_height), stack_height_value);
 }
 
 void Translator::emitBlock(unsigned index) {
@@ -176,64 +176,88 @@ void Translator::emitBlock(unsigned index) {
             do_SETLOCAL(instr.oparg, value);
             break;
         }
-        case BINARY_MULTIPLY: {
-            auto right = do_POP();
-            auto left = do_POP();
-            auto res = do_Call(&SymbolTable::PyNumber_Multiply, left, right);
-            do_Py_DECREF(left);
-            do_Py_DECREF(right);
-            do_PUSH(res);
+        case BINARY_ADD:
+            handle_BINARY_OP(&SymbolTable::PyNumber_Add);
             break;
-        }
-        case BINARY_ADD: {
-            auto right = do_POP();
-            auto left = do_POP();
-            auto res = do_Call(&SymbolTable::PyNumber_Add, left, right);
-            do_Py_DECREF(left);
-            do_Py_DECREF(right);
-            do_PUSH(res);
+        case BINARY_SUBTRACT:
+            handle_BINARY_OP(&SymbolTable::PyNumber_Subtract);
             break;
-        }
-        case BINARY_SUBTRACT: {
-            auto right = do_POP();
-            auto left = do_POP();
-            auto res = do_Call(&SymbolTable::PyNumber_Subtract, left, right);
-            do_Py_DECREF(left);
-            do_Py_DECREF(right);
-            do_PUSH(res);
+        case BINARY_MULTIPLY:
+            handle_BINARY_OP(&SymbolTable::PyNumber_Multiply);
             break;
-        }
-        case BINARY_TRUE_DIVIDE: {
-            auto right = do_POP();
-            auto left = do_POP();
-            auto res = do_Call(&SymbolTable::PyNumber_TrueDivide, left, right);
-            do_Py_DECREF(left);
-            do_Py_DECREF(right);
-            do_PUSH(res);
+        case BINARY_TRUE_DIVIDE:
+            handle_BINARY_OP(&SymbolTable::PyNumber_TrueDivide);
             break;
-        }
-        case BINARY_FLOOR_DIVIDE: {
-            auto right = do_POP();
-            auto left = do_POP();
-            auto res = do_Call(&SymbolTable::PyNumber_FloorDivide, left, right);
-            do_Py_DECREF(left);
-            do_Py_DECREF(right);
-            do_PUSH(res);
+        case BINARY_FLOOR_DIVIDE:
+            handle_BINARY_OP(&SymbolTable::PyNumber_FloorDivide);
             break;
-        }
-        case BINARY_MODULO: {
-            auto right = do_POP();
-            auto left = do_POP();
-            auto res = do_Call(&SymbolTable::PyNumber_Remainder, left, right);
-            do_Py_DECREF(left);
-            do_Py_DECREF(right);
-            do_PUSH(res);
+        case BINARY_MODULO:
+            handle_BINARY_OP(&SymbolTable::PyNumber_Remainder);
             break;
-        }
+        case BINARY_POWER:
+            handle_BINARY_OP(&SymbolTable::calcBinaryPower);
+            break;
+        case BINARY_MATRIX_MULTIPLY:
+            handle_BINARY_OP(&SymbolTable::PyNumber_MatrixMultiply);
+            break;
+        case BINARY_LSHIFT:
+            handle_BINARY_OP(&SymbolTable::PyNumber_Lshift);
+            break;
+        case BINARY_RSHIFT:
+            handle_BINARY_OP(&SymbolTable::PyNumber_Rshift);
+            break;
+        case BINARY_AND:
+            handle_BINARY_OP(&SymbolTable::PyNumber_And);
+            break;
+        case BINARY_OR:
+            handle_BINARY_OP(&SymbolTable::PyNumber_Or);
+            break;
+        case BINARY_XOR:
+            handle_BINARY_OP(&SymbolTable::PyNumber_Xor);
+            break;
+        case INPLACE_ADD:
+            handle_BINARY_OP(&SymbolTable::PyNumber_InPlaceAdd);
+            break;
+        case INPLACE_SUBTRACT:
+            handle_BINARY_OP(&SymbolTable::PyNumber_InPlaceSubtract);
+            break;
+        case INPLACE_MULTIPLY:
+            handle_BINARY_OP(&SymbolTable::PyNumber_InPlaceMultiply);
+            break;
+        case INPLACE_TRUE_DIVIDE:
+            handle_BINARY_OP(&SymbolTable::PyNumber_InPlaceTrueDivide);
+            break;
+        case INPLACE_FLOOR_DIVIDE:
+            handle_BINARY_OP(&SymbolTable::PyNumber_InPlaceFloorDivide);
+            break;
+        case INPLACE_MODULO:
+            handle_BINARY_OP(&SymbolTable::PyNumber_InPlaceRemainder);
+            break;
+        case INPLACE_POWER:
+            handle_BINARY_OP(&SymbolTable::calcInPlacePower);
+            break;
+        case INPLACE_MATRIX_MULTIPLY:
+            handle_BINARY_OP(&SymbolTable::PyNumber_InPlaceMatrixMultiply);
+            break;
+        case INPLACE_LSHIFT:
+            handle_BINARY_OP(&SymbolTable::PyNumber_InPlaceLshift);
+            break;
+        case INPLACE_RSHIFT:
+            handle_BINARY_OP(&SymbolTable::PyNumber_InPlaceRshift);
+            break;
+        case INPLACE_AND:
+            handle_BINARY_OP(&SymbolTable::PyNumber_InPlaceAnd);
+            break;
+        case INPLACE_OR:
+            handle_BINARY_OP(&SymbolTable::PyNumber_InPlaceOr);
+            break;
+        case INPLACE_XOR:
+            handle_BINARY_OP(&SymbolTable::PyNumber_InPlaceXor);
+            break;
         case COMPARE_OP: {
             auto right = do_POP();
             auto left = do_POP();
-            auto res = do_Call(&SymbolTable::PyObject_RichCompare, left, right, castToLLVMValue(instr.oparg, types));
+            auto res = do_Call(&SymbolTable::PyObject_RichCompare, left, right, asValue(instr.oparg));
             do_Py_DECREF(left);
             do_Py_DECREF(right);
             do_PUSH(res);
