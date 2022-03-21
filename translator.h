@@ -41,6 +41,12 @@ castToLLVMValue(llvm::Value *t, RegisteredLLVMTypes &types) {
 
 using TranslatedFunctionType = PyObject *(const SymbolTable *, PyObject **, PyObject **);
 
+class PyBasicBlock {
+public:
+    unsigned end;
+    llvm::BasicBlock *llvm_block;
+};
+
 class Translator {
     llvm::LLVMContext context{};
     RegisteredLLVMTypes types{(context.enableOpaquePointers(), context)};
@@ -58,10 +64,8 @@ class Translator {
     PyInstr *py_instructions{};
 
     unsigned block_num{};
-    DynamicArray<unsigned> boundaries{};
-    DynamicArray<llvm::BasicBlock *> ir_blocks{};
-    llvm::BasicBlock *entry_block{};
-    llvm::BasicBlock *unwind_block{};
+    DynamicArray<PyBasicBlock> blocks;
+    llvm::BasicBlock *unwind_block{}; // TODO: lazy
 
     llvm::Constant *null{llvm::ConstantPointerNull::get(types.get<void *>())};
     llvm::Value *py_symbol_table{func->getArg(0)};
@@ -112,7 +116,7 @@ class Translator {
     void parseCFG(PyCodeObject *cpy_ir);
     void emitBlock(unsigned index);
     llvm::Value *do_GETLOCAL(PyOparg oparg);
-    void do_SETLOCAL(PyOparg oparg, llvm::Value *value);
+    void do_SETLOCAL(PyOparg oparg, llvm::Value *value, bool check_null = true);
     llvm::Value *do_POP();
     void do_PUSH(llvm::Value *value);
     void do_Py_INCREF(llvm::Value *v);
@@ -141,6 +145,13 @@ class Translator {
         do_PUSH(res);
     }
 
+    void handle_UNARY_OP(PyObject *(*const SymbolTable::* entry)(PyObject *)) {
+        auto value = do_POP();
+        auto res = do_Call(entry, value);
+        do_Py_DECREF(value);
+        do_PUSH(res);
+    }
+
     void do_if(llvm::Value *cond,
             const std::function<void()> &create_then,
             const std::function<void()> &create_else = {}) {
@@ -158,6 +169,8 @@ class Translator {
         }
         builder.SetInsertPoint(b_end);
     }
+
+    llvm::BasicBlock *findBlock(unsigned instr_offset);
 
 
 public:
@@ -178,44 +191,65 @@ public:
     void *operator()(Compiler &compiler, PyCodeObject *cpy_ir);
 };
 
-class PyInstrIter {
+class PyInstrIterBase {
+protected:
     const PyInstr *base;
     const size_t size;
-    size_t offset{0};
-
-    class IterResult {
-        const bool has_next{false};
-    public:
-        const PyOpcode opcode{};
-        const PyOparg oparg{};
-
-        IterResult(PyOpcode op, PyOparg arg) : has_next{true}, opcode{op}, oparg{arg} {}
-
-        IterResult() = default;
-
-        explicit operator bool() const {
-            return has_next;
-        }
-    };
-
 public:
-    PyInstrIter(const PyInstr *base_, size_t size_) : base(base_), size(size_) {}
+    size_t offset{0};
+    PyOpcode opcode{};
 
-    [[nodiscard]] auto getOffset() const { return offset; }
+    PyInstrIterBase(const PyInstr *base_, size_t size_) : base(base_), size(size_) {}
+};
 
-    IterResult next() {
-        PyOpcode opcode;
-        PyOparg oparg = 0;
+
+class QuickPyInstrIter : public PyInstrIterBase {
+public:
+    QuickPyInstrIter(const PyInstr *base_, size_t size_) : PyInstrIterBase(base_, size_) {}
+
+    auto next() {
         if (offset == size) {
-            return {};
-        }
-        do {
-            assert(offset < size);
+            return false;
+        } else {
             opcode = _Py_OPCODE(base[offset]);
-            oparg = oparg << EXTENDED_ARG_BITS | _Py_OPARG(base[offset]);
             offset++;
-        } while (opcode == EXTENDED_ARG);
-        return {opcode, oparg};
+            return true;
+        }
+    }
+
+    auto getOparg() {
+        auto o = offset;
+        auto oparg = _Py_OPARG(base[--o]);
+        unsigned shift = 0;
+        while (o && _Py_OPCODE(base[--o]) == EXTENDED_ARG) {
+            shift += EXTENDED_ARG_BITS;
+            oparg |= _Py_OPARG(base[o]) << shift;
+        }
+        return oparg;
+    }
+};
+
+class PyInstrIter : public PyInstrIterBase {
+    PyOparg ext_oparg{};
+public:
+    PyOparg oparg{};
+
+    PyInstrIter(const PyInstr *base_, size_t size_) : PyInstrIterBase(base_, size_) {}
+
+    auto next() {
+        if (offset == size) {
+            return false;
+        } else {
+            opcode = _Py_OPCODE(base[offset]);
+            oparg = ext_oparg << EXTENDED_ARG_BITS | _Py_OPARG(base[offset]);
+            offset++;
+            ext_oparg = 0;
+            return true;
+        }
+    }
+
+    auto extend_current_oparg() {
+        ext_oparg = oparg;
     }
 };
 

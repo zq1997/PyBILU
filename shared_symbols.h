@@ -12,11 +12,17 @@ using PyOpcode = decltype(_Py_OPCODE(PyInstr{}));
 using PyOparg = decltype(_Py_OPCODE(PyInstr{}));
 constexpr auto EXTENDED_ARG_BITS = 8;
 
-PyObject *unwindFrame(PyObject **stack, ptrdiff_t stack_height);
+PyObject *calcUnaryNot(PyObject *value);
 PyObject *calcBinaryPower(PyObject *base, PyObject *exp);
 PyObject *calcInPlacePower(PyObject *base, PyObject *exp);
+PyObject *unwindFrame(PyObject **stack, ptrdiff_t stack_height);
 
 struct SymbolTable {
+    decltype(::calcUnaryNot) *calcUnaryNot{::calcUnaryNot};
+    decltype(::PyNumber_Positive) *PyNumber_Positive{::PyNumber_Positive};
+    decltype(::PyNumber_Negative) *PyNumber_Negative{::PyNumber_Negative};
+    decltype(::PyNumber_Invert) *PyNumber_Invert{::PyNumber_Invert};
+
     decltype(::PyNumber_Add) *PyNumber_Add{::PyNumber_Add};
     decltype(::PyNumber_Subtract) *PyNumber_Subtract{::PyNumber_Subtract};
     decltype(::PyNumber_Multiply) *PyNumber_Multiply{::PyNumber_Multiply};

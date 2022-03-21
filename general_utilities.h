@@ -67,6 +67,10 @@ public:
 };
 
 class BitArray : public DynamicArray<unsigned long> {
+    void set_or_unset(size_t index, ValueType value) {
+        (*this)[index / BitsPerValue] |= value << index % BitsPerValue;
+    }
+
 public:
     static constexpr auto BitsPerValue = CHAR_BIT * sizeof(ValueType);
 
@@ -74,8 +78,12 @@ public:
 
     explicit BitArray(size_t size) : DynamicArray<ValueType>(chunkNumber(size), true) {}
 
-    void set(size_t index, bool value = true) {
-        (*this)[index / BitsPerValue] |= ValueType{value} << index % BitsPerValue;
+    void set(size_t index) {
+        set_or_unset(index, ValueType{1});
+    }
+
+    void unset(size_t index) {
+        set_or_unset(index, ValueType{0});
     }
 
     bool get(size_t index) {
