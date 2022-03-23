@@ -1,6 +1,7 @@
 #ifndef PYNIC_GENERAL_UTILITIES
 #define PYNIC_GENERAL_UTILITIES
 
+#include <string>
 #include <type_traits>
 
 template <typename T, typename = void>

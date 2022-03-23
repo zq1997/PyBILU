@@ -7,7 +7,6 @@ using namespace std;
 
 #include "translator.h"
 
-const SymbolTable shared_symbol_table{};
 static unique_ptr<Compiler> compiler;
 static unique_ptr<Translator> translator;
 static Py_ssize_t code_extra_index;
@@ -33,7 +32,7 @@ PyObject *eval_func(PyThreadState *tstate, PyFrameObject *frame, int throwflag) 
     assert(!throwflag);
     // Strictly speaking, converting void* to a function pointer is undefined behavior in C++
     return reinterpret_cast<TranslatedFunctionType *>(jit_callee)(
-            &shared_symbol_table,
+            symbol_addresses,
             frame->f_localsplus,
             &PyTuple_GET_ITEM(frame->f_code->co_consts, 0)
     );

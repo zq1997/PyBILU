@@ -7,6 +7,7 @@
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/IRBuilder.h>
+#include <llvm/IR/MDBuilder.h>
 #include <llvm/Support/Host.h>
 
 #include "shared_symbols.h"
@@ -19,27 +20,33 @@ constexpr auto debug_build = false;
 constexpr auto debug_build = true;
 #endif
 
-constexpr auto name(const char *n) {
+template <typename T>
+auto useName(const T &arg) {
     if constexpr (debug_build) {
-        return n;
+        if constexpr (std::is_convertible_v<T, std::string>) {
+            return std::string(arg);
+        }
+        if constexpr (std::is_integral_v<T>) {
+            return std::to_string(arg);
+        }
+        if constexpr (std::is_same_v<T, PyObject *>) {
+            return std::string(PyUnicode_AsUTF8(arg));
+        }
     } else {
-        return "";
+        return llvm::Twine::createNull();
     }
 }
 
-template <typename T>
-std::enable_if_t<std::is_integral_v<T>, llvm::Constant *>
-castToLLVMValue(T t, RegisteredLLVMTypes &types) {
-    return llvm::ConstantInt::get(types.get<T>(), t);
+template <typename T, typename... Ts>
+auto useName(const T &arg, const Ts &... more) {
+    if constexpr (debug_build) {
+        return useName(arg) + useName(more...);
+    } else {
+        return llvm::Twine::createNull();
+    }
 }
 
-template <typename T>
-std::enable_if_t<std::is_base_of_v<llvm::Value, std::remove_pointer_t<T>>, llvm::Value *>
-castToLLVMValue(llvm::Value *t, RegisteredLLVMTypes &types) {
-    return t;
-}
-
-using TranslatedFunctionType = PyObject *(const SymbolTable *, PyObject **, PyObject **);
+using TranslatedFunctionType = PyObject *(decltype(symbol_addresses), PyObject **, PyObject **);
 
 class PyBasicBlock {
 public:
@@ -51,55 +58,83 @@ class Translator {
     llvm::LLVMContext context{};
     RegisteredLLVMTypes types{(context.enableOpaquePointers(), context)};
     llvm::IRBuilder<> builder{context};
-    llvm::Module mod{name("the_only_module"), context};
+    llvm::Module mod{"", context};
     llvm::Function *func{llvm::Function::Create(
-            LLVMType<TranslatedFunctionType>(context)(),
-            llvm::Function::ExternalLinkage,
-            name("the_only_function"),
-            &mod
+            LLVMType<TranslatedFunctionType>(context)(), llvm::Function::ExternalLinkage, "", &mod
     )};
+    llvm::MDNode *likely_true{llvm::MDBuilder(context).createBranchWeights(INT32_MAX, 0)};
 
-    llvm::MDNode *likely_true{};
-
+    PyCodeObject *py_code;
     PyInstr *py_instructions{};
-
     unsigned block_num{};
     DynamicArray<PyBasicBlock> blocks;
+    DynamicArray<llvm::Value *> py_locals;
+    DynamicArray<llvm::Value *> py_consts;
+    DynamicArray<llvm::Value *> py_stack;
     llvm::BasicBlock *unwind_block{}; // TODO: lazy
 
     llvm::Constant *null{llvm::ConstantPointerNull::get(types.get<void *>())};
     llvm::Value *py_symbol_table{func->getArg(0)};
-    llvm::Value *py_fast_locals{func->getArg(1)};
-    llvm::Value *py_consts{func->getArg(2)};
-    llvm::Value *py_stack{};
     llvm::Value *stack_height_value{};
-    ptrdiff_t stack_height{};
+    size_t stack_height{};
+
+
+    template <typename T>
+    std::enable_if_t<std::is_integral_v<T>, llvm::Constant *>
+    asValue(T t) {
+        return llvm::ConstantInt::get(types.get<T>(), t);
+    }
+
+    // template <typename T>
+    // std::enable_if_t<std::is_base_of_v<llvm::Value, std::remove_pointer_t<T>>, llvm::Value *>
+    // asValue(llvm::Value *t) {
+    //     return t;
+    // }
+
+    auto _createBlock(const llvm::Twine &name, llvm::Function *parent) {
+        return llvm::BasicBlock::Create(context, name, parent);
+    }
+
+    auto createBlock(const char *name) {
+        return _createBlock(useName(name), func);
+    }
+
+    auto createBlock(unsigned instr) {
+        return _createBlock(useName("$instr.", instr), nullptr);
+    }
+
+    auto createBlock(unsigned instr, const char *extra) {
+        return _createBlock(useName("$instr.", instr - 1, ".", extra), func);
+    }
 
     template <typename T=char>
-    auto getPointer(llvm::Value *base, ptrdiff_t index) {
-        auto offset_value = castToLLVMValue(sizeof(T) * index, types);
-        return builder.CreateInBoundsGEP(types.get<char>(), base, offset_value);
+    auto getPointer(llvm::Value *base, size_t index, const llvm::Twine &name = "") {
+        if (!index && name.isTriviallyEmpty()) {
+            return base;
+        }
+        auto offset_value = asValue(sizeof(T) * index);
+        return builder.CreateInBoundsGEP(types.get<char>(), base, offset_value, name);
     }
 
     template <typename T, typename M>
-    auto getPointer(llvm::Value *instance, M T::* member) {
+    auto getPointer(llvm::Value *instance, M T::* member, const llvm::Twine &name = "") {
         T dummy;
         auto offset = reinterpret_cast<const char *>(&(dummy.*member)) - reinterpret_cast<const char *>(&dummy);
-        return getPointer(instance, offset);
+        return getPointer(instance, offset, name);
     }
 
     template <typename T>
-    auto readData(llvm::Value *base, ptrdiff_t index) {
-        return builder.CreateLoad(types.get<T>(), getPointer<T>(base, index));
+    auto readData(llvm::Value *base, size_t index, const llvm::Twine &name = "") {
+        return builder.CreateLoad(types.get<T>(), getPointer<T>(base, index), name);
     }
 
     template <typename T, typename M>
-    auto readData(llvm::Value *instance, M T::* member) {
-        return builder.CreateLoad(types.get<M>(), getPointer(instance, member));
+    auto readData(llvm::Value *instance, M T::* member, const llvm::Twine &name = "") {
+        return builder.CreateLoad(types.get<M>(), getPointer(instance, member), name);
     }
 
     template <typename T>
-    auto writeData(llvm::Value *base, ptrdiff_t index, llvm::Value *value) {
+    auto writeData(llvm::Value *base, size_t index, llvm::Value *value) {
         return builder.CreateStore(value, getPointer<T>(base, index));
     }
 
@@ -108,12 +143,7 @@ class Translator {
         return builder.CreateStore(value, getPointer(instance, member));
     }
 
-    template <typename T>
-    auto asValue(T value) {
-        return castToLLVMValue(value, types);
-    }
-
-    void parseCFG(PyCodeObject *cpy_ir);
+    void parseCFG();
     void emitBlock(unsigned index);
     llvm::Value *do_GETLOCAL(PyOparg oparg);
     void do_SETLOCAL(PyOparg oparg, llvm::Value *value, bool check_null = true);
@@ -122,33 +152,35 @@ class Translator {
     void do_Py_INCREF(llvm::Value *v);
     void do_Py_DECREF(llvm::Value *v);
 
-    template <typename T, typename ...Args>
-    llvm::CallInst *do_Call(llvm::Value *callee, Args... args) {
-        // TODO: remove_pointer_t太丑了
-        auto callee_type = types.get<std::remove_pointer_t<T>>();
-        return builder.CreateCall(callee_type, callee, {args...});
+    template <typename T, typename M, typename ...Args>
+    llvm::CallInst *do_CallSlot(llvm::Value *instance, M *T::* member, Args... args) {
+        auto callee = readData(instance, member);
+        return builder.CreateCall(types.get<M>(), callee, {args...});
     }
 
-    template <typename T, typename ...Args>
-    llvm::CallInst *do_Call(T *const SymbolTable::* entry, Args... args) {
-        auto callee_type = types.get<T>();
-        auto callee = readData(py_symbol_table, entry);
-        return builder.CreateCall(callee_type, callee, {args...});
+    template <ExternalSymbol S, typename ...Args>
+    llvm::CallInst *do_CallSymbol(Args... args) {
+        auto callee = readData<FunctionPointer>(py_symbol_table, S, symbol_names[S]);
+        return builder.CreateCall(types.get<SymbolType<S>>(), callee, {args...});
     }
 
-    void handle_BINARY_OP(PyObject *(*const SymbolTable::* entry)(PyObject *, PyObject *)) {
-        auto right = do_POP();
-        auto left = do_POP();
-        auto res = do_Call(entry, left, right);
-        do_Py_DECREF(left);
-        do_Py_DECREF(right);
+    void handle_UNARY_OP(ExternalSymbol s) {
+        auto value = do_POP();
+        auto callee = readData<FunctionPointer>(py_symbol_table, s, symbol_names[s]);
+        using UnaryFunction = PyObject *(PyObject *);
+        auto res = builder.CreateCall(types.get<UnaryFunction>(), callee, {value});
+        do_Py_DECREF(value);
         do_PUSH(res);
     }
 
-    void handle_UNARY_OP(PyObject *(*const SymbolTable::* entry)(PyObject *)) {
-        auto value = do_POP();
-        auto res = do_Call(entry, value);
-        do_Py_DECREF(value);
+    void handle_BINARY_OP(ExternalSymbol s) {
+        auto right = do_POP();
+        auto left = do_POP();
+        auto callee = readData<FunctionPointer>(py_symbol_table, s, symbol_names[s]);
+        using BinaryFunction = PyObject *(PyObject *, PyObject *);
+        auto res = builder.CreateCall(types.get<BinaryFunction>(), callee, {left, right});
+        do_Py_DECREF(left);
+        do_Py_DECREF(right);
         do_PUSH(res);
     }
 
@@ -175,20 +207,17 @@ class Translator {
 
 public:
     Translator() {
-        likely_true = llvm::MDNode::get(context, {
-                llvm::MDString::get(context, "branch_weights"),
-                llvm::ConstantAsMetadata::get(builder.getInt32(INT32_MAX)), // i32 required
-                llvm::ConstantAsMetadata::get(builder.getInt32(1)), // i32 required
-        });
-
         func->setAttributes(
                 llvm::AttributeList::get(context, llvm::AttributeList::FunctionIndex,
                         llvm::AttrBuilder(context)
                                 .addAttribute(llvm::Attribute::NoUnwind)
                                 .addAttribute("tune-cpu", llvm::sys::getHostCPUName())));
+        py_symbol_table->setName(useName("$symbols"));
+        func->getArg(1)->setName(useName("$locals"));
+        func->getArg(2)->setName(useName("$locals"));
     }
 
-    void *operator()(Compiler &compiler, PyCodeObject *cpy_ir);
+    void *operator()(Compiler &compiler, PyCodeObject *code);
 };
 
 class PyInstrIterBase {

@@ -5,10 +5,11 @@ PyObject *calcUnaryNot(PyObject *value) {
     if (err == 0) {
         Py_INCREF(Py_True);
         return Py_True;
-    } else if (err > 0) {
-        Py_INCREF(Py_False);
-        return Py_False;
-    }
+    } else
+        if (err > 0) {
+            Py_INCREF(Py_False);
+            return Py_False;
+        }
     return nullptr;
 }
 
@@ -27,3 +28,11 @@ PyObject *unwindFrame(PyObject **stack, ptrdiff_t stack_height) {
     }
     return nullptr;
 }
+
+
+#define F(X) #X
+const char *const symbol_names[]{DEFINE_SYMBOLS(F)};
+#undef F
+#define F(X) reinterpret_cast<void (*)()>(&X)
+const FunctionPointer symbol_addresses[]{DEFINE_SYMBOLS(F)};
+#undef F

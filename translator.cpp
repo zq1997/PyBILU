@@ -10,19 +10,37 @@
 using namespace std;
 using namespace llvm;
 
+void *Translator::operator()(Compiler &compiler, PyCodeObject *code) {
+    py_code = code;
+    parseCFG();
 
-void *Translator::operator()(Compiler &compiler, PyCodeObject *cpy_ir) {
-    parseCFG(cpy_ir);
-    for (auto &b : Range(block_num, &*blocks)) {
-        b.llvm_block = BasicBlock::Create(context, "", func);
+    blocks[0].llvm_block = createBlock("$entry_block");
+    unwind_block = createBlock("$unwind_block");
+
+    auto start = blocks[0].end;
+    for (auto &b : Range(block_num - 1, &blocks[1])) {
+        b.llvm_block = createBlock(start);
+        start = b.end;
     }
-    unwind_block = BasicBlock::Create(context, name("unwind"), func);
 
     builder.SetInsertPoint(blocks[0].llvm_block);
-    py_stack = builder.CreateAlloca(types.get<PyObject *>(),
-            asValue(cpy_ir->co_stacksize),
-            name("stack")
+    py_locals.reserve(code->co_nlocals);
+    for (auto i : Range(code->co_nlocals)) {
+        auto name = PyTuple_GET_ITEM(code->co_varnames, i);
+        py_locals[i] = getPointer<PyObject *>(func->getArg(1), i, useName("$local.", name));
+    }
+    py_consts.reserve(PyTuple_GET_SIZE(code->co_consts));
+    for (auto i : Range(PyTuple_GET_SIZE(code->co_consts))) {
+        py_consts[i] = getPointer<PyObject *>(func->getArg(2), i, useName("$const.", i));
+    }
+    py_stack.reserve(code->co_stacksize);
+    auto stack_space = builder.CreateAlloca(types.get<PyObject *>(),
+            asValue(code->co_stacksize),
+            useName("$stack")
     );
+    for (auto i : Range(code->co_stacksize)) {
+        py_stack[i] = getPointer<PyObject *>(stack_space, i, useName("$stack.", i));
+    }
     stack_height_value = builder.CreateAlloca(types.get<decltype(stack_height)>());
     builder.CreateBr(blocks[1].llvm_block);
 
@@ -31,8 +49,8 @@ void *Translator::operator()(Compiler &compiler, PyCodeObject *cpy_ir) {
     }
 
     builder.SetInsertPoint(unwind_block);
-    builder.CreateRet(do_Call(&SymbolTable::unwindFrame, py_stack,
-            builder.CreateLoad(types.get<ptrdiff_t>(), stack_height_value)));
+    auto sp = builder.CreateLoad(types.get<ptrdiff_t>(), stack_height_value);
+    builder.CreateRet(do_CallSymbol<sym_unwindFrame>(py_stack[0], sp));
 
     assert(!verifyFunction(*func, &errs()));
     auto result = compiler(mod);
@@ -42,9 +60,9 @@ void *Translator::operator()(Compiler &compiler, PyCodeObject *cpy_ir) {
     return result;
 }
 
-void Translator::parseCFG(PyCodeObject *cpy_ir) {
-    py_instructions = reinterpret_cast<PyInstr *>(PyBytes_AS_STRING(cpy_ir->co_code));
-    auto size = PyBytes_GET_SIZE(cpy_ir->co_code) / sizeof(PyInstr);
+void Translator::parseCFG() {
+    py_instructions = reinterpret_cast<PyInstr *>(PyBytes_AS_STRING(py_code->co_code));
+    auto size = PyBytes_GET_SIZE(py_code->co_code) / sizeof(PyInstr);
 
     BitArray is_boundary(size + 1);
 
@@ -110,13 +128,13 @@ void Translator::do_Py_DECREF(Value *py_obj) {
 }
 
 Value *Translator::do_GETLOCAL(PyOparg oparg) {
-    return readData<PyObject *>(py_fast_locals, oparg);
+    auto varname = PyTuple_GET_ITEM(py_code->co_varnames, oparg);
+    return builder.CreateLoad(types.get<PyObject *>(), py_locals[oparg], useName(varname));
 }
 
 void Translator::do_SETLOCAL(PyOparg oparg, llvm::Value *value, bool check_null) {
-    auto ptr = getPointer<PyObject *>(py_fast_locals, oparg);
-    auto old_value = builder.CreateLoad(types.get<PyObject *>(), ptr);
-    builder.CreateStore(value, ptr);
+    auto old_value = do_GETLOCAL(oparg);
+    builder.CreateStore(value, py_locals[oparg]);
     if (check_null) {
         auto not_null = builder.CreateICmpNE(old_value, null);
         do_if(not_null, [&]() {
@@ -128,17 +146,18 @@ void Translator::do_SETLOCAL(PyOparg oparg, llvm::Value *value, bool check_null)
 }
 
 llvm::Value *Translator::do_POP() {
-    auto value = readData<PyObject *>(py_stack, --stack_height);
+    auto value = builder.CreateLoad(types.get<PyObject *>(), py_stack[--stack_height]);
     builder.CreateStore(asValue(stack_height), stack_height_value);
     return value;
 }
 
 void Translator::do_PUSH(llvm::Value *value) {
-    writeData<PyObject *>(py_stack, stack_height++, value);
+    builder.CreateStore(value, py_stack[stack_height++]);
     builder.CreateStore(asValue(stack_height), stack_height_value);
 }
 
 void Translator::emitBlock(unsigned index) {
+    blocks[index].llvm_block->insertInto(func);
     builder.SetInsertPoint(blocks[index].llvm_block);
     bool fall_through = true;
 
@@ -158,7 +177,7 @@ void Translator::emitBlock(unsigned index) {
             break;
         }
         case LOAD_CONST: {
-            auto value = readData<PyObject *>(py_consts, instr.oparg);
+            auto value = builder.CreateLoad(types.get<PyObject *>(), py_consts[instr.oparg]);
             do_Py_INCREF(value);
             do_PUSH(value);
             break;
@@ -166,8 +185,7 @@ void Translator::emitBlock(unsigned index) {
         case LOAD_FAST: {
             auto value = do_GETLOCAL(instr.oparg);
             auto is_not_null = builder.CreateICmpNE(value, null);
-            auto bb = BasicBlock::Create(context, "", func);
-            // TODO: 看看下一个参数什么意思，Unpredictable
+            auto bb = createBlock(instr.offset, "LOAD_FAST.OK");
             builder.CreateCondBr(is_not_null, bb, unwind_block, likely_true);
             builder.SetInsertPoint(bb);
             do_Py_INCREF(value);
@@ -182,106 +200,106 @@ void Translator::emitBlock(unsigned index) {
         case DELETE_FAST: {
             auto value = do_GETLOCAL(instr.oparg);
             auto is_not_null = builder.CreateICmpNE(value, null);
-            auto bb = BasicBlock::Create(context, "", func);
+            auto bb = createBlock(instr.offset, "DELETE_FAST.OK");
             builder.CreateCondBr(is_not_null, bb, unwind_block, likely_true);
             do_SETLOCAL(instr.oparg, null, false);
             do_PUSH(value);
             break;
         }
         case UNARY_NOT:
-            handle_UNARY_OP(&SymbolTable::calcUnaryNot);
+            handle_UNARY_OP(sym_calcUnaryNot);
             break;
         case UNARY_POSITIVE:
-            handle_UNARY_OP(&SymbolTable::PyNumber_Positive);
+            handle_UNARY_OP(sym_PyNumber_Positive);
             break;
         case UNARY_NEGATIVE:
-            handle_UNARY_OP(&SymbolTable::PyNumber_Negative);
+            handle_UNARY_OP(sym_PyNumber_Negative);
             break;
         case UNARY_INVERT:
-            handle_UNARY_OP(&SymbolTable::PyNumber_Invert);
+            handle_UNARY_OP(sym_PyNumber_Invert);
             break;
         case BINARY_ADD:
-            handle_BINARY_OP(&SymbolTable::PyNumber_Add);
+            handle_BINARY_OP(sym_PyNumber_Add);
             break;
         case BINARY_SUBTRACT:
-            handle_BINARY_OP(&SymbolTable::PyNumber_Subtract);
+            handle_BINARY_OP(sym_PyNumber_Subtract);
             break;
         case BINARY_MULTIPLY:
-            handle_BINARY_OP(&SymbolTable::PyNumber_Multiply);
+            handle_BINARY_OP(sym_PyNumber_Multiply);
             break;
         case BINARY_TRUE_DIVIDE:
-            handle_BINARY_OP(&SymbolTable::PyNumber_TrueDivide);
+            handle_BINARY_OP(sym_PyNumber_TrueDivide);
             break;
         case BINARY_FLOOR_DIVIDE:
-            handle_BINARY_OP(&SymbolTable::PyNumber_FloorDivide);
+            handle_BINARY_OP(sym_PyNumber_FloorDivide);
             break;
         case BINARY_MODULO:
-            handle_BINARY_OP(&SymbolTable::PyNumber_Remainder);
+            handle_BINARY_OP(sym_PyNumber_Remainder);
             break;
         case BINARY_POWER:
-            handle_BINARY_OP(&SymbolTable::calcBinaryPower);
+            handle_BINARY_OP(sym_calcBinaryPower);
             break;
         case BINARY_MATRIX_MULTIPLY:
-            handle_BINARY_OP(&SymbolTable::PyNumber_MatrixMultiply);
+            handle_BINARY_OP(sym_PyNumber_MatrixMultiply);
             break;
         case BINARY_LSHIFT:
-            handle_BINARY_OP(&SymbolTable::PyNumber_Lshift);
+            handle_BINARY_OP(sym_PyNumber_Lshift);
             break;
         case BINARY_RSHIFT:
-            handle_BINARY_OP(&SymbolTable::PyNumber_Rshift);
+            handle_BINARY_OP(sym_PyNumber_Rshift);
             break;
         case BINARY_AND:
-            handle_BINARY_OP(&SymbolTable::PyNumber_And);
+            handle_BINARY_OP(sym_PyNumber_And);
             break;
         case BINARY_OR:
-            handle_BINARY_OP(&SymbolTable::PyNumber_Or);
+            handle_BINARY_OP(sym_PyNumber_Or);
             break;
         case BINARY_XOR:
-            handle_BINARY_OP(&SymbolTable::PyNumber_Xor);
+            handle_BINARY_OP(sym_PyNumber_Xor);
             break;
         case INPLACE_ADD:
-            handle_BINARY_OP(&SymbolTable::PyNumber_InPlaceAdd);
+            handle_BINARY_OP(sym_PyNumber_InPlaceAdd);
             break;
         case INPLACE_SUBTRACT:
-            handle_BINARY_OP(&SymbolTable::PyNumber_InPlaceSubtract);
+            handle_BINARY_OP(sym_PyNumber_InPlaceSubtract);
             break;
         case INPLACE_MULTIPLY:
-            handle_BINARY_OP(&SymbolTable::PyNumber_InPlaceMultiply);
+            handle_BINARY_OP(sym_PyNumber_InPlaceMultiply);
             break;
         case INPLACE_TRUE_DIVIDE:
-            handle_BINARY_OP(&SymbolTable::PyNumber_InPlaceTrueDivide);
+            handle_BINARY_OP(sym_PyNumber_InPlaceTrueDivide);
             break;
         case INPLACE_FLOOR_DIVIDE:
-            handle_BINARY_OP(&SymbolTable::PyNumber_InPlaceFloorDivide);
+            handle_BINARY_OP(sym_PyNumber_InPlaceFloorDivide);
             break;
         case INPLACE_MODULO:
-            handle_BINARY_OP(&SymbolTable::PyNumber_InPlaceRemainder);
+            handle_BINARY_OP(sym_PyNumber_InPlaceRemainder);
             break;
         case INPLACE_POWER:
-            handle_BINARY_OP(&SymbolTable::calcInPlacePower);
+            handle_BINARY_OP(sym_calcInPlacePower);
             break;
         case INPLACE_MATRIX_MULTIPLY:
-            handle_BINARY_OP(&SymbolTable::PyNumber_InPlaceMatrixMultiply);
+            handle_BINARY_OP(sym_PyNumber_InPlaceMatrixMultiply);
             break;
         case INPLACE_LSHIFT:
-            handle_BINARY_OP(&SymbolTable::PyNumber_InPlaceLshift);
+            handle_BINARY_OP(sym_PyNumber_InPlaceLshift);
             break;
         case INPLACE_RSHIFT:
-            handle_BINARY_OP(&SymbolTable::PyNumber_InPlaceRshift);
+            handle_BINARY_OP(sym_PyNumber_InPlaceRshift);
             break;
         case INPLACE_AND:
-            handle_BINARY_OP(&SymbolTable::PyNumber_InPlaceAnd);
+            handle_BINARY_OP(sym_PyNumber_InPlaceAnd);
             break;
         case INPLACE_OR:
-            handle_BINARY_OP(&SymbolTable::PyNumber_InPlaceOr);
+            handle_BINARY_OP(sym_PyNumber_InPlaceOr);
             break;
         case INPLACE_XOR:
-            handle_BINARY_OP(&SymbolTable::PyNumber_InPlaceXor);
+            handle_BINARY_OP(sym_PyNumber_InPlaceXor);
             break;
         case COMPARE_OP: {
             auto right = do_POP();
             auto left = do_POP();
-            auto res = do_Call(&SymbolTable::PyObject_RichCompare, left, right, asValue(instr.oparg));
+            auto res = do_CallSymbol<sym_PyObject_RichCompare>(left, right, asValue(instr.oparg));
             do_Py_DECREF(left);
             do_Py_DECREF(right);
             do_PUSH(res);
@@ -301,9 +319,9 @@ void Translator::emitBlock(unsigned index) {
         }
         case POP_JUMP_IF_TRUE: {
             auto cond = do_POP();
-            auto err = do_Call(&SymbolTable::PyObject_IsTrue, cond);
+            auto err = do_CallSymbol<sym_PyObject_IsTrue>(cond);
             do_Py_DECREF(cond);
-            auto cmp = builder.CreateICmpNE(err, ConstantInt::get(err->getType(), 0));
+            auto cmp = builder.CreateICmpNE(err, asValue(0));
             auto jmp_target = findBlock(instr.oparg);
             builder.CreateCondBr(cmp, jmp_target, blocks[index + 1].llvm_block);
             fall_through = false;
@@ -311,9 +329,9 @@ void Translator::emitBlock(unsigned index) {
         }
         case POP_JUMP_IF_FALSE: {
             auto cond = do_POP();
-            auto err = do_Call(&SymbolTable::PyObject_IsTrue, cond);
+            auto err = do_CallSymbol<sym_PyObject_IsTrue>(cond);
             do_Py_DECREF(cond);
-            auto cmp = builder.CreateICmpEQ(err, ConstantInt::get(err->getType(), 0));
+            auto cmp = builder.CreateICmpEQ(err, asValue(0));
             auto jmp_target = findBlock(instr.oparg);
             builder.CreateCondBr(cmp, jmp_target, blocks[index + 1].llvm_block);
             fall_through = false;
@@ -321,7 +339,7 @@ void Translator::emitBlock(unsigned index) {
         }
         case GET_ITER: {
             auto iterable = do_POP();
-            auto iter = do_Call(&SymbolTable::PyObject_GetIter, iterable);
+            auto iter = do_CallSymbol<sym_PyObject_GetIter>(iterable);
             do_Py_DECREF(iterable);
             do_PUSH(iter);
             break;
@@ -329,11 +347,10 @@ void Translator::emitBlock(unsigned index) {
         case FOR_ITER: {
             auto iter = do_POP();
             auto the_type = readData(iter, &PyObject::ob_type);
-            auto tp_iternext = readData(the_type, &PyTypeObject::tp_iternext);
-            auto next = do_Call<decltype(PyTypeObject::tp_iternext)>(tp_iternext, iter);
+            auto next = do_CallSlot(the_type, &PyTypeObject::tp_iternext, iter);
             auto cmp = builder.CreateICmpEQ(next, ConstantPointerNull::get(types.get<PyObject *>()));
-            auto b_continue = BasicBlock::Create(context, "", func);
-            auto b_break = BasicBlock::Create(context, "", func);
+            auto b_continue = createBlock(instr.offset, "FOR_ITER.continue");
+            auto b_break = createBlock(instr.offset, "FOR_ITER.break");
             builder.CreateCondBr(cmp, b_break, b_continue);
             builder.SetInsertPoint(b_break);
             do_Py_DECREF(iter);
@@ -370,12 +387,12 @@ BasicBlock *Translator::findBlock(unsigned instr_offset) {
         auto v = blocks[mid].end;
         if (v < instr_offset) {
             left = mid + 1;
-        } else if (v > instr_offset) {
-            assert(mid > 0);
-            right = mid - 1;
-        } else {
-            return blocks[mid].llvm_block;
-        }
+        } else
+            if (v > instr_offset) {
+                right = mid - 1;
+            } else {
+                return blocks[mid + 1].llvm_block;
+            }
     }
     assert(false);
     return nullptr;

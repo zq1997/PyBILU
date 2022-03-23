@@ -17,46 +17,60 @@ PyObject *calcBinaryPower(PyObject *base, PyObject *exp);
 PyObject *calcInPlacePower(PyObject *base, PyObject *exp);
 PyObject *unwindFrame(PyObject **stack, ptrdiff_t stack_height);
 
-struct SymbolTable {
-    decltype(::calcUnaryNot) *calcUnaryNot{::calcUnaryNot};
-    decltype(::PyNumber_Positive) *PyNumber_Positive{::PyNumber_Positive};
-    decltype(::PyNumber_Negative) *PyNumber_Negative{::PyNumber_Negative};
-    decltype(::PyNumber_Invert) *PyNumber_Invert{::PyNumber_Invert};
+#define DEFINE_SYMBOLS(F) \
+    F(calcUnaryNot),\
+    F(PyNumber_Positive),\
+    F(PyNumber_Negative),\
+    F(PyNumber_Invert),\
+    \
+    F(PyNumber_Add),\
+    F(PyNumber_Subtract),\
+    F(PyNumber_Multiply),\
+    F(PyNumber_TrueDivide),\
+    F(PyNumber_FloorDivide),\
+    F(PyNumber_Remainder),\
+    F(calcBinaryPower),\
+    F(PyNumber_MatrixMultiply),\
+    F(PyNumber_Lshift),\
+    F(PyNumber_Rshift),\
+    F(PyNumber_And),\
+    F(PyNumber_Or),\
+    F(PyNumber_Xor),\
+    \
+    F(PyNumber_InPlaceAdd),\
+    F(PyNumber_InPlaceSubtract),\
+    F(PyNumber_InPlaceMultiply),\
+    F(PyNumber_InPlaceTrueDivide),\
+    F(PyNumber_InPlaceFloorDivide),\
+    F(PyNumber_InPlaceRemainder),\
+    F(calcInPlacePower),\
+    F(PyNumber_InPlaceMatrixMultiply),\
+    F(PyNumber_InPlaceLshift),\
+    F(PyNumber_InPlaceRshift),\
+    F(PyNumber_InPlaceAnd),\
+    F(PyNumber_InPlaceOr),\
+    F(PyNumber_InPlaceXor),\
+    \
+    F(PyObject_GetIter),\
+    F(PyObject_IsTrue),\
+    F(PyObject_RichCompare),\
+    \
+    F(unwindFrame)
 
-    decltype(::PyNumber_Add) *PyNumber_Add{::PyNumber_Add};
-    decltype(::PyNumber_Subtract) *PyNumber_Subtract{::PyNumber_Subtract};
-    decltype(::PyNumber_Multiply) *PyNumber_Multiply{::PyNumber_Multiply};
-    decltype(::PyNumber_TrueDivide) *PyNumber_TrueDivide{::PyNumber_TrueDivide};
-    decltype(::PyNumber_FloorDivide) *PyNumber_FloorDivide{::PyNumber_FloorDivide};
-    decltype(::PyNumber_Remainder) *PyNumber_Remainder{::PyNumber_Remainder};
-    decltype(::calcBinaryPower) *calcBinaryPower{::calcBinaryPower};
-    decltype(::PyNumber_MatrixMultiply) *PyNumber_MatrixMultiply{::PyNumber_MatrixMultiply};
-    decltype(::PyNumber_Lshift) *PyNumber_Lshift{::PyNumber_Lshift};
-    decltype(::PyNumber_Rshift) *PyNumber_Rshift{::PyNumber_Rshift};
-    decltype(::PyNumber_And) *PyNumber_And{::PyNumber_And};
-    decltype(::PyNumber_Or) *PyNumber_Or{::PyNumber_Or};
-    decltype(::PyNumber_Xor) *PyNumber_Xor{::PyNumber_Xor};
-
-    decltype(::PyNumber_InPlaceAdd) *PyNumber_InPlaceAdd{::PyNumber_InPlaceAdd};
-    decltype(::PyNumber_InPlaceSubtract) *PyNumber_InPlaceSubtract{::PyNumber_InPlaceSubtract};
-    decltype(::PyNumber_InPlaceMultiply) *PyNumber_InPlaceMultiply{::PyNumber_InPlaceMultiply};
-    decltype(::PyNumber_InPlaceTrueDivide) *PyNumber_InPlaceTrueDivide{::PyNumber_InPlaceTrueDivide};
-    decltype(::PyNumber_InPlaceFloorDivide) *PyNumber_InPlaceFloorDivide{::PyNumber_InPlaceFloorDivide};
-    decltype(::PyNumber_InPlaceRemainder) *PyNumber_InPlaceRemainder{::PyNumber_InPlaceRemainder};
-    decltype(::calcInPlacePower) *calcInPlacePower{::calcInPlacePower};
-    decltype(::PyNumber_InPlaceMatrixMultiply) *PyNumber_InPlaceMatrixMultiply{::PyNumber_InPlaceMatrixMultiply};
-    decltype(::PyNumber_InPlaceLshift) *PyNumber_InPlaceLshift{::PyNumber_InPlaceLshift};
-    decltype(::PyNumber_InPlaceRshift) *PyNumber_InPlaceRshift{::PyNumber_InPlaceRshift};
-    decltype(::PyNumber_InPlaceAnd) *PyNumber_InPlaceAnd{::PyNumber_InPlaceAnd};
-    decltype(::PyNumber_InPlaceOr) *PyNumber_InPlaceOr{::PyNumber_InPlaceOr};
-    decltype(::PyNumber_InPlaceXor) *PyNumber_InPlaceXor{::PyNumber_InPlaceXor};
-
-    decltype(::PyObject_GetIter) *PyObject_GetIter{::PyObject_GetIter};
-    decltype(::PyObject_IsTrue) *PyObject_IsTrue{::PyObject_IsTrue};
-    decltype(::PyObject_RichCompare) *PyObject_RichCompare{::PyObject_RichCompare};
-
-    decltype(::unwindFrame) *unwindFrame{::unwindFrame};
+enum ExternalSymbol {
+#define F(X) sym_##X
+    DEFINE_SYMBOLS(F),
+#undef F
+    symbol_count
 };
+
+using SymbolTypeTuple = std::tuple<DEFINE_SYMBOLS(decltype)>;
+template <ExternalSymbol S>
+using SymbolType = typename std::tuple_element_t<S, SymbolTypeTuple>;
+
+using FunctionPointer = void (*)();
+extern const char *const symbol_names[symbol_count];
+extern FunctionPointer const symbol_addresses[symbol_count];
 
 template <typename T>
 struct TypeWrapper {
@@ -172,6 +186,7 @@ public:
 using RegisteredLLVMTypes = TypeRegisister<LLVMType,
         void *,
         char,
+        int,
         ptrdiff_t,
         PyOparg,
         Py_ssize_t,
