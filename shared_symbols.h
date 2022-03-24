@@ -58,21 +58,28 @@ constexpr std::tuple external_symbols{
         std::pair{&unwindFrame, "unwindFrame"}
 };
 
-template <auto V, size_t I = 0>
+constexpr auto external_symbol_count = std::tuple_size_v<decltype(external_symbols)>;
+
+template <auto A, auto B>
+constexpr auto isSameTypeAndValue() {
+    if constexpr (std::is_same_v<decltype(A), decltype(B)>) {
+        return A == B;
+    } else {
+        return false;
+    }
+}
+
+template <auto &V, size_t I = 0>
 constexpr auto searchSymbol() {
-    if constexpr (std::is_same_v<decltype(std::get<I>(external_symbols).first), decltype(V)>) {
-        if constexpr (std::get<I>(external_symbols).first == V) {
-            return I;
-        } else {
-            return searchSymbol<V, I + 1>();
-        }
+    static_assert(I < external_symbol_count, "invalid symbol");
+    if constexpr (isSameTypeAndValue<std::get<I>(external_symbols).first, V>()) {
+        return I;
     } else {
         return searchSymbol<V, I + 1>();
     }
 }
 
 using FunctionPointer = void (*)();
-constexpr auto external_symbol_count = std::tuple_size_v<decltype(external_symbols)>;
 extern const std::array<const char *, external_symbol_count> symbol_names;
 extern const std::array<FunctionPointer, external_symbol_count> symbol_addresses;
 

@@ -164,7 +164,7 @@ class Translator {
 
     template <auto &S, typename ...Args>
     llvm::CallInst *do_CallSymbol(Args... args) {
-        return do_Call(types.get<std::remove_reference_t<decltype(S)>>(), getSymbol(searchSymbol<&S>()), args...);
+        return do_Call(types.get<std::remove_reference_t<decltype(S)>>(), getSymbol(searchSymbol<S>()), args...);
     }
 
     void handle_UNARY_OP(size_t i) {

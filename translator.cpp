@@ -224,7 +224,7 @@ void Translator::emitBlock(unsigned index) {
             break;
         }
         case UNARY_NOT:
-            handle_UNARY_OP(searchSymbol<&calcUnaryNot>());
+            handle_UNARY_OP(searchSymbol<calcUnaryNot>());
             break;
         case UNARY_POSITIVE:
             handle_UNARY_OP(searchSymbol<PyNumber_Positive>());
