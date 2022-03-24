@@ -11,7 +11,7 @@ struct HasDereference<T, std::void_t<decltype(*std::declval<T>())>> : std::true_
 
 template <typename Size=size_t, typename Iter=Size>
 class Range {
-    static_assert(std::is_integral<Size>::value);
+    static_assert(std::is_integral_v<Size>);
     const Iter from;
     const Iter to;
 public:

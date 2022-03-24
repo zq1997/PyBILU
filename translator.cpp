@@ -10,13 +10,23 @@
 using namespace std;
 using namespace llvm;
 
+Translator::Translator() {
+    func->setAttributes(
+            AttributeList::get(context, AttributeList::FunctionIndex,
+                    AttrBuilder(context)
+                            .addAttribute(Attribute::NoUnwind)
+                            .addAttribute("tune-cpu", sys::getHostCPUName())));
+    func->getArg(0)->setName(useName("$symbols"));
+    func->getArg(1)->setName(useName("$locals"));
+    func->getArg(2)->setName(useName("$consts"));
+}
+
 void *Translator::operator()(Compiler &compiler, PyCodeObject *code) {
     py_code = code;
     parseCFG();
 
-    blocks[0].llvm_block = createBlock("$entry_block");
-    unwind_block = createBlock("$unwind_block");
-
+    blocks[0].llvm_block = createBlock("$entry_block", func);
+    unwind_block = createBlock("$unwind_block", nullptr);
     auto start = blocks[0].end;
     for (auto &b : Range(block_num - 1, &blocks[1])) {
         b.llvm_block = createBlock(start);
@@ -29,10 +39,12 @@ void *Translator::operator()(Compiler &compiler, PyCodeObject *code) {
         auto name = PyTuple_GET_ITEM(code->co_varnames, i);
         py_locals[i] = getPointer<PyObject *>(func->getArg(1), i, useName("$local.", name));
     }
+
     py_consts.reserve(PyTuple_GET_SIZE(code->co_consts));
     for (auto i : Range(PyTuple_GET_SIZE(code->co_consts))) {
         py_consts[i] = getPointer<PyObject *>(func->getArg(2), i, useName("$const.", i));
     }
+
     py_stack.reserve(code->co_stacksize);
     auto stack_space = builder.CreateAlloca(types.get<PyObject *>(),
             asValue(code->co_stacksize),
@@ -42,15 +54,19 @@ void *Translator::operator()(Compiler &compiler, PyCodeObject *code) {
         py_stack[i] = getPointer<PyObject *>(stack_space, i, useName("$stack.", i));
     }
     stack_height_value = builder.CreateAlloca(types.get<decltype(stack_height)>());
-    builder.CreateBr(blocks[1].llvm_block);
+
+    py_symbols.reserve(symbol_count, true);
 
     for (auto &i : Range(block_num - 1, 1U)) {
         emitBlock(i);
     }
 
+    unwind_block->insertInto(func);
     builder.SetInsertPoint(unwind_block);
     auto sp = builder.CreateLoad(types.get<ptrdiff_t>(), stack_height_value);
     builder.CreateRet(do_CallSymbol<sym_unwindFrame>(py_stack[0], sp));
+    builder.SetInsertPoint(blocks[0].llvm_block);
+    builder.CreateBr(blocks[1].llvm_block);
 
     assert(!verifyFunction(*func, &errs()));
     auto result = compiler(mod);
@@ -196,7 +212,7 @@ void Translator::emitBlock(unsigned index) {
             auto value = do_POP();
             do_SETLOCAL(instr.oparg, value);
             break;
-        };
+        }
         case DELETE_FAST: {
             auto value = do_GETLOCAL(instr.oparg);
             auto is_not_null = builder.CreateICmpNE(value, null);

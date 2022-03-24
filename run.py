@@ -27,34 +27,40 @@ def stat(name, func):
 #
 
 
-def foo(n):
-    if n < 2:
-        return n
-    x = 0
-    y = 1
-    i = 1
-    while i < n:
-        f = x + y
-        x = y
-        y = f
-        i = i + 1
-    return y
-
-
+# def foo(n):
+#     if n < 2:
+#         return n
+#     x = 0
+#     y = 1
+#     i = 1
+#     while i < n:
+#         f = x + y
+#         x = y
+#         y = f
+#         i = i + 1
+#     return y
+#
+#
+# @pynic.apply
+# def bar(n):
+#     if n < 2:
+#         return n
+#     x = 0
+#     y = 1
+#     i = 1
+#     while i < n:
+#         f = x + y
+#         x = y
+#         y = f
+#         i = i + 1
+#     return y
+#
+#
+# stat('无优化', foo)
+# stat('有优化', bar)
 @pynic.apply
-def bar(n):
-    if n < 2:
-        return n
-    x = 0
-    y = 1
-    i = 1
-    while i < n:
-        f = x + y
-        x = y
-        y = f
-        i = i + 1
-    return y
+def foo(x):
+    return x + x
 
 
-stat('无优化', foo)
-stat('有优化', bar)
+print(foo(21))

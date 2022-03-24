@@ -61,8 +61,9 @@ enum ExternalSymbol {
 #define F(X) sym_##X
     DEFINE_SYMBOLS(F),
 #undef F
-    symbol_count
+    _symbol_count
 };
+constexpr size_t symbol_count = _symbol_count;
 
 using SymbolTypeTuple = std::tuple<DEFINE_SYMBOLS(decltype)>;
 template <ExternalSymbol S>

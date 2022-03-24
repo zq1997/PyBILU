@@ -64,17 +64,17 @@ class Translator {
     )};
     llvm::MDNode *likely_true{llvm::MDBuilder(context).createBranchWeights(INT32_MAX, 0)};
 
-    PyCodeObject *py_code;
+    PyCodeObject *py_code{};
     PyInstr *py_instructions{};
     unsigned block_num{};
     DynamicArray<PyBasicBlock> blocks;
     DynamicArray<llvm::Value *> py_locals;
     DynamicArray<llvm::Value *> py_consts;
     DynamicArray<llvm::Value *> py_stack;
+    DynamicArray<llvm::Value *> py_symbols;
     llvm::BasicBlock *unwind_block{}; // TODO: lazy
 
     llvm::Constant *null{llvm::ConstantPointerNull::get(types.get<void *>())};
-    llvm::Value *py_symbol_table{func->getArg(0)};
     llvm::Value *stack_height_value{};
     size_t stack_height{};
 
@@ -91,20 +91,16 @@ class Translator {
     //     return t;
     // }
 
-    auto _createBlock(const llvm::Twine &name, llvm::Function *parent) {
+    auto createBlock(const llvm::Twine &name, llvm::Function *parent) {
         return llvm::BasicBlock::Create(context, name, parent);
     }
 
-    auto createBlock(const char *name) {
-        return _createBlock(useName(name), func);
-    }
-
     auto createBlock(unsigned instr) {
-        return _createBlock(useName("$instr.", instr), nullptr);
+        return createBlock(useName("$instr.", instr), nullptr);
     }
 
     auto createBlock(unsigned instr, const char *extra) {
-        return _createBlock(useName("$instr.", instr - 1, ".", extra), func);
+        return createBlock(useName("$instr.", instr - 1, ".", extra), func);
     }
 
     template <typename T=char>
@@ -143,6 +139,17 @@ class Translator {
         return builder.CreateStore(value, getPointer(instance, member));
     }
 
+    auto getSymbol(ExternalSymbol s) {
+        auto &symbol = py_symbols[s];
+        if (!symbol) {
+            auto block = builder.GetInsertBlock();
+            builder.SetInsertPoint(blocks[0].llvm_block);
+            symbol = getPointer<FunctionPointer>(func->getArg(0), s, useName("$symbol.", symbol_names[s]));
+            builder.SetInsertPoint(block);
+        }
+        return builder.CreateLoad(types.get<FunctionPointer>(), symbol);
+    }
+
     void parseCFG();
     void emitBlock(unsigned index);
     llvm::Value *do_GETLOCAL(PyOparg oparg);
@@ -154,21 +161,18 @@ class Translator {
 
     template <typename T, typename M, typename ...Args>
     llvm::CallInst *do_CallSlot(llvm::Value *instance, M *T::* member, Args... args) {
-        auto callee = readData(instance, member);
-        return builder.CreateCall(types.get<M>(), callee, {args...});
+        return builder.CreateCall(types.get<M>(), readData(instance, member), {args...});
     }
 
     template <ExternalSymbol S, typename ...Args>
     llvm::CallInst *do_CallSymbol(Args... args) {
-        auto callee = readData<FunctionPointer>(py_symbol_table, S, symbol_names[S]);
-        return builder.CreateCall(types.get<SymbolType<S>>(), callee, {args...});
+        return builder.CreateCall(types.get<SymbolType<S>>(), getSymbol(S), {args...});
     }
 
     void handle_UNARY_OP(ExternalSymbol s) {
         auto value = do_POP();
-        auto callee = readData<FunctionPointer>(py_symbol_table, s, symbol_names[s]);
         using UnaryFunction = PyObject *(PyObject *);
-        auto res = builder.CreateCall(types.get<UnaryFunction>(), callee, {value});
+        auto res = builder.CreateCall(types.get<UnaryFunction>(), getSymbol(s), {value});
         do_Py_DECREF(value);
         do_PUSH(res);
     }
@@ -176,9 +180,8 @@ class Translator {
     void handle_BINARY_OP(ExternalSymbol s) {
         auto right = do_POP();
         auto left = do_POP();
-        auto callee = readData<FunctionPointer>(py_symbol_table, s, symbol_names[s]);
         using BinaryFunction = PyObject *(PyObject *, PyObject *);
-        auto res = builder.CreateCall(types.get<BinaryFunction>(), callee, {left, right});
+        auto res = builder.CreateCall(types.get<BinaryFunction>(), getSymbol(s), {left, right});
         do_Py_DECREF(left);
         do_Py_DECREF(right);
         do_PUSH(res);
@@ -206,16 +209,7 @@ class Translator {
 
 
 public:
-    Translator() {
-        func->setAttributes(
-                llvm::AttributeList::get(context, llvm::AttributeList::FunctionIndex,
-                        llvm::AttrBuilder(context)
-                                .addAttribute(llvm::Attribute::NoUnwind)
-                                .addAttribute("tune-cpu", llvm::sys::getHostCPUName())));
-        py_symbol_table->setName(useName("$symbols"));
-        func->getArg(1)->setName(useName("$locals"));
-        func->getArg(2)->setName(useName("$locals"));
-    }
+    Translator();
 
     void *operator()(Compiler &compiler, PyCodeObject *code);
 };
