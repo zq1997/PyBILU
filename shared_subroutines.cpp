@@ -30,9 +30,11 @@ PyObject *unwindFrame(PyObject **stack, ptrdiff_t stack_height) {
 }
 
 
-#define F(X) #X
-const char *const symbol_names[]{DEFINE_SYMBOLS(F)};
-#undef F
-#define F(X) reinterpret_cast<void (*)()>(&X)
-const FunctionPointer symbol_addresses[]{DEFINE_SYMBOLS(F)};
-#undef F
+const auto symbol_names{std::apply(
+        [](auto &&... x) noexcept { return std::array{x.second ...}; },
+        external_symbols
+)};
+const auto symbol_addresses{std::apply(
+        [](auto &&... x) noexcept { return std::array{reinterpret_cast<FunctionPointer>(x.first) ...}; },
+        external_symbols
+)};

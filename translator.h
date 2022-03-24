@@ -46,10 +46,9 @@ auto useName(const T &arg, const Ts &... more) {
     }
 }
 
-using TranslatedFunctionType = PyObject *(decltype(symbol_addresses), PyObject **, PyObject **);
+using TranslatedFunctionType = PyObject *(const FunctionPointer *, PyObject **, PyObject **);
 
-class PyBasicBlock {
-public:
+struct PyBasicBlock {
     unsigned end;
     llvm::BasicBlock *llvm_block;
 };
@@ -60,7 +59,7 @@ class Translator {
     llvm::IRBuilder<> builder{context};
     llvm::Module mod{"", context};
     llvm::Function *func{llvm::Function::Create(
-            LLVMType<TranslatedFunctionType>(context)(), llvm::Function::ExternalLinkage, "", &mod
+            LLVMType<TranslatedFunctionType>(context)(), llvm::Function::ExternalLinkage, useName("function"), &mod
     )};
     llvm::MDNode *likely_true{llvm::MDBuilder(context).createBranchWeights(INT32_MAX, 0)};
 
@@ -71,7 +70,7 @@ class Translator {
     DynamicArray<llvm::Value *> py_locals;
     DynamicArray<llvm::Value *> py_consts;
     DynamicArray<llvm::Value *> py_stack;
-    DynamicArray<llvm::Value *> py_symbols;
+    llvm::Value *py_symbols[external_symbol_count]{};
     llvm::BasicBlock *unwind_block{}; // TODO: lazy
 
     llvm::Constant *null{llvm::ConstantPointerNull::get(types.get<void *>())};
@@ -139,16 +138,7 @@ class Translator {
         return builder.CreateStore(value, getPointer(instance, member));
     }
 
-    auto getSymbol(ExternalSymbol s) {
-        auto &symbol = py_symbols[s];
-        if (!symbol) {
-            auto block = builder.GetInsertBlock();
-            builder.SetInsertPoint(blocks[0].llvm_block);
-            symbol = getPointer<FunctionPointer>(func->getArg(0), s, useName("$symbol.", symbol_names[s]));
-            builder.SetInsertPoint(block);
-        }
-        return builder.CreateLoad(types.get<FunctionPointer>(), symbol);
-    }
+    llvm::Value *getSymbol(size_t i);
 
     void parseCFG();
     void emitBlock(unsigned index);
@@ -159,29 +149,37 @@ class Translator {
     void do_Py_INCREF(llvm::Value *v);
     void do_Py_DECREF(llvm::Value *v);
 
+
+    template <typename ...Args>
+    llvm::CallInst *do_Call(llvm::FunctionType *type, llvm::Value *callee, Args... args) {
+        auto inst = builder.CreateCall(type, callee, {args...});
+        inst->addFnAttr(llvm::Attribute::ReadNone);
+        return inst;
+    }
+
     template <typename T, typename M, typename ...Args>
     llvm::CallInst *do_CallSlot(llvm::Value *instance, M *T::* member, Args... args) {
-        return builder.CreateCall(types.get<M>(), readData(instance, member), {args...});
+        return do_Call(types.get<M>(), readData(instance, member), args...);
     }
 
-    template <ExternalSymbol S, typename ...Args>
+    template <auto &S, typename ...Args>
     llvm::CallInst *do_CallSymbol(Args... args) {
-        return builder.CreateCall(types.get<SymbolType<S>>(), getSymbol(S), {args...});
+        return do_Call(types.get<std::remove_reference_t<decltype(S)>>(), getSymbol(searchSymbol<&S>()), args...);
     }
 
-    void handle_UNARY_OP(ExternalSymbol s) {
+    void handle_UNARY_OP(size_t i) {
         auto value = do_POP();
         using UnaryFunction = PyObject *(PyObject *);
-        auto res = builder.CreateCall(types.get<UnaryFunction>(), getSymbol(s), {value});
+        auto res = do_Call(types.get<UnaryFunction>(), getSymbol(i), value);
         do_Py_DECREF(value);
         do_PUSH(res);
     }
 
-    void handle_BINARY_OP(ExternalSymbol s) {
+    void handle_BINARY_OP(size_t i) {
         auto right = do_POP();
         auto left = do_POP();
         using BinaryFunction = PyObject *(PyObject *, PyObject *);
-        auto res = builder.CreateCall(types.get<BinaryFunction>(), getSymbol(s), {left, right});
+        auto res = do_Call(types.get<BinaryFunction>(), getSymbol(i), left, right);
         do_Py_DECREF(left);
         do_Py_DECREF(right);
         do_PUSH(res);

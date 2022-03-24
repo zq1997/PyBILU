@@ -17,61 +17,64 @@ PyObject *calcBinaryPower(PyObject *base, PyObject *exp);
 PyObject *calcInPlacePower(PyObject *base, PyObject *exp);
 PyObject *unwindFrame(PyObject **stack, ptrdiff_t stack_height);
 
-#define DEFINE_SYMBOLS(F) \
-    F(calcUnaryNot),\
-    F(PyNumber_Positive),\
-    F(PyNumber_Negative),\
-    F(PyNumber_Invert),\
-    \
-    F(PyNumber_Add),\
-    F(PyNumber_Subtract),\
-    F(PyNumber_Multiply),\
-    F(PyNumber_TrueDivide),\
-    F(PyNumber_FloorDivide),\
-    F(PyNumber_Remainder),\
-    F(calcBinaryPower),\
-    F(PyNumber_MatrixMultiply),\
-    F(PyNumber_Lshift),\
-    F(PyNumber_Rshift),\
-    F(PyNumber_And),\
-    F(PyNumber_Or),\
-    F(PyNumber_Xor),\
-    \
-    F(PyNumber_InPlaceAdd),\
-    F(PyNumber_InPlaceSubtract),\
-    F(PyNumber_InPlaceMultiply),\
-    F(PyNumber_InPlaceTrueDivide),\
-    F(PyNumber_InPlaceFloorDivide),\
-    F(PyNumber_InPlaceRemainder),\
-    F(calcInPlacePower),\
-    F(PyNumber_InPlaceMatrixMultiply),\
-    F(PyNumber_InPlaceLshift),\
-    F(PyNumber_InPlaceRshift),\
-    F(PyNumber_InPlaceAnd),\
-    F(PyNumber_InPlaceOr),\
-    F(PyNumber_InPlaceXor),\
-    \
-    F(PyObject_GetIter),\
-    F(PyObject_IsTrue),\
-    F(PyObject_RichCompare),\
-    \
-    F(unwindFrame)
+constexpr std::tuple external_symbols{
+        std::pair{&calcUnaryNot, "calcUnaryNot"},
+        std::pair{&PyNumber_Positive, "PyNumber_Positive"},
+        std::pair{&PyNumber_Negative, "PyNumber_Negative"},
+        std::pair{&PyNumber_Invert, "PyNumber_Invert"},
 
-enum ExternalSymbol {
-#define F(X) sym_##X
-    DEFINE_SYMBOLS(F),
-#undef F
-    _symbol_count
+        std::pair{&PyNumber_Add, "PyNumber_Add"},
+        std::pair{&PyNumber_Subtract, "PyNumber_Subtract"},
+        std::pair{&PyNumber_Multiply, "PyNumber_Multiply"},
+        std::pair{&PyNumber_TrueDivide, "PyNumber_TrueDivide"},
+        std::pair{&PyNumber_FloorDivide, "PyNumber_FloorDivide"},
+        std::pair{&PyNumber_Remainder, "PyNumber_Remainder"},
+        std::pair{&calcBinaryPower, "calcBinaryPower"},
+        std::pair{&PyNumber_MatrixMultiply, "PyNumber_MatrixMultiply"},
+        std::pair{&PyNumber_Lshift, "PyNumber_Lshift"},
+        std::pair{&PyNumber_Rshift, "PyNumber_Rshift"},
+        std::pair{&PyNumber_And, "PyNumber_And"},
+        std::pair{&PyNumber_Or, "PyNumber_Or"},
+        std::pair{&PyNumber_Xor, "PyNumber_Xor"},
+
+        std::pair{&PyNumber_InPlaceAdd, "PyNumber_InPlaceAdd"},
+        std::pair{&PyNumber_InPlaceSubtract, "PyNumber_InPlaceSubtract"},
+        std::pair{&PyNumber_InPlaceMultiply, "PyNumber_InPlaceMultiply"},
+        std::pair{&PyNumber_InPlaceTrueDivide, "PyNumber_InPlaceTrueDivide"},
+        std::pair{&PyNumber_InPlaceFloorDivide, "PyNumber_InPlaceFloorDivide"},
+        std::pair{&PyNumber_InPlaceRemainder, "PyNumber_InPlaceRemainder"},
+        std::pair{&calcInPlacePower, "calcInPlacePower"},
+        std::pair{&PyNumber_InPlaceMatrixMultiply, "PyNumber_InPlaceMatrixMultiply"},
+        std::pair{&PyNumber_InPlaceLshift, "PyNumber_InPlaceLshift"},
+        std::pair{&PyNumber_InPlaceRshift, "PyNumber_InPlaceRshift"},
+        std::pair{&PyNumber_InPlaceAnd, "PyNumber_InPlaceAnd"},
+        std::pair{&PyNumber_InPlaceOr, "PyNumber_InPlaceOr"},
+        std::pair{&PyNumber_InPlaceXor, "PyNumber_InPlaceXor"},
+
+        std::pair{&PyObject_GetIter, "PyObject_GetIter"},
+        std::pair{&PyObject_IsTrue, "PyObject_IsTrue"},
+        std::pair{&PyObject_RichCompare, "PyObject_RichCompare"},
+
+        std::pair{&unwindFrame, "unwindFrame"}
 };
-constexpr size_t symbol_count = _symbol_count;
 
-using SymbolTypeTuple = std::tuple<DEFINE_SYMBOLS(decltype)>;
-template <ExternalSymbol S>
-using SymbolType = typename std::tuple_element_t<S, SymbolTypeTuple>;
+template <auto V, size_t I = 0>
+constexpr auto searchSymbol() {
+    if constexpr (std::is_same_v<decltype(std::get<I>(external_symbols).first), decltype(V)>) {
+        if constexpr (std::get<I>(external_symbols).first == V) {
+            return I;
+        } else {
+            return searchSymbol<V, I + 1>();
+        }
+    } else {
+        return searchSymbol<V, I + 1>();
+    }
+}
 
 using FunctionPointer = void (*)();
-extern const char *const symbol_names[symbol_count];
-extern FunctionPointer const symbol_addresses[symbol_count];
+constexpr auto external_symbol_count = std::tuple_size_v<decltype(external_symbols)>;
+extern const std::array<const char *, external_symbol_count> symbol_names;
+extern const std::array<FunctionPointer, external_symbol_count> symbol_addresses;
 
 template <typename T>
 struct TypeWrapper {
@@ -187,10 +190,10 @@ public:
 using RegisteredLLVMTypes = TypeRegisister<LLVMType,
         void *,
         char,
+        short,
         int,
-        ptrdiff_t,
-        PyOparg,
-        Py_ssize_t,
+        long,
+        long long,
         int(PyObject *),
         PyObject *(PyObject *),
         PyObject *(PyObject *, PyObject *),
