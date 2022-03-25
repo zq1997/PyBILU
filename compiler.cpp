@@ -71,15 +71,22 @@ Compiler::Compiler() {
 
     PassBuilder pb{machine.get()};
     pb.registerModuleAnalyses(opt_MAM);
+    pb.registerCGSCCAnalyses(opt_CGAM);
     pb.registerFunctionAnalyses(opt_FAM);
     pb.registerLoopAnalyses(opt_LAM);
-    opt_FAM.registerPass([&] { return ModuleAnalysisManagerFunctionProxy(opt_MAM); });
-    opt_FAM.registerPass([&] { return LoopAnalysisManagerFunctionProxy(opt_LAM); });
-    opt_LAM.registerPass([&] { return FunctionAnalysisManagerLoopProxy(opt_FAM); });
-    opt_FPM = pb.buildFunctionSimplificationPipeline(
-            OptimizationLevel::O3,
-            ThinOrFullLTOPhase::None
-    );
+    pb.crossRegisterProxies(opt_LAM, opt_FAM, opt_CGAM, opt_MAM);
+    opt_MPM = pb.buildPerModuleDefaultPipeline(OptimizationLevel::O3);
+
+    // pb.registerModuleAnalyses(opt_MAM);
+    // pb.registerFunctionAnalyses(opt_FAM);
+    // pb.registerLoopAnalyses(opt_LAM);
+    // opt_FAM.registerPass([&] { return ModuleAnalysisManagerFunctionProxy(opt_MAM); });
+    // opt_FAM.registerPass([&] { return LoopAnalysisManagerFunctionProxy(opt_LAM); });
+    // opt_LAM.registerPass([&] { return FunctionAnalysisManagerLoopProxy(opt_FAM); });
+    // opt_FPM = pb.buildFunctionSimplificationPipeline(
+    //         OptimizationLevel::O3,
+    //         ThinOrFullLTOPhase::None
+    // );
 
     throwIf(machine->addPassesToEmitFile(out_PM, out_stream, nullptr, CodeGenFileType::CGFT_ObjectFile),
             "add emit pass error");
@@ -87,11 +94,9 @@ Compiler::Compiler() {
 
 void *Compiler::operator()(llvm::Module &mod) {
     debug.dump(".ll", mod);
-    for (auto &func : mod) {
-        opt_FPM.run(func, opt_FAM);
-    }
-    opt_LAM.clear();
-    opt_FAM.clear();
+    assert(!verifyModule(mod, &errs()));
+    opt_MPM.run(mod, opt_MAM);
+    opt_MAM.clear();
     debug.dump(".opt.ll", mod);
 
     // TODO: module创建时候给它machine

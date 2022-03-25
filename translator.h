@@ -57,11 +57,12 @@ class Translator {
     llvm::LLVMContext context{};
     RegisteredLLVMTypes types{(context.enableOpaquePointers(), context)};
     llvm::IRBuilder<> builder{context};
-    llvm::Module mod{"", context};
+    llvm::Module mod{"singleton_module", context};
     llvm::Function *func{llvm::Function::Create(
-            LLVMType<TranslatedFunctionType>(context)(), llvm::Function::ExternalLinkage, useName("function"), &mod
+            LLVMType<TranslatedFunctionType>(context)(), llvm::Function::ExternalLinkage, "singleton_function", &mod
     )};
     llvm::MDNode *likely_true{llvm::MDBuilder(context).createBranchWeights(INT32_MAX, 0)};
+    llvm::AttributeList external_func_attr{};
 
     PyCodeObject *py_code{};
     PyInstr *py_instructions{};
@@ -152,9 +153,9 @@ class Translator {
 
     template <typename ...Args>
     llvm::CallInst *do_Call(llvm::FunctionType *type, llvm::Value *callee, Args... args) {
-        auto inst = builder.CreateCall(type, callee, {args...});
-        inst->addFnAttr(llvm::Attribute::ReadNone);
-        return inst;
+        auto call_instr = builder.CreateCall(type, callee, {args...});
+        call_instr->setAttributes(external_func_attr);
+        return call_instr;
     }
 
     template <typename T, typename M, typename ...Args>
@@ -182,25 +183,11 @@ class Translator {
         auto res = do_Call(types.get<BinaryFunction>(), getSymbol(i), left, right);
         do_Py_DECREF(left);
         do_Py_DECREF(right);
+        auto is_not_null = builder.CreateICmpNE(res, null);
+        auto bb = createBlock(114515, "BINARY.OK");
+        builder.CreateCondBr(is_not_null, bb, unwind_block, likely_true);
+        builder.SetInsertPoint(bb);
         do_PUSH(res);
-    }
-
-    void do_if(llvm::Value *cond,
-            const std::function<void()> &create_then,
-            const std::function<void()> &create_else = {}) {
-        auto b_then = llvm::BasicBlock::Create(context, "", func);
-        auto b_end = llvm::BasicBlock::Create(context, "", func);
-        auto b_else = create_else ? llvm::BasicBlock::Create(context, "", func) : b_end;
-        builder.CreateCondBr(cond, b_then, b_end);
-        builder.SetInsertPoint(b_then);
-        create_then();
-        builder.CreateBr(b_end);
-        if (create_else) {
-            builder.SetInsertPoint(b_else);
-            create_else();
-            builder.CreateBr(b_end);
-        }
-        builder.SetInsertPoint(b_end);
     }
 
     llvm::BasicBlock *findBlock(unsigned instr_offset);
@@ -212,21 +199,14 @@ public:
     void *operator()(Compiler &compiler, PyCodeObject *code);
 };
 
-class PyInstrIterBase {
-protected:
+class QuickPyInstrIter {
     const PyInstr *base;
     const size_t size;
 public:
-    size_t offset{0};
+    size_t offset;
     PyOpcode opcode{};
 
-    PyInstrIterBase(const PyInstr *base_, size_t size_) : base(base_), size(size_) {}
-};
-
-
-class QuickPyInstrIter : public PyInstrIterBase {
-public:
-    QuickPyInstrIter(const PyInstr *base_, size_t size_) : PyInstrIterBase(base_, size_) {}
+    QuickPyInstrIter(const PyInstr *instr, size_t from, size_t to) : base(instr), size(to), offset(from) {}
 
     auto next() {
         if (offset == size) {
@@ -250,12 +230,16 @@ public:
     }
 };
 
-class PyInstrIter : public PyInstrIterBase {
+class PyInstrIter {
+    const PyInstr *base;
+    const size_t size;
     PyOparg ext_oparg{};
 public:
+    size_t offset;
+    PyOpcode opcode{};
     PyOparg oparg{};
 
-    PyInstrIter(const PyInstr *base_, size_t size_) : PyInstrIterBase(base_, size_) {}
+    PyInstrIter(const PyInstr *instr, size_t from, size_t to) : base(instr), size(to), offset(from) {}
 
     auto next() {
         if (offset == size) {

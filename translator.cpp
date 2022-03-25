@@ -2,7 +2,6 @@
 #include <stdexcept>
 
 #include <Python.h>
-#include <llvm/IR/Verifier.h>
 
 #include "translator.h"
 
@@ -11,11 +10,18 @@ using namespace std;
 using namespace llvm;
 
 Translator::Translator() {
+    auto attr_builder = AttrBuilder(context);
+    external_func_attr = AttributeList::get(context, AttributeList::FunctionIndex, attr_builder
+            .addAttribute(Attribute::InaccessibleMemOnly)
+            .addAttribute(Attribute::WillReturn)
+            .addAttribute(Attribute::NoUnwind)
+    );
+    attr_builder.clear();
+
     func->setAttributes(
-            AttributeList::get(context, AttributeList::FunctionIndex,
-                    AttrBuilder(context)
-                            .addAttribute(Attribute::NoUnwind)
-                            .addAttribute("tune-cpu", sys::getHostCPUName())));
+            AttributeList::get(context, AttributeList::FunctionIndex, attr_builder
+                    .addAttribute(Attribute::NoUnwind)
+                    .addAttribute("tune-cpu", sys::getHostCPUName())));
     func->getArg(0)->setName(useName("$symbols"));
     func->getArg(1)->setName(useName("$locals"));
     func->getArg(2)->setName(useName("$consts"));
@@ -62,16 +68,38 @@ void *Translator::operator()(Compiler &compiler, PyCodeObject *code) {
         emitBlock(i);
     }
 
+
     unwind_block->insertInto(func);
     builder.SetInsertPoint(unwind_block);
-    auto sp = builder.CreateLoad(types.get<ptrdiff_t>(), stack_height_value);
-    builder.CreateRet(do_CallSymbol<unwindFrame>(py_stack[0], sp));
+    auto sp = builder.CreateLoad(types.get<size_t>(), stack_height_value);
+    auto b_check_empty = createBlock(useName("check_stack_empty"), func);
+    builder.CreateBr(b_check_empty);
+
+    builder.SetInsertPoint(b_check_empty);
+    auto phi_node = builder.CreatePHI(sp->getType(), 2);
+    phi_node->addIncoming(sp, unwind_block);
+    auto stack_is_empty = builder.CreateICmpEQ(phi_node, ConstantInt::get(types.get<size_t>(), 0));
+    auto b_pop_stack = createBlock(useName("pop_stack"), func);
+    auto end_block = createBlock(useName("return_error"), func);
+    builder.CreateCondBr(stack_is_empty, end_block, b_pop_stack);
+
+    builder.SetInsertPoint(b_pop_stack);
+    auto new_sp = builder.CreateSub(sp, ConstantInt::get(types.get<size_t>(), 1));
+    auto obj_ref = builder.CreateInBoundsGEP(types.get<PyObject *>(), py_stack[0], new_sp);
+    auto obj = builder.CreateLoad(types.get<PyObject *>(), obj_ref);
+    do_Py_DECREF(obj);
+    phi_node->addIncoming(new_sp, b_pop_stack);
+    builder.CreateBr(b_check_empty);
+
+    builder.SetInsertPoint(end_block);
+    builder.CreateRet(null);
+
     builder.SetInsertPoint(blocks[0].llvm_block);
     builder.CreateBr(blocks[1].llvm_block);
 
-    assert(!verifyFunction(*func, &errs()));
     auto result = compiler(mod);
 
+    // 可能需要考虑mod.dropAllReferences();不复用函数了，改成复用module，甚至都不复用
     func->dropAllReferences();
 
     return result;
@@ -83,7 +111,7 @@ void Translator::parseCFG() {
 
     BitArray is_boundary(size + 1);
 
-    for (QuickPyInstrIter instr(py_instructions, size); instr.next();) {
+    for (QuickPyInstrIter instr(py_instructions, 0, size); instr.next();) {
         switch (instr.opcode) {
         case JUMP_ABSOLUTE:
         case JUMP_IF_TRUE_OR_POP:
@@ -154,9 +182,13 @@ void Translator::do_SETLOCAL(PyOparg oparg, llvm::Value *value, bool check_null)
     builder.CreateStore(value, py_locals[oparg]);
     if (check_null) {
         auto not_null = builder.CreateICmpNE(old_value, null);
-        do_if(not_null, [&]() {
-            do_Py_DECREF(old_value);
-        });
+        auto b_decref = createBlock(useName("$decref"), func);
+        auto b_end = createBlock(useName("$decref.end"), func);
+        builder.CreateCondBr(not_null, b_decref, b_end);
+        builder.SetInsertPoint(b_decref);
+        do_Py_DECREF(old_value);
+        builder.CreateBr(b_end);
+        builder.SetInsertPoint(b_end);
     } else {
         do_Py_DECREF(old_value);
     }
@@ -181,7 +213,7 @@ void Translator::emitBlock(unsigned index) {
     assert(index);
     auto first = blocks[index - 1].end;
     auto last = blocks[index].end;
-    for (PyInstrIter instr(py_instructions + first, last - first); instr.next();) {
+    for (PyInstrIter instr(py_instructions, first, last); instr.next();) {
         switch (instr.opcode) {
         case EXTENDED_ARG:
             instr.extend_current_oparg();
