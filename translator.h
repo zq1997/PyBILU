@@ -66,6 +66,7 @@ class Translator {
 
     PyCodeObject *py_code{};
     PyInstr *py_instructions{};
+    size_t instr_offset{};
     unsigned block_num{};
     DynamicArray<PyBasicBlock> blocks;
     DynamicArray<llvm::Value *> py_locals;
@@ -74,7 +75,7 @@ class Translator {
     llvm::Value *py_symbols[external_symbol_count]{};
     llvm::BasicBlock *unwind_block{}; // TODO: lazy
 
-    llvm::Constant *null{llvm::ConstantPointerNull::get(types.get<void *>())};
+    llvm::Constant *c_null{llvm::ConstantPointerNull::get(types.get<void *>())};
     llvm::Value *stack_height_value{};
     size_t stack_height{};
 
@@ -95,12 +96,8 @@ class Translator {
         return llvm::BasicBlock::Create(context, name, parent);
     }
 
-    auto createBlock(unsigned instr) {
-        return createBlock(useName("$instr.", instr), nullptr);
-    }
-
-    auto createBlock(unsigned instr, const char *extra) {
-        return createBlock(useName("$instr.", instr - 1, ".", extra), func);
+    auto createBlock(const char *extra) {
+        return llvm::BasicBlock::Create(context, useName("$instr.", instr_offset, ".", extra), func);
     }
 
     template <typename T=char>
@@ -183,8 +180,8 @@ class Translator {
         auto res = do_Call(types.get<BinaryFunction>(), getSymbol(i), left, right);
         do_Py_DECREF(left);
         do_Py_DECREF(right);
-        auto is_not_null = builder.CreateICmpNE(res, null);
-        auto bb = createBlock(114515, "BINARY.OK");
+        auto is_not_null = builder.CreateICmpNE(res, c_null);
+        auto bb = createBlock("BINARY.OK");
         builder.CreateCondBr(is_not_null, bb, unwind_block, likely_true);
         builder.SetInsertPoint(bb);
         do_PUSH(res);
@@ -192,6 +189,18 @@ class Translator {
 
     llvm::BasicBlock *findBlock(unsigned instr_offset);
 
+    void createIf(llvm::Value *cond, const std::function<void()> &make_body, bool terminated = false) {
+        auto block_true = createBlock(useName("if_true"), func);
+        auto block_end = createBlock(useName("if_false"), nullptr);
+        builder.CreateCondBr(cond, block_true, block_end);
+        builder.SetInsertPoint(block_true);
+        make_body();
+        if (!terminated) {
+            builder.CreateBr(block_end);
+        }
+        block_end->insertInto(func);
+        builder.SetInsertPoint(block_end);
+    }
 
 public:
     Translator();

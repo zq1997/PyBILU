@@ -16,7 +16,7 @@ ENDIF()
 
 add_definitions(${LLVM_DEFINITIONS})
 include_directories(${LLVM_INCLUDE_DIRS} ${CPython_INCLUDE_DIRS})
-add_compile_options(-Wall -Wpedantic -fno-rtti)
+add_compile_options(-Wall -Wpedantic -Wno-unused-but-set-variable -fno-rtti)
 link_directories(${LLVM_LIBRARY_DIRS})
 link_libraries(${llvm_libs})
 
@@ -29,4 +29,4 @@ set_target_properties(pynic PROPERTIES
 
 add_subdirectory(test)
 #target_precompile_headers(pynic PRIVATE "JIT.h")
-#add_subdirectory(/opt/cpython cpython EXCLUDE_FROM_ALL)
+add_subdirectory(/opt/cpython cpython EXCLUDE_FROM_ALL)

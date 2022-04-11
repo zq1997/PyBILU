@@ -38,7 +38,7 @@ void *Translator::operator()(Compiler &compiler, PyCodeObject *code) {
     unwind_block = createBlock("$unwind_block", nullptr);
     auto start = blocks[0].end;
     for (auto &b : Range(block_num - 1, &blocks[1])) {
-        b.llvm_block = createBlock(start);
+        b.llvm_block = createBlock(useName("$instr.", start), nullptr);
         start = b.end;
     }
 
@@ -92,7 +92,7 @@ void *Translator::operator()(Compiler &compiler, PyCodeObject *code) {
     builder.CreateBr(b_check_empty);
 
     builder.SetInsertPoint(end_block);
-    builder.CreateRet(null);
+    builder.CreateRet(c_null);
 
     builder.SetInsertPoint(blocks[0].llvm_block);
     builder.CreateBr(blocks[1].llvm_block);
@@ -110,32 +110,160 @@ void Translator::parseCFG() {
     auto size = PyBytes_GET_SIZE(py_code->co_code) / sizeof(PyInstr);
 
     BitArray is_boundary(size + 1);
+    DynamicArray<int> instr_stack_height(size);
 
+    int sp = instr_stack_height[0] = 0;
     for (QuickPyInstrIter instr(py_instructions, 0, size); instr.next();) {
+        int delta_sp = 0;
         switch (instr.opcode) {
+        case EXTENDED_ARG:
+        case NOP:
+        case ROT_TWO:
+        case ROT_THREE:
+        case ROT_FOUR:
+        case ROT_N:
+            break;
+        case DUP_TOP:
+            delta_sp = 2 - 1;
+            break;
+        case DUP_TOP_TWO:
+            delta_sp = 4 - 2;
+            break;
+        case PRINT_EXPR:
+        case POP_TOP:
+            delta_sp = 0 - 1;
+            break;
+        case LOAD_CONST:
+        case LOAD_FAST:
+        case LOAD_DEREF:
+        case LOAD_CLASSDEREF:
+        case LOAD_GLOBAL:
+        case LOAD_NAME:
+            delta_sp = 1 - 0;
+            break;
+        case LOAD_ATTR:
+        case LOAD_METHOD:
+            delta_sp = 1 - 1;
+            break;
+        case BINARY_SUBSCR:
+            delta_sp = 1 - 2;
+            break;
+        case STORE_FAST:
+        case STORE_DEREF:
+        case STORE_GLOBAL:
+        case STORE_NAME:
+            delta_sp = 0 - 1;
+            break;
+        case STORE_ATTR:
+            delta_sp = 0 - 2;
+            break;
+        case STORE_SUBSCR:
+            delta_sp = 0 - 3;
+            break;
+        case DELETE_FAST:
+        case DELETE_DEREF:
+        case DELETE_GLOBAL:
+        case DELETE_NAME:
+            break;
+        case DELETE_ATTR:
+            delta_sp = 0 - 1;
+            break;
+        case DELETE_SUBSCR:
+            delta_sp = 0 - 2;
+            break;
+        case UNARY_POSITIVE:
+        case UNARY_NEGATIVE:
+        case UNARY_NOT:
+        case UNARY_INVERT:
+            break;
+        case BINARY_ADD:
+        case BINARY_SUBTRACT:
+        case BINARY_MULTIPLY:
+        case BINARY_FLOOR_DIVIDE:
+        case BINARY_TRUE_DIVIDE:
+        case BINARY_MODULO:
+        case BINARY_POWER:
+        case BINARY_MATRIX_MULTIPLY:
+        case BINARY_LSHIFT:
+        case BINARY_RSHIFT:
+        case BINARY_AND:
+        case BINARY_XOR:
+        case BINARY_OR:
+        case INPLACE_ADD:
+        case INPLACE_SUBTRACT:
+        case INPLACE_MULTIPLY:
+        case INPLACE_FLOOR_DIVIDE:
+        case INPLACE_TRUE_DIVIDE:
+        case INPLACE_MODULO:
+        case INPLACE_POWER:
+        case INPLACE_MATRIX_MULTIPLY:
+        case INPLACE_LSHIFT:
+        case INPLACE_RSHIFT:
+        case INPLACE_AND:
+        case INPLACE_XOR:
+        case INPLACE_OR:
+        case COMPARE_OP:
+        case IS_OP:
+        case CONTAINS_OP:
+            delta_sp = 1 - 2;
+            break;
+        case CALL_FUNCTION:
+            delta_sp = 1 - (1 + instr.getOparg());
+            break;
+        case CALL_METHOD:
+        case CALL_FUNCTION_KW:
+            delta_sp = 1 - (2 + instr.getOparg());
+            break;
+        case RETURN_VALUE:
+            is_boundary.set(instr.offset);
+            delta_sp = 0 - 1;
+            break;
+        case CALL_FUNCTION_EX:
+            delta_sp = 1 - (2 + (instr.getOparg() & 0x01));
+            break;
+        case LOAD_CLOSURE:
+            delta_sp = 1 - 0;
+            break;
+        case MAKE_FUNCTION: {
+            auto oparg = instr.getOparg();
+            delta_sp = 1 - (2 + !!(oparg & 0x01) + !!(oparg & 0x02) + !!(oparg & 0x04) + !!(oparg & 0x08));
+            break;
+        }
+        case LOAD_BUILD_CLASS:
+            delta_sp = 1 - 0;
+            break;
+        case IMPORT_NAME:
+            delta_sp = 0 - 1;
+            break;
+        case IMPORT_FROM:
+            delta_sp = 1 - 0;
+            break;
+        case IMPORT_STAR:
+            delta_sp = 0 - 1;
+            break;
+
+        case JUMP_FORWARD:
+            is_boundary.set(instr.offset);
+            is_boundary.set(instr.offset + instr.getOparg());
+            break;
         case JUMP_ABSOLUTE:
         case JUMP_IF_TRUE_OR_POP:
         case JUMP_IF_FALSE_OR_POP:
         case POP_JUMP_IF_TRUE:
         case POP_JUMP_IF_FALSE:
-        case JUMP_IF_NOT_EXC_MATCH:
             is_boundary.set(instr.offset);
             is_boundary.set(instr.getOparg());
-            break;
-        case JUMP_FORWARD:
-            is_boundary.set(instr.offset);
-            is_boundary.set(instr.offset + instr.getOparg());
             break;
         case FOR_ITER:
             is_boundary.set(instr.offset + instr.getOparg());
             break;
-        case RETURN_VALUE:
         case RAISE_VARARGS:
         case RERAISE:
             is_boundary.set(instr.offset);
         default:
             break;
         }
+        sp += delta_sp;
     }
 
     is_boundary.set(0);
@@ -181,7 +309,7 @@ void Translator::do_SETLOCAL(PyOparg oparg, llvm::Value *value, bool check_null)
     auto old_value = do_GETLOCAL(oparg);
     builder.CreateStore(value, py_locals[oparg]);
     if (check_null) {
-        auto not_null = builder.CreateICmpNE(old_value, null);
+        auto not_null = builder.CreateICmpNE(old_value, c_null);
         auto b_decref = createBlock(useName("$decref"), func);
         auto b_end = createBlock(useName("$decref.end"), func);
         builder.CreateCondBr(not_null, b_decref, b_end);
@@ -214,6 +342,7 @@ void Translator::emitBlock(unsigned index) {
     auto first = blocks[index - 1].end;
     auto last = blocks[index].end;
     for (PyInstrIter instr(py_instructions, first, last); instr.next();) {
+        instr_offset = instr.offset - 1;
         switch (instr.opcode) {
         case EXTENDED_ARG:
             instr.extend_current_oparg();
@@ -225,6 +354,13 @@ void Translator::emitBlock(unsigned index) {
             do_Py_DECREF(value);
             break;
         }
+        case DUP_TOP: {
+            auto top = do_POP();
+            do_PUSH(top);
+            do_Py_INCREF(top);
+            do_PUSH(top);
+            break;
+        }
         case LOAD_CONST: {
             auto value = builder.CreateLoad(types.get<PyObject *>(), py_consts[instr.oparg]);
             do_Py_INCREF(value);
@@ -233,8 +369,8 @@ void Translator::emitBlock(unsigned index) {
         }
         case LOAD_FAST: {
             auto value = do_GETLOCAL(instr.oparg);
-            auto is_not_null = builder.CreateICmpNE(value, null);
-            auto bb = createBlock(instr.offset, "LOAD_FAST.OK");
+            auto is_not_null = builder.CreateICmpNE(value, c_null);
+            auto bb = createBlock("LOAD_FAST.OK");
             builder.CreateCondBr(is_not_null, bb, unwind_block, likely_true);
             builder.SetInsertPoint(bb);
             do_Py_INCREF(value);
@@ -248,10 +384,10 @@ void Translator::emitBlock(unsigned index) {
         }
         case DELETE_FAST: {
             auto value = do_GETLOCAL(instr.oparg);
-            auto is_not_null = builder.CreateICmpNE(value, null);
-            auto bb = createBlock(instr.offset, "DELETE_FAST.OK");
+            auto is_not_null = builder.CreateICmpNE(value, c_null);
+            auto bb = createBlock("DELETE_FAST.OK");
             builder.CreateCondBr(is_not_null, bb, unwind_block, likely_true);
-            do_SETLOCAL(instr.oparg, null, false);
+            do_SETLOCAL(instr.oparg, c_null, false);
             do_PUSH(value);
             break;
         }
@@ -397,9 +533,9 @@ void Translator::emitBlock(unsigned index) {
             auto iter = do_POP();
             auto the_type = readData(iter, &PyObject::ob_type);
             auto next = do_CallSlot(the_type, &PyTypeObject::tp_iternext, iter);
-            auto cmp = builder.CreateICmpEQ(next, ConstantPointerNull::get(types.get<PyObject *>()));
-            auto b_continue = createBlock(instr.offset, "FOR_ITER.continue");
-            auto b_break = createBlock(instr.offset, "FOR_ITER.break");
+            auto cmp = builder.CreateICmpEQ(next, c_null);
+            auto b_continue = createBlock("FOR_ITER.continue");
+            auto b_break = createBlock("FOR_ITER.break");
             builder.CreateCondBr(cmp, b_break, b_continue);
             builder.SetInsertPoint(b_break);
             do_Py_DECREF(iter);
