@@ -54,6 +54,7 @@ struct PyBasicBlock {
 };
 
 class Translator {
+    friend class WrappedValue;
     llvm::LLVMContext context{};
     RegisteredLLVMTypes types{(context.enableOpaquePointers(), context)};
     llvm::IRBuilder<> builder{context};
@@ -68,6 +69,7 @@ class Translator {
     PyInstr *py_instructions{};
     size_t instr_offset{};
     unsigned block_num{};
+    DynamicArray<int> instr_sp;
     DynamicArray<PyBasicBlock> blocks;
     DynamicArray<llvm::Value *> py_locals;
     DynamicArray<llvm::Value *> py_consts;
@@ -144,6 +146,12 @@ class Translator {
     void do_SETLOCAL(PyOparg oparg, llvm::Value *value, bool check_null = true);
     llvm::Value *do_POP();
     void do_PUSH(llvm::Value *value);
+    auto do_PEAK(int i) {
+        return builder.CreateLoad(types.get<PyObject *>(), py_stack[stack_height - i]);
+    }
+    auto do_SET_PEAK(int i, llvm::Value *value) {
+        return builder.CreateStore(value, py_stack[stack_height - i]);
+    }
     void do_Py_INCREF(llvm::Value *v);
     void do_Py_DECREF(llvm::Value *v);
 
@@ -210,15 +218,15 @@ public:
 
 class QuickPyInstrIter {
     const PyInstr *base;
-    const size_t size;
+    const size_t limit;
 public:
     size_t offset;
     PyOpcode opcode{};
 
-    QuickPyInstrIter(const PyInstr *instr, size_t from, size_t to) : base(instr), size(to), offset(from) {}
+    QuickPyInstrIter(const PyInstr *instr, size_t from, size_t to) : base(instr), limit(to), offset(from) {}
 
     auto next() {
-        if (offset == size) {
+        if (offset == limit) {
             return false;
         } else {
             opcode = _Py_OPCODE(base[offset]);
@@ -241,30 +249,41 @@ public:
 
 class PyInstrIter {
     const PyInstr *base;
-    const size_t size;
+    const size_t limit;
+    // TODO: 也许可以模仿ceval不需要ext_oparg
     PyOparg ext_oparg{};
 public:
     size_t offset;
     PyOpcode opcode{};
     PyOparg oparg{};
 
-    PyInstrIter(const PyInstr *instr, size_t from, size_t to) : base(instr), size(to), offset(from) {}
+    PyInstrIter(const PyInstr *instr, size_t from, size_t to) : base(instr), limit(to), offset(from) {}
+
+    explicit operator bool() const { return offset < limit; }
 
     auto next() {
-        if (offset == size) {
-            return false;
-        } else {
-            opcode = _Py_OPCODE(base[offset]);
-            oparg = ext_oparg << EXTENDED_ARG_BITS | _Py_OPARG(base[offset]);
-            offset++;
-            ext_oparg = 0;
-            return true;
-        }
+        opcode = _Py_OPCODE(base[offset]);
+        oparg = ext_oparg << EXTENDED_ARG_BITS | _Py_OPARG(base[offset]);
+        offset++;
+        ext_oparg = 0;
     }
 
     auto extend_current_oparg() {
         ext_oparg = oparg;
     }
+    // void fetch_next() {
+    //     assert(bool(*this));
+    //     opcode = _Py_OPCODE(base[offset]);
+    //     oparg = _Py_OPARG(base[offset]);
+    //     offset++;
+    // }
+    //
+    // auto extend_current_oparg() {
+    //     assert(bool(*this));
+    //     opcode = _Py_OPCODE(base[offset]);
+    //     oparg = oparg << EXTENDED_ARG_BITS | _Py_OPARG(base[offset]);
+    //     offset++;
+    // }
 };
 
 #endif

@@ -62,14 +62,14 @@ import pynic
 # stat('无优化', foo)
 # stat('有优化', bar)
 
-# class I(int):
-#     def __del__(self):
-#         print("死了:", int(self))
-#
-# @pynic.apply
-# def foo(a, b):
-#     return a + (a := b)
-#     # return x * x + x * x
-#
-#
-# print(foo(I(1997 * 1000000), I(623 * 1000)))
+class I(int):
+    def __del__(self):
+        print("死了:", int(self))
+
+@pynic.apply
+def foo(a, b):
+    return a + (a := b)
+    # return x * x + x * x
+
+
+print(foo(I(1997 * 1000000), I(623 * 1000)))

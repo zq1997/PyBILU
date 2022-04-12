@@ -5,12 +5,9 @@ set(CMAKE_CXX_STANDARD 17)
 
 IF(CMAKE_BUILD_TYPE MATCHES Debug)
     find_package(LLVM 14 REQUIRED CONFIG PATHS /opt/llvm/build/compile-debug/lib/cmake/llvm/ NO_DEFAULT_PATH)
-    list(APPEND llvm_libs LLVM-14)
     set(CPython_INCLUDE_DIRS "/opt/cpython/build/install-debug/include/python3.10d")
 ELSE()
     find_package(LLVM 14 REQUIRED CONFIG PATHS /opt/llvm/build/compile-release/lib/cmake/llvm/ NO_DEFAULT_PATH)
-    add_link_options(-Wl,--exclude-libs,ALL,--gc-sections)
-    llvm_map_components_to_libnames(llvm_libs core native passes)
     set(CPython_INCLUDE_DIRS "/opt/cpython/build/install-release/include/python3.10")
 ENDIF()
 
@@ -18,15 +15,25 @@ add_definitions(${LLVM_DEFINITIONS})
 include_directories(${LLVM_INCLUDE_DIRS} ${CPython_INCLUDE_DIRS})
 add_compile_options(-Wall -Wpedantic -Wno-unused-but-set-variable -fno-rtti)
 link_directories(${LLVM_LIBRARY_DIRS})
-link_libraries(${llvm_libs})
+add_link_options(-Wl,--exclude-libs,ALL,--gc-sections)
 
 add_library(pynic SHARED main.cpp translator.cpp compiler.cpp shared_subroutines.cpp)
+target_link_libraries(pynic LLVM-14)
 set_target_properties(pynic PROPERTIES
         PREFIX ""
         SUFFIX ".so"
         CXX_VISIBILITY_PRESET hidden
 )
 
+add_library(pynic_bundle SHARED $<TARGET_OBJECTS:pynic>)
+llvm_map_components_to_libnames(llvm_libs core native passes)
+target_link_libraries(pynic_bundle ${llvm_libs})
+set_target_properties(pynic_bundle PROPERTIES
+        PREFIX ""
+        SUFFIX ".so"
+        CXX_VISIBILITY_PRESET hidden
+)
+
 add_subdirectory(test)
-#target_precompile_headers(pynic PRIVATE "JIT.h")
 add_subdirectory(/opt/cpython cpython EXCLUDE_FROM_ALL)
+#target_precompile_headers(pynic PRIVATE "JIT.h")

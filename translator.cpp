@@ -32,6 +32,8 @@ Translator::Translator() {
 
 void *Translator::operator()(Compiler &compiler, PyCodeObject *code) {
     py_code = code;
+    // TODO: 重复了
+    instr_sp.reserve(PyBytes_GET_SIZE(py_code->co_code) / sizeof(PyInstr));
     parseCFG();
 
     blocks[0].llvm_block = createBlock("$entry_block", func);
@@ -112,136 +114,11 @@ void Translator::parseCFG() {
     BitArray is_boundary(size + 1);
     DynamicArray<int> instr_stack_height(size);
 
-    int sp = instr_stack_height[0] = 0;
     for (QuickPyInstrIter instr(py_instructions, 0, size); instr.next();) {
-        int delta_sp = 0;
         switch (instr.opcode) {
-        case EXTENDED_ARG:
-        case NOP:
-        case ROT_TWO:
-        case ROT_THREE:
-        case ROT_FOUR:
-        case ROT_N:
-            break;
-        case DUP_TOP:
-            delta_sp = 2 - 1;
-            break;
-        case DUP_TOP_TWO:
-            delta_sp = 4 - 2;
-            break;
-        case PRINT_EXPR:
-        case POP_TOP:
-            delta_sp = 0 - 1;
-            break;
-        case LOAD_CONST:
-        case LOAD_FAST:
-        case LOAD_DEREF:
-        case LOAD_CLASSDEREF:
-        case LOAD_GLOBAL:
-        case LOAD_NAME:
-            delta_sp = 1 - 0;
-            break;
-        case LOAD_ATTR:
-        case LOAD_METHOD:
-            delta_sp = 1 - 1;
-            break;
-        case BINARY_SUBSCR:
-            delta_sp = 1 - 2;
-            break;
-        case STORE_FAST:
-        case STORE_DEREF:
-        case STORE_GLOBAL:
-        case STORE_NAME:
-            delta_sp = 0 - 1;
-            break;
-        case STORE_ATTR:
-            delta_sp = 0 - 2;
-            break;
-        case STORE_SUBSCR:
-            delta_sp = 0 - 3;
-            break;
-        case DELETE_FAST:
-        case DELETE_DEREF:
-        case DELETE_GLOBAL:
-        case DELETE_NAME:
-            break;
-        case DELETE_ATTR:
-            delta_sp = 0 - 1;
-            break;
-        case DELETE_SUBSCR:
-            delta_sp = 0 - 2;
-            break;
-        case UNARY_POSITIVE:
-        case UNARY_NEGATIVE:
-        case UNARY_NOT:
-        case UNARY_INVERT:
-            break;
-        case BINARY_ADD:
-        case BINARY_SUBTRACT:
-        case BINARY_MULTIPLY:
-        case BINARY_FLOOR_DIVIDE:
-        case BINARY_TRUE_DIVIDE:
-        case BINARY_MODULO:
-        case BINARY_POWER:
-        case BINARY_MATRIX_MULTIPLY:
-        case BINARY_LSHIFT:
-        case BINARY_RSHIFT:
-        case BINARY_AND:
-        case BINARY_XOR:
-        case BINARY_OR:
-        case INPLACE_ADD:
-        case INPLACE_SUBTRACT:
-        case INPLACE_MULTIPLY:
-        case INPLACE_FLOOR_DIVIDE:
-        case INPLACE_TRUE_DIVIDE:
-        case INPLACE_MODULO:
-        case INPLACE_POWER:
-        case INPLACE_MATRIX_MULTIPLY:
-        case INPLACE_LSHIFT:
-        case INPLACE_RSHIFT:
-        case INPLACE_AND:
-        case INPLACE_XOR:
-        case INPLACE_OR:
-        case COMPARE_OP:
-        case IS_OP:
-        case CONTAINS_OP:
-            delta_sp = 1 - 2;
-            break;
-        case CALL_FUNCTION:
-            delta_sp = 1 - (1 + instr.getOparg());
-            break;
-        case CALL_METHOD:
-        case CALL_FUNCTION_KW:
-            delta_sp = 1 - (2 + instr.getOparg());
-            break;
         case RETURN_VALUE:
             is_boundary.set(instr.offset);
-            delta_sp = 0 - 1;
             break;
-        case CALL_FUNCTION_EX:
-            delta_sp = 1 - (2 + (instr.getOparg() & 0x01));
-            break;
-        case LOAD_CLOSURE:
-            delta_sp = 1 - 0;
-            break;
-        case MAKE_FUNCTION: {
-            auto oparg = instr.getOparg();
-            delta_sp = 1 - (2 + !!(oparg & 0x01) + !!(oparg & 0x02) + !!(oparg & 0x04) + !!(oparg & 0x08));
-            break;
-        }
-        case LOAD_BUILD_CLASS:
-            delta_sp = 1 - 0;
-            break;
-        case IMPORT_NAME:
-            delta_sp = 0 - 1;
-            break;
-        case IMPORT_FROM:
-            delta_sp = 1 - 0;
-            break;
-        case IMPORT_STAR:
-            delta_sp = 0 - 1;
-            break;
-
         case JUMP_FORWARD:
             is_boundary.set(instr.offset);
             is_boundary.set(instr.offset + instr.getOparg());
@@ -263,7 +140,6 @@ void Translator::parseCFG() {
         default:
             break;
         }
-        sp += delta_sp;
     }
 
     is_boundary.set(0);
@@ -333,6 +209,28 @@ void Translator::do_PUSH(llvm::Value *value) {
     builder.CreateStore(asValue(stack_height), stack_height_value);
 }
 
+
+class WrappedValue {
+public:
+    llvm::Value *value;
+private:
+    Translator &translator;
+public:
+    WrappedValue(llvm::Value *v, Translator &t) : value{v}, translator{t} {}
+
+    WrappedValue operator+(WrappedValue &v) {
+        return {translator.builder.CreateAdd(value, v.value), translator};
+    }
+
+    WrappedValue operator==(WrappedValue &v) {
+        return {translator.builder.CreateICmpEQ(value, v.value), translator};
+    }
+};
+
+[[noreturn]] inline void unimplemented() {
+    throw runtime_error("unimplemented opcode");
+}
+
 void Translator::emitBlock(unsigned index) {
     blocks[index].llvm_block->insertInto(func);
     builder.SetInsertPoint(blocks[index].llvm_block);
@@ -341,24 +239,62 @@ void Translator::emitBlock(unsigned index) {
     assert(index);
     auto first = blocks[index - 1].end;
     auto last = blocks[index].end;
-    for (PyInstrIter instr(py_instructions, first, last); instr.next();) {
+    for (PyInstrIter instr(py_instructions, first, last); instr;) {
         instr_offset = instr.offset - 1;
+        instr_sp[instr_offset] = stack_height;
+        instr.next();
         switch (instr.opcode) {
         case EXTENDED_ARG:
             instr.extend_current_oparg();
-        case NOP: {
+            break;
+        case NOP:
+            break;
+        case ROT_TWO: {
+            auto top = do_PEAK(1);
+            auto second = do_PEAK(2);;
+            do_SET_PEAK(1, second);
+            do_SET_PEAK(2, top);
             break;
         }
-        case POP_TOP: {
-            auto value = do_POP();
-            do_Py_DECREF(value);
+        case ROT_THREE:{
+            auto top = do_PEAK(1);
+            auto second = do_PEAK(2);
+            auto third = do_PEAK(3);
+            do_SET_PEAK(1, second);
+            do_SET_PEAK(2, third);
+            do_SET_PEAK(3, top);
             break;
+        }
+        case ROT_FOUR:{
+            auto top = do_PEAK(1);
+            auto second = do_PEAK(2);
+            auto third = do_PEAK(3);
+            auto fourth = do_PEAK(4);
+            do_SET_PEAK(1, second);
+            do_SET_PEAK(2, third);
+            do_SET_PEAK(3, fourth);
+            do_SET_PEAK(4, top);
+            break;
+        }
+        case ROT_N: {
+            auto top = do_PEAK(1);
+            auto dest = py_stack[stack_height - instr.oparg - 1];
+            auto src = py_stack[stack_height - instr.oparg];
+            do_CallSymbol<memmove>(dest, src, asValue((instr.oparg - 1) * sizeof(PyObject *)));
+            do_SET_PEAK(instr.oparg, top);
         }
         case DUP_TOP: {
             auto top = do_POP();
             do_PUSH(top);
             do_Py_INCREF(top);
             do_PUSH(top);
+            break;
+        }
+        case DUP_TOP_TWO:
+            unimplemented();
+        case POP_TOP: {
+            auto value = do_POP();
+            do_Py_DECREF(value);
             break;
         }
         case LOAD_CONST: {
@@ -377,11 +313,35 @@ void Translator::emitBlock(unsigned index) {
             do_PUSH(value);
             break;
         }
+        case LOAD_DEREF:
+            unimplemented();
+        case LOAD_CLASSDEREF:
+            unimplemented();
+        case LOAD_GLOBAL:
+            unimplemented();
+        case LOAD_NAME:
+            unimplemented();
+        case LOAD_ATTR:
+            unimplemented();
+        case LOAD_METHOD:
+            unimplemented();
+        case BINARY_SUBSCR:
+            unimplemented();
         case STORE_FAST: {
             auto value = do_POP();
             do_SETLOCAL(instr.oparg, value);
             break;
         }
+        case STORE_DEREF:
+            unimplemented();
+        case STORE_GLOBAL:
+            unimplemented();
+        case STORE_NAME:
+            unimplemented();
+        case STORE_ATTR:
+            unimplemented();
+        case STORE_SUBSCR:
+            unimplemented();
         case DELETE_FAST: {
             auto value = do_GETLOCAL(instr.oparg);
             auto is_not_null = builder.CreateICmpNE(value, c_null);
@@ -391,14 +351,24 @@ void Translator::emitBlock(unsigned index) {
             do_PUSH(value);
             break;
         }
-        case UNARY_NOT:
-            handle_UNARY_OP(searchSymbol<calcUnaryNot>());
-            break;
+        case DELETE_DEREF:
+            unimplemented();
+        case DELETE_GLOBAL:
+            unimplemented();
+        case DELETE_NAME:
+            unimplemented();
+        case DELETE_ATTR:
+            unimplemented();
+        case DELETE_SUBSCR:
+            unimplemented();
         case UNARY_POSITIVE:
             handle_UNARY_OP(searchSymbol<PyNumber_Positive>());
             break;
         case UNARY_NEGATIVE:
             handle_UNARY_OP(searchSymbol<PyNumber_Negative>());
+            break;
+        case UNARY_NOT:
+            handle_UNARY_OP(searchSymbol<calcUnaryNot>());
             break;
         case UNARY_INVERT:
             handle_UNARY_OP(searchSymbol<PyNumber_Invert>());
@@ -412,11 +382,11 @@ void Translator::emitBlock(unsigned index) {
         case BINARY_MULTIPLY:
             handle_BINARY_OP(searchSymbol<PyNumber_Multiply>());
             break;
-        case BINARY_TRUE_DIVIDE:
-            handle_BINARY_OP(searchSymbol<PyNumber_TrueDivide>());
-            break;
         case BINARY_FLOOR_DIVIDE:
             handle_BINARY_OP(searchSymbol<PyNumber_FloorDivide>());
+            break;
+        case BINARY_TRUE_DIVIDE:
+            handle_BINARY_OP(searchSymbol<PyNumber_TrueDivide>());
             break;
         case BINARY_MODULO:
             handle_BINARY_OP(searchSymbol<PyNumber_Remainder>());
@@ -451,11 +421,11 @@ void Translator::emitBlock(unsigned index) {
         case INPLACE_MULTIPLY:
             handle_BINARY_OP(searchSymbol<PyNumber_InPlaceMultiply>());
             break;
-        case INPLACE_TRUE_DIVIDE:
-            handle_BINARY_OP(searchSymbol<PyNumber_InPlaceTrueDivide>());
-            break;
         case INPLACE_FLOOR_DIVIDE:
             handle_BINARY_OP(searchSymbol<PyNumber_InPlaceFloorDivide>());
+            break;
+        case INPLACE_TRUE_DIVIDE:
+            handle_BINARY_OP(searchSymbol<PyNumber_InPlaceTrueDivide>());
             break;
         case INPLACE_MODULO:
             handle_BINARY_OP(searchSymbol<PyNumber_InPlaceRemainder>());
@@ -490,16 +460,70 @@ void Translator::emitBlock(unsigned index) {
             do_PUSH(res);
             break;
         }
+        case IS_OP:
+            unimplemented();
+        case CONTAINS_OP:
+            unimplemented();
+        case RETURN_VALUE: {
+            auto retval = do_POP();
+            builder.CreateRet(retval);
+            fall_through = false;
+            break;
+        }
+        case CALL_FUNCTION:
+            unimplemented();
+        case CALL_FUNCTION_KW:
+            unimplemented();
+        case CALL_FUNCTION_EX:
+            unimplemented();
+        case CALL_METHOD:
+            unimplemented();
+        case LOAD_CLOSURE:
+            unimplemented();
+        case MAKE_FUNCTION:
+            unimplemented();
+        case LOAD_BUILD_CLASS:
+            unimplemented();
+
+        case IMPORT_NAME:
+            unimplemented();
+        case IMPORT_FROM:
+            unimplemented();
+        case IMPORT_STAR:
+            unimplemented();
+
+        case JUMP_FORWARD: {
+            auto jmp_target = findBlock(instr.oparg + instr.oparg);
+            builder.CreateBr(jmp_target);
+            fall_through = false;
+            break;
+        }
         case JUMP_ABSOLUTE: {
             auto jmp_target = findBlock(instr.oparg);
             builder.CreateBr(jmp_target);
             fall_through = false;
             break;
         }
-        case JUMP_FORWARD: {
-            auto jmp_target = findBlock(instr.oparg + instr.oparg);
-            builder.CreateBr(jmp_target);
+        case JUMP_IF_FALSE_OR_POP:
+            unimplemented();
+        case JUMP_IF_TRUE_OR_POP:
+            unimplemented();
+        case POP_JUMP_IF_FALSE: {
+            auto cond = do_POP();
+            auto err = do_CallSymbol<PyObject_IsTrue>(cond);
+            do_Py_DECREF(cond);
+            auto cmp = builder.CreateICmpEQ(err, asValue(0));
+            auto jmp_target = findBlock(instr.oparg);
+            builder.CreateCondBr(cmp, jmp_target, blocks[index + 1].llvm_block);
             fall_through = false;
+            // auto cond = do_POP();
+            // auto err = WrappedValue{do_CallSymbol<PyObject_IsTrue>(cond), *this};
+            // do_Py_DECREF(cond);
+            // auto zero = WrappedValue{asValue(0), *this};
+            // auto cmp = err == zero;
+            // auto jmp_target = findBlock(instr.oparg);
+            // builder.CreateCondBr(cmp.value, jmp_target, blocks[index + 1].llvm_block);
+            // fall_through = false;
             break;
         }
         case POP_JUMP_IF_TRUE: {
@@ -512,16 +536,7 @@ void Translator::emitBlock(unsigned index) {
             fall_through = false;
             break;
         }
-        case POP_JUMP_IF_FALSE: {
-            auto cond = do_POP();
-            auto err = do_CallSymbol<PyObject_IsTrue>(cond);
-            do_Py_DECREF(cond);
-            auto cmp = builder.CreateICmpEQ(err, asValue(0));
-            auto jmp_target = findBlock(instr.oparg);
-            builder.CreateCondBr(cmp, jmp_target, blocks[index + 1].llvm_block);
-            fall_through = false;
-            break;
-        }
+
         case GET_ITER: {
             auto iterable = do_POP();
             auto iter = do_CallSymbol<PyObject_GetIter>(iterable);
@@ -546,15 +561,106 @@ void Translator::emitBlock(unsigned index) {
             fall_through = false;
             break;
         }
-        case RETURN_VALUE: {
-            auto retval = do_POP();
-            builder.CreateRet(retval);
-            fall_through = false;
-            break;
-        }
+
+        case BUILD_TUPLE:
+            unimplemented();
+        case BUILD_LIST:
+            unimplemented();
+        case BUILD_SET:
+            unimplemented();
+        case BUILD_MAP:
+            unimplemented();
+        case BUILD_CONST_KEY_MAP:
+            unimplemented();
+        case LIST_APPEND:
+            unimplemented();
+        case SET_ADD:
+            unimplemented();
+        case MAP_ADD:
+            unimplemented();
+        case LIST_EXTEND:
+            unimplemented();
+        case SET_UPDATE:
+            unimplemented();
+        case DICT_MERGE:
+            unimplemented();
+        case DICT_UPDATE:
+            unimplemented();
+        case LIST_TO_TUPLE:
+            unimplemented();
+
+        case FORMAT_VALUE:
+            unimplemented();
+        case BUILD_STRING:
+            unimplemented();
+
+        case UNPACK_SEQUENCE:
+            unimplemented();
+        case UNPACK_EX:
+            unimplemented();
+
+        case GET_LEN:
+            unimplemented();
+        case MATCH_MAPPING:
+            unimplemented();
+        case MATCH_SEQUENCE:
+            unimplemented();
+        case MATCH_KEYS:
+            unimplemented();
+        case MATCH_CLASS:
+            unimplemented();
+        case COPY_DICT_WITHOUT_KEYS:
+            unimplemented();
+
+        case BUILD_SLICE:
+            unimplemented();
+        case LOAD_ASSERTION_ERROR:
+            unimplemented();
+        case RAISE_VARARGS:
+            unimplemented();
+        case SETUP_ANNOTATIONS:
+            unimplemented();
+        case PRINT_EXPR:
+            unimplemented();
+
+        case SETUP_FINALLY:
+            unimplemented();
+        case POP_BLOCK:
+            unimplemented();
+        case JUMP_IF_NOT_EXC_MATCH:
+            unimplemented();
+        case POP_EXCEPT:
+            unimplemented();
+        case RERAISE:
+        case SETUP_WITH:
+            unimplemented();
+        case WITH_EXCEPT_START:
+            unimplemented();
+
+        case GEN_START:
+            unimplemented();
+        case YIELD_VALUE:
+            unimplemented();
+        case GET_YIELD_FROM_ITER:
+            unimplemented();
+        case YIELD_FROM:
+            unimplemented();
+        case GET_AWAITABLE:
+            unimplemented();
+        case GET_AITER:
+            unimplemented();
+        case GET_ANEXT:
+            unimplemented();
+        case END_ASYNC_FOR:
+            unimplemented();
+        case SETUP_ASYNC_WITH:
+            unimplemented();
+        case BEFORE_ASYNC_WITH:
+            unimplemented();
         default:
-            throw runtime_error("unsupported opcode");
+            throw runtime_error("illegal opcode");
         }
+        // instr.fetch_next();
     }
     if (fall_through) {
         assert(index < block_num - 1);
@@ -562,17 +668,17 @@ void Translator::emitBlock(unsigned index) {
     }
 }
 
-BasicBlock *Translator::findBlock(unsigned instr_offset) {
+BasicBlock *Translator::findBlock(unsigned offset) {
     assert(block_num > 1);
     decltype(block_num) left = 0;
     auto right = block_num - 1;
     while (left <= right) {
         auto mid = left + (right - left) / 2;
         auto v = blocks[mid].end;
-        if (v < instr_offset) {
+        if (v < offset) {
             left = mid + 1;
         } else
-            if (v > instr_offset) {
+            if (v > offset) {
                 right = mid - 1;
             } else {
                 return blocks[mid + 1].llvm_block;

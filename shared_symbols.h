@@ -55,7 +55,9 @@ constexpr std::tuple external_symbols{
         std::pair{&PyObject_IsTrue, "PyObject_IsTrue"},
         std::pair{&PyObject_RichCompare, "PyObject_RichCompare"},
 
-        std::pair{&unwindFrame, "unwindFrame"}
+        std::pair{&unwindFrame, "unwindFrame"},
+
+        std::pair{&memmove, "memmove"}
 };
 
 constexpr auto external_symbol_count = std::tuple_size_v<decltype(external_symbols)>;
@@ -95,6 +97,11 @@ using NormalizedType = typename decltype(Normalizer<T>())::type;
 
 template <typename Ret, typename... Args>
 constexpr auto Normalizer(TypeWrapper<Ret(Args...)>) {
+    return TypeWrapper<NormalizedType<Ret>(NormalizedType<Args>...)>{};
+}
+
+template <typename Ret, typename... Args>
+constexpr auto Normalizer(TypeWrapper<Ret(Args...) noexcept>) {
     return TypeWrapper<NormalizedType<Ret>(NormalizedType<Args>...)>{};
 }
 
@@ -206,6 +213,7 @@ using RegisteredLLVMTypes = TypeRegisister<LLVMType,
         PyObject *(PyObject *, PyObject *),
         PyObject *(PyObject *, PyObject *, PyObject *),
         PyObject *(PyObject *, PyObject *, int),
+        void *(void *, void *, size_t),
         decltype(unwindFrame)
 >;
 
