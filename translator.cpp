@@ -23,8 +23,7 @@ Translator::Translator() {
                     .addAttribute(Attribute::NoUnwind)
                     .addAttribute("tune-cpu", sys::getHostCPUName())));
     func->getArg(0)->setName(useName("$symbols"));
-    func->getArg(1)->setName(useName("$locals"));
-    func->getArg(2)->setName(useName("$consts"));
+    func->getArg(1)->setName(useName("$frame"));
     for (auto &arg : func->args()) {
         arg.addAttr(Attribute::NoAlias);
     }
@@ -45,15 +44,30 @@ void *Translator::operator()(Compiler &compiler, PyCodeObject *code) {
     }
 
     builder.SetInsertPoint(blocks[0].llvm_block);
-    py_locals.reserve(code->co_nlocals);
-    for (auto i : Range(code->co_nlocals)) {
-        auto name = PyTuple_GET_ITEM(code->co_varnames, i);
-        py_locals[i] = getPointer<PyObject *>(func->getArg(1), i, useName("$local.", name));
-    }
 
+    auto consts = readData(func->getArg(1), &SimplePyFrame::consts, useName("$consts"));
     py_consts.reserve(PyTuple_GET_SIZE(code->co_consts));
     for (auto i : Range(PyTuple_GET_SIZE(code->co_consts))) {
-        py_consts[i] = getPointer<PyObject *>(func->getArg(2), i, useName("$const.", i));
+        py_consts[i] = getPointer<PyObject *>(consts, i, useName("$const.", i));
+    }
+
+    auto localsplus = readData(func->getArg(1), &SimplePyFrame::localsplus, useName("$localsplus"));
+    auto nlocals = code->co_nlocals;
+    auto ncells = PyTuple_GET_SIZE(code->co_cellvars);
+    auto nfrees = PyTuple_GET_SIZE(code->co_freevars);
+    py_locals.reserve(nlocals);
+    for (auto i : Range(nlocals)) {
+        auto name = PyTuple_GET_ITEM(code->co_varnames, i);
+        py_locals[i] = getPointer<PyObject *>(localsplus, i, useName("$local.", name));
+    }
+    py_freevars.reserve(ncells + nfrees);
+    for (auto i : Range(ncells)) {
+        auto name = PyTuple_GET_ITEM(code->co_cellvars, i);
+        py_freevars[i] = getPointer<PyObject *>(localsplus, nlocals + i, useName("$cell.", name));
+    }
+    for (auto i : Range(nfrees)) {
+        auto name = PyTuple_GET_ITEM(code->co_freevars, i);
+        py_freevars[ncells + i] = getPointer<PyObject *>(localsplus, nlocals + ncells + i, useName("$free.", name));
     }
 
     py_stack.reserve(code->co_stacksize);
@@ -284,14 +298,20 @@ void Translator::emitBlock(unsigned index) {
             do_SET_PEAK(instr.oparg, top);
         }
         case DUP_TOP: {
-            auto top = do_POP();
-            do_PUSH(top);
+            auto top = do_PEAK(1);
             do_Py_INCREF(top);
             do_PUSH(top);
             break;
         }
-        case DUP_TOP_TWO:
-            unimplemented();
+        case DUP_TOP_TWO: {
+            auto top = do_PEAK(1);
+            auto second = do_PEAK(2);
+            do_Py_INCREF(second);
+            do_PUSH(second);
+            do_Py_INCREF(top);
+            do_PUSH(top);
+            break;
+        }
         case POP_TOP: {
             auto value = do_POP();
             do_Py_DECREF(value);
@@ -313,10 +333,26 @@ void Translator::emitBlock(unsigned index) {
             do_PUSH(value);
             break;
         }
-        case LOAD_DEREF:
-            unimplemented();
-        case LOAD_CLASSDEREF:
-            unimplemented();
+        case LOAD_DEREF: {
+            auto cell = builder.CreateLoad(types.get<PyObject *>(), py_freevars[instr.oparg]);
+            auto value = readData(cell, &PyCellObject::ob_ref);
+            auto is_not_null = builder.CreateICmpNE(value, c_null);
+            auto bb = createBlock("LOAD_DEREF.OK");
+            builder.CreateCondBr(is_not_null, bb, unwind_block, likely_true);
+            builder.SetInsertPoint(bb);
+            do_Py_INCREF(value);
+            do_PUSH(value);
+            break;
+        }
+        case LOAD_CLASSDEREF: {
+            auto value = do_CallSymbol<handle_LOAD_CLASSDEREF>(func->getArg(1), asValue(instr.oparg));
+            auto is_not_null = builder.CreateICmpNE(value, c_null);
+            auto bb = createBlock("LOAD_CLASSDEREF.OK");
+            builder.CreateCondBr(is_not_null, bb, unwind_block, likely_true);
+            builder.SetInsertPoint(bb);
+            do_PUSH(value);
+            break;
+        }
         case LOAD_GLOBAL:
             unimplemented();
         case LOAD_NAME:

@@ -30,12 +30,15 @@ PyObject *eval_func(PyThreadState *tstate, PyFrameObject *frame, int throwflag) 
     }
     // TODO: support generator and throwflag
     assert(!throwflag);
-    // Strictly speaking, converting void* to a function pointer is undefined behavior in C++
-    return reinterpret_cast<TranslatedFunctionType *>(jit_callee)(
-            &symbol_addresses[0],
+    SimplePyFrame simple_frame{
+            &PyTuple_GET_ITEM(frame->f_code->co_consts, 0),
             frame->f_localsplus,
-            &PyTuple_GET_ITEM(frame->f_code->co_consts, 0)
-    );
+            frame->f_locals,
+            frame->f_code,
+            tstate
+    };
+    // Strictly speaking, converting void* to a function pointer is undefined behavior in C++
+    return reinterpret_cast<TranslatedFunctionType *>(jit_callee)(&symbol_addresses[0], &simple_frame);
 }
 
 void freeExtra(void *extra) {

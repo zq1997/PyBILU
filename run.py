@@ -1,6 +1,8 @@
 from opcode import *
 
 import pynic
+
+
 # import time
 #
 #
@@ -62,14 +64,16 @@ import pynic
 # stat('无优化', foo)
 # stat('有优化', bar)
 
-class I(int):
-    def __del__(self):
-        print("死了:", int(self))
 
-@pynic.apply
-def foo(a, b):
-    return a + (a := b)
+def bar():
+    ref = 1
+
+    @pynic.apply
+    def foo():
+        return ref
+
+    return foo()
     # return x * x + x * x
 
 
-print(foo(I(1997 * 1000000), I(623 * 1000)))
+print(bar())

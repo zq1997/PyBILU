@@ -7,6 +7,15 @@
 #include <llvm/IR/Function.h>
 #include <llvm/IR/BasicBlock.h>
 
+
+struct SimplePyFrame {
+    PyObject **consts;
+    PyObject **localsplus;
+    PyObject *locals;
+    PyCodeObject *code;
+    PyThreadState *tstate;
+};
+
 using PyInstr = const _Py_CODEUNIT;
 using PyOpcode = decltype(_Py_OPCODE(PyInstr{}));
 using PyOparg = decltype(_Py_OPCODE(PyInstr{}));
@@ -15,6 +24,7 @@ constexpr auto EXTENDED_ARG_BITS = 8;
 PyObject *calcUnaryNot(PyObject *value);
 PyObject *calcBinaryPower(PyObject *base, PyObject *exp);
 PyObject *calcInPlacePower(PyObject *base, PyObject *exp);
+PyObject *handle_LOAD_CLASSDEREF(SimplePyFrame *f, PyOparg oparg);
 PyObject *unwindFrame(PyObject **stack, ptrdiff_t stack_height);
 
 constexpr std::tuple external_symbols{
@@ -55,6 +65,7 @@ constexpr std::tuple external_symbols{
         std::pair{&PyObject_IsTrue, "PyObject_IsTrue"},
         std::pair{&PyObject_RichCompare, "PyObject_RichCompare"},
 
+        std::pair{&handle_LOAD_CLASSDEREF, "handle_LOAD_CLASSDEREF"},
         std::pair{&unwindFrame, "unwindFrame"},
 
         std::pair{&memmove, "memmove"}
@@ -111,8 +122,9 @@ constexpr auto Normalizer() {
         return TypeWrapper<NormalizedType<std::remove_cv_t<T>>>{};
     } else {
         if constexpr(std::is_fundamental_v<T>) {
-            if constexpr(std::is_integral_v<T> && std::is_signed_v<T>) {
-                return TypeWrapper<std::make_unsigned_t<T>>{};
+            // TODO: bool有问题，参见cppreference的make_signed
+            if constexpr(std::is_integral_v<T> && std::is_unsigned_v<T>) {
+                return TypeWrapper<std::make_signed_t<T>>{};
             } else {
                 return TypeWrapper<T>{};
             }
@@ -185,36 +197,34 @@ template <typename... Ts, typename T, typename... Us>
 struct TypeFilter<std::tuple<Ts...>, T, Us...> :
         std::conditional_t<(std::is_same_v<Ts, T> || ...),
                 TypeFilter<std::tuple<Ts...>, Us...>,
-                TypeFilter<std::tuple<T, Ts...>, Us...>> {
+                TypeFilter<std::tuple<Ts..., T>, Us...>> {
 };
 
 template <template <typename> typename W, typename... Ts>
-class TypeRegisister {
-    using filter = TypeFilter<std::tuple<>, W<Ts>...>;
+constexpr auto registerTypes(const std::tuple<Ts...> &) {
+    return TypeFilter<
+            std::tuple<>,
+            W<void *>,
+            W<char>,
+            W<short>,
+            W<int>,
+            W<long>,
+            W<long long>,
+            W<std::remove_pointer_t<typename Ts::first_type>>...
+    >{};
+}
+
+class RegisteredLLVMTypes {
+    using filtered_types = decltype(registerTypes<LLVMType>(external_symbols));
 public:
-    typename filter::type data;
+    filtered_types::type data;
 
     template <typename... Args>
-    explicit TypeRegisister(Args &&... args) : data{filter::create(std::forward<Args>(args)...)} {}
+    explicit RegisteredLLVMTypes(Args &&... args) : data{filtered_types::create(std::forward<Args>(args)...)} {}
 
     template <typename T>
-    [[nodiscard]] auto &get() const { return std::get<W<T>>(data)(); }
+    [[nodiscard]] auto &get() const { return std::get<LLVMType<T>>(data)(); }
 };
 
-using RegisteredLLVMTypes = TypeRegisister<LLVMType,
-        void *,
-        char,
-        short,
-        int,
-        long,
-        long long,
-        int(PyObject *),
-        PyObject *(PyObject *),
-        PyObject *(PyObject *, PyObject *),
-        PyObject *(PyObject *, PyObject *, PyObject *),
-        PyObject *(PyObject *, PyObject *, int),
-        void *(void *, void *, size_t),
-        decltype(unwindFrame)
->;
 
 #endif

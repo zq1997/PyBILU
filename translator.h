@@ -46,7 +46,7 @@ auto useName(const T &arg, const Ts &... more) {
     }
 }
 
-using TranslatedFunctionType = PyObject *(const FunctionPointer *, PyObject **, PyObject **);
+using TranslatedFunctionType = PyObject *(const FunctionPointer *, SimplePyFrame *);
 
 struct PyBasicBlock {
     unsigned end;
@@ -71,8 +71,9 @@ class Translator {
     unsigned block_num{};
     DynamicArray<int> instr_sp;
     DynamicArray<PyBasicBlock> blocks;
-    DynamicArray<llvm::Value *> py_locals;
     DynamicArray<llvm::Value *> py_consts;
+    DynamicArray<llvm::Value *> py_locals;
+    DynamicArray<llvm::Value *> py_freevars;
     DynamicArray<llvm::Value *> py_stack;
     llvm::Value *py_symbols[external_symbol_count]{};
     llvm::BasicBlock *unwind_block{}; // TODO: lazy
