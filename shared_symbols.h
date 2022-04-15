@@ -11,6 +11,8 @@
 struct SimplePyFrame {
     PyObject **consts;
     PyObject **localsplus;
+    PyObject *builtins;
+    PyObject *globals;
     PyObject *locals;
     PyCodeObject *code;
     PyThreadState *tstate;
@@ -25,6 +27,8 @@ PyObject *calcUnaryNot(PyObject *value);
 PyObject *calcBinaryPower(PyObject *base, PyObject *exp);
 PyObject *calcInPlacePower(PyObject *base, PyObject *exp);
 PyObject *handle_LOAD_CLASSDEREF(SimplePyFrame *f, PyOparg oparg);
+PyObject *handle_LOAD_GLOBAL(SimplePyFrame *f, PyOparg oparg);
+PyObject *handle_LOAD_NAME(SimplePyFrame *f, PyOparg oparg);
 PyObject *unwindFrame(PyObject **stack, ptrdiff_t stack_height);
 
 constexpr std::tuple external_symbols{
@@ -66,6 +70,8 @@ constexpr std::tuple external_symbols{
         std::pair{&PyObject_RichCompare, "PyObject_RichCompare"},
 
         std::pair{&handle_LOAD_CLASSDEREF, "handle_LOAD_CLASSDEREF"},
+        std::pair{&handle_LOAD_GLOBAL, "handle_LOAD_GLOBAL"},
+        std::pair{&handle_LOAD_NAME, "handle_LOAD_NAME"},
         std::pair{&unwindFrame, "unwindFrame"},
 
         std::pair{&memmove, "memmove"}
@@ -122,9 +128,8 @@ constexpr auto Normalizer() {
         return TypeWrapper<NormalizedType<std::remove_cv_t<T>>>{};
     } else {
         if constexpr(std::is_fundamental_v<T>) {
-            // TODO: bool有问题，参见cppreference的make_signed
-            if constexpr(std::is_integral_v<T> && std::is_unsigned_v<T>) {
-                return TypeWrapper<std::make_signed_t<T>>{};
+            if constexpr(std::is_integral_v<T> && std::is_signed_v<T>) {
+                return TypeWrapper<std::make_unsigned_t<T>>{};
             } else {
                 return TypeWrapper<T>{};
             }
@@ -139,15 +144,14 @@ constexpr auto Normalizer() {
     }
 }
 
-
 template <typename T>
 struct LLVMTypeImpl {
 private:
     template <typename Ret, typename... Args>
     static auto createTypeForFunction(llvm::LLVMContext &context, TypeWrapper<Ret(Args...)>) {
         return llvm::FunctionType::get(
-                LLVMTypeImpl<Ret>(context)(),
-                {LLVMTypeImpl<Args>(context)()...},
+                LLVMTypeImpl<Ret>(context),
+                {LLVMTypeImpl<Args>(context)...},
                 false
         );
     }
@@ -170,17 +174,19 @@ private:
         }
     }
 
-    std::invoke_result_t<decltype(createType), llvm::LLVMContext &> const data;
+public:
+    using DataType = std::invoke_result_t<decltype(createType), llvm::LLVMContext &>;
+    DataType const data;
 public:
     explicit LLVMTypeImpl(llvm::LLVMContext &context) : data(createType(context)) {}
 
-    auto &operator()() const { return data; }
+    operator DataType() const { return data; }
 };
 
 template <typename T>
 using LLVMType = LLVMTypeImpl<NormalizedType<T>>;
 
-template <typename T, typename...>
+template <typename...>
 struct TypeFilter;
 
 template <typename... Ts>
@@ -194,37 +200,37 @@ struct TypeFilter<std::tuple<Ts...>> {
 };
 
 template <typename... Ts, typename T, typename... Us>
-struct TypeFilter<std::tuple<Ts...>, T, Us...> :
-        std::conditional_t<(std::is_same_v<Ts, T> || ...),
-                TypeFilter<std::tuple<Ts...>, Us...>,
-                TypeFilter<std::tuple<Ts..., T>, Us...>> {
+struct TypeFilter<std::tuple<Ts...>, T, Us...> : std::conditional_t<(
+        std::is_same_v<Ts, T> || ...),
+        TypeFilter<std::tuple<Ts...>, Us...>,
+        TypeFilter<std::tuple<Ts..., T>, Us...>> {
 };
-
-template <template <typename> typename W, typename... Ts>
-constexpr auto registerTypes(const std::tuple<Ts...> &) {
-    return TypeFilter<
-            std::tuple<>,
-            W<void *>,
-            W<char>,
-            W<short>,
-            W<int>,
-            W<long>,
-            W<long long>,
-            W<std::remove_pointer_t<typename Ts::first_type>>...
-    >{};
-}
 
 class RegisteredLLVMTypes {
-    using filtered_types = decltype(registerTypes<LLVMType>(external_symbols));
-public:
+    template <typename...>
+    struct TypeFilterHelper;
+
+    template <typename... A, typename... B, typename ...C>
+    struct TypeFilterHelper<std::tuple<A...>, const std::tuple<B...>, C...> : TypeFilter<
+            std::tuple<>,
+            LLVMType<A>...,
+            LLVMType<std::remove_pointer_t<typename B::first_type>>...,
+            LLVMType<std::remove_pointer_t<C>>...
+    > {
+    };
+
+    using filtered_types = TypeFilterHelper<
+            std::tuple<void *, char, short, int, long, long long>,
+            decltype(external_symbols),
+            decltype(PyTypeObject::tp_iternext)
+    >;
     filtered_types::type data;
 
-    template <typename... Args>
-    explicit RegisteredLLVMTypes(Args &&... args) : data{filtered_types::create(std::forward<Args>(args)...)} {}
+public:
+    explicit RegisteredLLVMTypes(llvm::LLVMContext &context) : data{filtered_types::create(context)} {}
 
     template <typename T>
-    [[nodiscard]] auto &get() const { return std::get<LLVMType<T>>(data)(); }
+    [[nodiscard]] typename LLVMType<T>::DataType get() const { return std::get<LLVMType<T>>(data); }
 };
-
 
 #endif

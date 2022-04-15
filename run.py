@@ -65,15 +65,12 @@ import pynic
 # stat('有优化', bar)
 
 
-def bar():
-    ref = 1
+ref = 1
 
-    @pynic.apply
-    def foo():
-        return ref
-
-    return foo()
-    # return x * x + x * x
+@pynic.apply
+def foo():
+    return ref
 
 
-print(bar())
+
+print(foo())

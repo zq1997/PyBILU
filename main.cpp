@@ -33,6 +33,8 @@ PyObject *eval_func(PyThreadState *tstate, PyFrameObject *frame, int throwflag) 
     SimplePyFrame simple_frame{
             &PyTuple_GET_ITEM(frame->f_code->co_consts, 0),
             frame->f_localsplus,
+            frame->f_builtins,
+            frame->f_globals,
             frame->f_locals,
             frame->f_code,
             tstate

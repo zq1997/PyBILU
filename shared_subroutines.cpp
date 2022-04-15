@@ -2,6 +2,7 @@
 
 #define Py_BUILD_CORE
 
+#include <internal/pycore_code.h>
 #include <internal/pycore_pyerrors.h>
 
 PyObject *calcUnaryNot(PyObject *value) {
@@ -35,6 +36,23 @@ PyObject *calcInPlacePower(PyObject *base, PyObject *exp) {
 //             "local variable '%.200s' referenced before assignment",
 //             name_u8);
 // }
+
+static void raiseNameError(PyThreadState *tstate, PyObject *name,
+        const char *format_str = "name '%.200s' is not defined") {
+    auto name_u8 = PyUnicode_AsUTF8(name);
+    if (name_u8) {
+        return;
+    }
+    _PyErr_Format(tstate, PyExc_NameError, format_str, name_u8);
+
+    PyObject *type, *value, *traceback;
+    PyErr_Fetch(&type, &value, &traceback);
+    PyErr_NormalizeException(&type, &value, &traceback);
+    if (PyErr_GivenExceptionMatches(value, PyExc_NameError)) {
+        PyObject_SetAttrString(value, "name", name);
+    }
+    PyErr_Restore(type, value, traceback);
+}
 
 static void raiseFreeError(PyThreadState *tstate, PyObject *name) {
     auto name_u8 = PyUnicode_AsUTF8(name);
@@ -86,6 +104,83 @@ PyObject *handle_LOAD_CLASSDEREF(SimplePyFrame *f, PyOparg oparg) {
     }
     raiseFreeError(f->tstate, name);
     return nullptr;
+}
+
+static Py_hash_t getHash(PyObject *name) {
+    auto hash = ((PyASCIIObject *) name)->hash;
+    if (hash == -1) {
+        hash = PyObject_Hash(name);
+    }
+    return hash;
+}
+
+static PyObject *loadGlobalOrBuiltin(SimplePyFrame *f, PyObject *name, Py_hash_t hash) {
+    PyObject *v;
+    if ((v = _PyDict_GetItem_KnownHash(f->globals, name, hash))) {
+        Py_INCREF(v);
+        return v;
+    } else if (_PyErr_Occurred(f->tstate)) {
+        return nullptr;
+    }
+
+    if (PyDict_CheckExact(f->builtins)) {
+        if ((v = _PyDict_GetItem_KnownHash(f->builtins, name, hash))) {
+            Py_INCREF(v);
+            return v;
+        } else if (!_PyErr_Occurred(f->tstate)) {
+            raiseNameError(f->tstate, name);
+        }
+    } else {
+        if ((v = PyObject_GetItem(f->builtins, name))) {
+            return v;
+        } else if (_PyErr_ExceptionMatches(f->tstate, PyExc_KeyError)) {
+            raiseNameError(f->tstate, name);
+        }
+    }
+    return nullptr;
+}
+
+PyObject *handle_LOAD_GLOBAL(SimplePyFrame *f, PyOparg oparg) {
+    // NOTE：global似乎默认必须就是dict
+    auto name = PyTuple_GetItem(f->code->co_names, oparg);
+    assert(PyDict_CheckExact(f->globals));
+    assert(PyUnicode_CheckExact(name));
+    auto hash = getHash(name);
+    if (hash == -1) {
+        return nullptr;
+    }
+    return loadGlobalOrBuiltin(f, name, hash);
+}
+
+PyObject *handle_LOAD_NAME(SimplePyFrame *f, PyOparg oparg) {
+    auto name = PyTuple_GetItem(f->code->co_names, oparg);
+    PyObject *v;
+    if (!f->locals) {
+        _PyErr_Format(f->tstate, PyExc_SystemError, "no locals when loading %R", name);
+        return nullptr;
+    }
+    auto hash = getHash(name);
+    if (hash == -1) {
+        return nullptr;
+    }
+
+    if (PyDict_CheckExact(f->locals)) {
+        if ((v = _PyDict_GetItem_KnownHash(f->locals, name, hash))) {
+            Py_INCREF(v);
+            return v;
+        } else if (_PyErr_Occurred(f->tstate)) {
+            return nullptr;
+        }
+    } else {
+        if ((v = PyObject_GetItem(f->locals, name))) {
+            return v;
+        } else if (!_PyErr_ExceptionMatches(f->tstate, PyExc_KeyError)) {
+            return nullptr;
+        }
+        _PyErr_Clear(f->tstate);
+    }
+
+    return loadGlobalOrBuiltin(f, name, hash);
 }
 
 PyObject *unwindFrame(PyObject **stack, ptrdiff_t stack_height) {

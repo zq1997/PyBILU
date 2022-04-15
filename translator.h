@@ -60,7 +60,7 @@ class Translator {
     llvm::IRBuilder<> builder{context};
     llvm::Module mod{"singleton_module", context};
     llvm::Function *func{llvm::Function::Create(
-            LLVMType<TranslatedFunctionType>(context)(), llvm::Function::ExternalLinkage, "singleton_function", &mod
+            LLVMType<TranslatedFunctionType>(context), llvm::Function::ExternalLinkage, "singleton_function", &mod
     )};
     llvm::MDNode *likely_true{llvm::MDBuilder(context).createBranchWeights(INT32_MAX, 0)};
     llvm::AttributeList external_func_attr{};

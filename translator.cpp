@@ -353,10 +353,24 @@ void Translator::emitBlock(unsigned index) {
             do_PUSH(value);
             break;
         }
-        case LOAD_GLOBAL:
-            unimplemented();
-        case LOAD_NAME:
-            unimplemented();
+        case LOAD_GLOBAL: {
+            auto value = do_CallSymbol<handle_LOAD_GLOBAL>(func->getArg(1), asValue(instr.oparg));
+            auto is_not_null = builder.CreateICmpNE(value, c_null);
+            auto bb = createBlock("LOAD_GLOBAL.OK");
+            builder.CreateCondBr(is_not_null, bb, unwind_block, likely_true);
+            builder.SetInsertPoint(bb);
+            do_PUSH(value);
+            break;
+        }
+        case LOAD_NAME: {
+            auto value = do_CallSymbol<handle_LOAD_NAME>(func->getArg(1), asValue(instr.oparg));
+            auto is_not_null = builder.CreateICmpNE(value, c_null);
+            auto bb = createBlock("LOAD_NAME.OK");
+            builder.CreateCondBr(is_not_null, bb, unwind_block, likely_true);
+            builder.SetInsertPoint(bb);
+            do_PUSH(value);
+            break;
+        }
         case LOAD_ATTR:
             unimplemented();
         case LOAD_METHOD:
