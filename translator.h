@@ -55,6 +55,7 @@ struct PyBasicBlock {
 
 class Translator {
     friend class WrappedValue;
+
     llvm::LLVMContext context{};
     RegisteredLLVMTypes types{(context.enableOpaquePointers(), context)};
     llvm::IRBuilder<> builder{context};
@@ -63,7 +64,8 @@ class Translator {
             LLVMType<TranslatedFunctionType>(context), llvm::Function::ExternalLinkage, "singleton_function", &mod
     )};
     llvm::MDNode *likely_true{llvm::MDBuilder(context).createBranchWeights(INT32_MAX, 0)};
-    llvm::AttributeList external_func_attr{};
+    llvm::AttributeList attr_inaccessible_only{};
+    llvm::AttributeList attr_inaccessible_or_arg{};
 
     PyCodeObject *py_code{};
     PyInstr *py_instructions{};
@@ -147,31 +149,35 @@ class Translator {
     void do_SETLOCAL(PyOparg oparg, llvm::Value *value, bool check_null = true);
     llvm::Value *do_POP();
     void do_PUSH(llvm::Value *value);
+
     auto do_PEAK(int i) {
         return builder.CreateLoad(types.get<PyObject *>(), py_stack[stack_height - i]);
     }
+
     auto do_SET_PEAK(int i, llvm::Value *value) {
         return builder.CreateStore(value, py_stack[stack_height - i]);
     }
+
     void do_Py_INCREF(llvm::Value *v);
     void do_Py_DECREF(llvm::Value *v);
+    void do_Py_XDECREF(llvm::Value *v);
 
 
-    template <typename ...Args>
+    template <llvm::AttributeList Translator::* Attr = &Translator::attr_inaccessible_only, typename... Args>
     llvm::CallInst *do_Call(llvm::FunctionType *type, llvm::Value *callee, Args... args) {
         auto call_instr = builder.CreateCall(type, callee, {args...});
-        call_instr->setAttributes(external_func_attr);
+        call_instr->setAttributes(this->*Attr);
         return call_instr;
     }
 
-    template <typename T, typename M, typename ...Args>
+    template <typename T, typename M, typename... Args>
     llvm::CallInst *do_CallSlot(llvm::Value *instance, M *T::* member, Args... args) {
         return do_Call(types.get<M>(), readData(instance, member), args...);
     }
 
-    template <auto &S, typename ...Args>
+    template <auto &S, llvm::AttributeList Translator::* Attr = &Translator::attr_inaccessible_only, typename... Args>
     llvm::CallInst *do_CallSymbol(Args... args) {
-        return do_Call(types.get<std::remove_reference_t<decltype(S)>>(), getSymbol(searchSymbol<S>()), args...);
+        return do_Call<Attr>(types.get<std::remove_reference_t<decltype(S)>>(), getSymbol(searchSymbol<S>()), args...);
     }
 
     void handle_UNARY_OP(size_t i) {

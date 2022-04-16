@@ -15,6 +15,7 @@ struct SimplePyFrame {
     PyObject *globals;
     PyObject *locals;
     PyCodeObject *code;
+    PyObject **names;
     PyThreadState *tstate;
 };
 
@@ -29,6 +30,8 @@ PyObject *calcInPlacePower(PyObject *base, PyObject *exp);
 PyObject *handle_LOAD_CLASSDEREF(SimplePyFrame *f, PyOparg oparg);
 PyObject *handle_LOAD_GLOBAL(SimplePyFrame *f, PyOparg oparg);
 PyObject *handle_LOAD_NAME(SimplePyFrame *f, PyOparg oparg);
+PyObject *handle_LOAD_ATTR(SimplePyFrame *f, PyOparg oparg, PyObject *owner);
+PyObject *handle_LOAD_METHOD(SimplePyFrame *f, PyOparg oparg, PyObject *obj, PyObject **sp);
 PyObject *unwindFrame(PyObject **stack, ptrdiff_t stack_height);
 
 constexpr std::tuple external_symbols{
@@ -72,6 +75,10 @@ constexpr std::tuple external_symbols{
         std::pair{&handle_LOAD_CLASSDEREF, "handle_LOAD_CLASSDEREF"},
         std::pair{&handle_LOAD_GLOBAL, "handle_LOAD_GLOBAL"},
         std::pair{&handle_LOAD_NAME, "handle_LOAD_NAME"},
+        std::pair{&handle_LOAD_ATTR, "handle_LOAD_ATTR"},
+        std::pair{&handle_LOAD_METHOD, "handle_LOAD_METHOD"},
+        std::pair{&PyObject_GetItem, "PyObject_GetItem"},
+        std::pair{&PyDict_SetItem, "PyDict_SetItem"},
         std::pair{&unwindFrame, "unwindFrame"},
 
         std::pair{&memmove, "memmove"}

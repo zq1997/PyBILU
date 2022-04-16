@@ -115,8 +115,7 @@ static Py_hash_t getHash(PyObject *name) {
 }
 
 static PyObject *loadGlobalOrBuiltin(SimplePyFrame *f, PyObject *name, Py_hash_t hash) {
-    PyObject *v;
-    if ((v = _PyDict_GetItem_KnownHash(f->globals, name, hash))) {
+    if (auto v = _PyDict_GetItem_KnownHash(f->globals, name, hash)) {
         Py_INCREF(v);
         return v;
     } else if (_PyErr_Occurred(f->tstate)) {
@@ -124,14 +123,14 @@ static PyObject *loadGlobalOrBuiltin(SimplePyFrame *f, PyObject *name, Py_hash_t
     }
 
     if (PyDict_CheckExact(f->builtins)) {
-        if ((v = _PyDict_GetItem_KnownHash(f->builtins, name, hash))) {
+        if (auto v = _PyDict_GetItem_KnownHash(f->builtins, name, hash)) {
             Py_INCREF(v);
             return v;
         } else if (!_PyErr_Occurred(f->tstate)) {
             raiseNameError(f->tstate, name);
         }
     } else {
-        if ((v = PyObject_GetItem(f->builtins, name))) {
+        if (auto v = PyObject_GetItem(f->builtins, name)) {
             return v;
         } else if (_PyErr_ExceptionMatches(f->tstate, PyExc_KeyError)) {
             raiseNameError(f->tstate, name);
@@ -142,8 +141,7 @@ static PyObject *loadGlobalOrBuiltin(SimplePyFrame *f, PyObject *name, Py_hash_t
 
 PyObject *handle_LOAD_GLOBAL(SimplePyFrame *f, PyOparg oparg) {
     // NOTE：global似乎默认必须就是dict
-    auto name = PyTuple_GetItem(f->code->co_names, oparg);
-    assert(PyDict_CheckExact(f->globals));
+    auto name = PyTuple_GET_ITEM(f->code->co_names, oparg);
     assert(PyUnicode_CheckExact(name));
     auto hash = getHash(name);
     if (hash == -1) {
@@ -153,8 +151,7 @@ PyObject *handle_LOAD_GLOBAL(SimplePyFrame *f, PyOparg oparg) {
 }
 
 PyObject *handle_LOAD_NAME(SimplePyFrame *f, PyOparg oparg) {
-    auto name = PyTuple_GetItem(f->code->co_names, oparg);
-    PyObject *v;
+    auto name = PyTuple_GET_ITEM(f->code->co_names, oparg);
     if (!f->locals) {
         _PyErr_Format(f->tstate, PyExc_SystemError, "no locals when loading %R", name);
         return nullptr;
@@ -165,14 +162,14 @@ PyObject *handle_LOAD_NAME(SimplePyFrame *f, PyOparg oparg) {
     }
 
     if (PyDict_CheckExact(f->locals)) {
-        if ((v = _PyDict_GetItem_KnownHash(f->locals, name, hash))) {
+        if (auto v = _PyDict_GetItem_KnownHash(f->locals, name, hash)) {
             Py_INCREF(v);
             return v;
         } else if (_PyErr_Occurred(f->tstate)) {
             return nullptr;
         }
     } else {
-        if ((v = PyObject_GetItem(f->locals, name))) {
+        if (auto v = PyObject_GetItem(f->locals, name)) {
             return v;
         } else if (!_PyErr_ExceptionMatches(f->tstate, PyExc_KeyError)) {
             return nullptr;
@@ -181,6 +178,33 @@ PyObject *handle_LOAD_NAME(SimplePyFrame *f, PyOparg oparg) {
     }
 
     return loadGlobalOrBuiltin(f, name, hash);
+}
+
+PyObject *handle_LOAD_ATTR(SimplePyFrame *f, PyOparg oparg, PyObject *owner) {
+    auto name = PyTuple_GET_ITEM(f->code->co_names, oparg);
+    return PyObject_GetAttr(owner, name);
+}
+
+PyObject *handle_LOAD_METHOD(SimplePyFrame *f, PyOparg oparg, PyObject *obj, PyObject **sp) {
+    // TODO: 直接生成，省去CALL_METHOD判断, INCREF优化
+    auto name = PyTuple_GET_ITEM(f->code->co_names, oparg);
+    PyObject *meth = nullptr;
+    int meth_found = _PyObject_GetMethod(obj, name, &meth);
+
+    if (!meth) {
+        return nullptr;
+    }
+
+    if (meth_found) {
+        sp[0] = meth;
+        Py_INCREF(obj);
+        sp[1] = obj;
+    }
+    else {
+        sp[0] = nullptr;
+        sp[1] = meth;
+    }
+    return meth;
 }
 
 PyObject *unwindFrame(PyObject **stack, ptrdiff_t stack_height) {

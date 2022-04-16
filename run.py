@@ -2,7 +2,6 @@ from opcode import *
 
 import pynic
 
-
 # import time
 #
 #
@@ -65,12 +64,15 @@ import pynic
 # stat('有优化', bar)
 
 
-ref = 1
+l = [1, 2]
+
 
 @pynic.apply
 def foo():
-    return ref
-
+    global l
+    l = 0
+    return l
 
 
 print(foo())
+print(l)

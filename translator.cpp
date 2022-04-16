@@ -11,17 +11,21 @@ using namespace llvm;
 
 Translator::Translator() {
     auto attr_builder = AttrBuilder(context);
-    external_func_attr = AttributeList::get(context, AttributeList::FunctionIndex, attr_builder
-            .addAttribute(Attribute::InaccessibleMemOnly)
+    attr_builder
             .addAttribute(Attribute::WillReturn)
             .addAttribute(Attribute::NoUnwind)
-    );
-    attr_builder.clear();
+            .addAttribute(Attribute::InaccessibleMemOnly);
+    attr_inaccessible_only = AttributeList::get(context, AttributeList::FunctionIndex, attr_builder);
+    attr_builder
+            .removeAttribute(Attribute::InaccessibleMemOnly)
+            .addAttribute(Attribute::InaccessibleMemOrArgMemOnly);
+    attr_inaccessible_or_arg = AttributeList::get(context, AttributeList::FunctionIndex, attr_builder);
 
-    func->setAttributes(
-            AttributeList::get(context, AttributeList::FunctionIndex, attr_builder
-                    .addAttribute(Attribute::NoUnwind)
-                    .addAttribute("tune-cpu", sys::getHostCPUName())));
+    attr_builder.clear();
+    attr_builder
+            .addAttribute(Attribute::NoUnwind)
+            .addAttribute("tune-cpu", sys::getHostCPUName());
+    func->setAttributes(AttributeList::get(context, AttributeList::FunctionIndex, attr_builder));
     func->getArg(0)->setName(useName("$symbols"));
     func->getArg(1)->setName(useName("$frame"));
     for (auto &arg : func->args()) {
@@ -190,6 +194,17 @@ void Translator::do_Py_DECREF(Value *py_obj) {
     builder.CreateStore(builder.CreateSub(old_value, const_1), ref);
 }
 
+void Translator::do_Py_XDECREF(Value *py_obj) {
+    auto is_null = builder.CreateICmpEQ(py_obj, c_null);
+    auto b_decref = createBlock("decref");
+    auto b_end = createBlock("decref.end");
+    builder.CreateCondBr(is_null, b_decref, b_end);
+    builder.SetInsertPoint(b_decref);
+    do_Py_DECREF(py_obj);
+    builder.CreateBr(b_end);
+    builder.SetInsertPoint(b_end);
+}
+
 Value *Translator::do_GETLOCAL(PyOparg oparg) {
     auto varname = PyTuple_GET_ITEM(py_code->co_varnames, oparg);
     return builder.CreateLoad(types.get<PyObject *>(), py_locals[oparg], useName(varname));
@@ -270,7 +285,7 @@ void Translator::emitBlock(unsigned index) {
             do_SET_PEAK(2, top);
             break;
         }
-        case ROT_THREE:{
+        case ROT_THREE: {
             auto top = do_PEAK(1);
             auto second = do_PEAK(2);
             auto third = do_PEAK(3);
@@ -279,7 +294,7 @@ void Translator::emitBlock(unsigned index) {
             do_SET_PEAK(3, top);
             break;
         }
-        case ROT_FOUR:{
+        case ROT_FOUR: {
             auto top = do_PEAK(1);
             auto second = do_PEAK(2);
             auto third = do_PEAK(3);
@@ -371,21 +386,60 @@ void Translator::emitBlock(unsigned index) {
             do_PUSH(value);
             break;
         }
-        case LOAD_ATTR:
-            unimplemented();
-        case LOAD_METHOD:
-            unimplemented();
-        case BINARY_SUBSCR:
-            unimplemented();
+        case LOAD_ATTR: {
+            auto owner = do_POP();
+            auto attr = do_CallSymbol<handle_LOAD_ATTR>(func->getArg(1), asValue(instr.oparg), owner);
+            do_Py_DECREF(owner);
+            auto is_not_null = builder.CreateICmpNE(attr, c_null);
+            auto bb = createBlock("LOAD_ATTR.OK");
+            builder.CreateCondBr(is_not_null, bb, unwind_block, likely_true);
+            builder.SetInsertPoint(bb);
+            do_PUSH(attr);
+            break;
+        }
+        case LOAD_METHOD: {
+            auto obj = do_POP();
+            auto attr = do_CallSymbol<handle_LOAD_METHOD, &Translator::attr_inaccessible_or_arg>(
+                    func->getArg(1), asValue(instr.oparg), obj, py_stack[stack_height]);
+            do_Py_DECREF(obj);
+            auto is_not_null = builder.CreateICmpNE(attr, c_null);
+            auto bb = createBlock("LOAD_METHOD.OK");
+            builder.CreateCondBr(is_not_null, bb, unwind_block, likely_true);
+            builder.SetInsertPoint(bb);
+            do_PUSH(attr);
+            break;
+        }
+        case BINARY_SUBSCR: {
+            handle_BINARY_OP(searchSymbol<PyObject_GetItem>());
+            break;
+        }
         case STORE_FAST: {
             auto value = do_POP();
             do_SETLOCAL(instr.oparg, value);
             break;
         }
-        case STORE_DEREF:
-            unimplemented();
-        case STORE_GLOBAL:
-            unimplemented();
+        case STORE_DEREF: {
+            auto value = do_POP();
+            auto cell = builder.CreateLoad(types.get<PyObject *>(), py_freevars[instr.oparg]);
+            auto cell_ref = getPointer(cell, &PyCellObject::ob_ref);
+            auto old_value = builder.CreateLoad(types.get<PyObject *>(), cell_ref);
+            builder.CreateStore(value, cell_ref);
+            do_Py_XDECREF(old_value);
+            break;
+        }
+        case STORE_GLOBAL: {
+            auto names = readData(func->getArg(1), &SimplePyFrame::names);
+            auto name = readData<PyObject *>(names, instr.oparg);
+            auto value = do_POP();
+            auto globals = readData(func->getArg(1), &SimplePyFrame::globals);
+            auto err = do_CallSymbol<PyDict_SetItem>(globals, name, value);
+            do_Py_DECREF(value);
+            auto is_not_null = builder.CreateICmpSGE(err, asValue(0));
+            auto bb = createBlock("STORE_GLOBAL.OK");
+            builder.CreateCondBr(is_not_null, bb, unwind_block, likely_true);
+            builder.SetInsertPoint(bb);
+            break;
+        }
         case STORE_NAME:
             unimplemented();
         case STORE_ATTR:
@@ -727,12 +781,11 @@ BasicBlock *Translator::findBlock(unsigned offset) {
         auto v = blocks[mid].end;
         if (v < offset) {
             left = mid + 1;
-        } else
-            if (v > offset) {
-                right = mid - 1;
-            } else {
-                return blocks[mid + 1].llvm_block;
-            }
+        } else if (v > offset) {
+            right = mid - 1;
+        } else {
+            return blocks[mid + 1].llvm_block;
+        }
     }
     assert(false);
     return nullptr;

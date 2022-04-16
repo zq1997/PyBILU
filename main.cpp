@@ -37,6 +37,7 @@ PyObject *eval_func(PyThreadState *tstate, PyFrameObject *frame, int throwflag) 
             frame->f_globals,
             frame->f_locals,
             frame->f_code,
+            &PyTuple_GET_ITEM(frame->f_code->co_names, 0),
             tstate
     };
     // Strictly speaking, converting void* to a function pointer is undefined behavior in C++
