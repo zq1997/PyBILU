@@ -27,7 +27,7 @@ Translator::Translator() {
             .addAttribute("tune-cpu", sys::getHostCPUName());
     func->setAttributes(AttributeList::get(context, AttributeList::FunctionIndex, attr_builder));
     func->getArg(0)->setName(useName("$symbols"));
-    func->getArg(1)->setName(useName("$frame"));
+    simple_frame->setName(useName("$frame"));
     for (auto &arg : func->args()) {
         arg.addAttr(Attribute::NoAlias);
     }
@@ -49,13 +49,13 @@ void *Translator::operator()(Compiler &compiler, PyCodeObject *code) {
 
     builder.SetInsertPoint(blocks[0].llvm_block);
 
-    auto consts = readData(func->getArg(1), &SimplePyFrame::consts, useName("$consts"));
+    auto consts = readData(simple_frame, &SimplePyFrame::consts, useName("$consts"));
     py_consts.reserve(PyTuple_GET_SIZE(code->co_consts));
     for (auto i : Range(PyTuple_GET_SIZE(code->co_consts))) {
         py_consts[i] = getPointer<PyObject *>(consts, i, useName("$const.", i));
     }
 
-    auto localsplus = readData(func->getArg(1), &SimplePyFrame::localsplus, useName("$localsplus"));
+    auto localsplus = readData(simple_frame, &SimplePyFrame::localsplus, useName("$localsplus"));
     auto nlocals = code->co_nlocals;
     auto ncells = PyTuple_GET_SIZE(code->co_cellvars);
     auto nfrees = PyTuple_GET_SIZE(code->co_freevars);
@@ -214,14 +214,7 @@ void Translator::do_SETLOCAL(PyOparg oparg, llvm::Value *value, bool check_null)
     auto old_value = do_GETLOCAL(oparg);
     builder.CreateStore(value, py_locals[oparg]);
     if (check_null) {
-        auto not_null = builder.CreateICmpNE(old_value, c_null);
-        auto b_decref = createBlock(useName("$decref"), func);
-        auto b_end = createBlock(useName("$decref.end"), func);
-        builder.CreateCondBr(not_null, b_decref, b_end);
-        builder.SetInsertPoint(b_decref);
-        do_Py_DECREF(old_value);
-        builder.CreateBr(b_end);
-        builder.SetInsertPoint(b_end);
+        do_Py_XDECREF(old_value);
     } else {
         do_Py_DECREF(old_value);
     }
@@ -360,7 +353,7 @@ void Translator::emitBlock(unsigned index) {
             break;
         }
         case LOAD_CLASSDEREF: {
-            auto value = do_CallSymbol<handle_LOAD_CLASSDEREF>(func->getArg(1), asValue(instr.oparg));
+            auto value = do_CallSymbol<handle_LOAD_CLASSDEREF>(simple_frame, asValue(instr.oparg));
             auto is_not_null = builder.CreateICmpNE(value, c_null);
             auto bb = createBlock("LOAD_CLASSDEREF.OK");
             builder.CreateCondBr(is_not_null, bb, unwind_block, likely_true);
@@ -369,7 +362,7 @@ void Translator::emitBlock(unsigned index) {
             break;
         }
         case LOAD_GLOBAL: {
-            auto value = do_CallSymbol<handle_LOAD_GLOBAL>(func->getArg(1), asValue(instr.oparg));
+            auto value = do_CallSymbol<handle_LOAD_GLOBAL>(simple_frame, asValue(instr.oparg));
             auto is_not_null = builder.CreateICmpNE(value, c_null);
             auto bb = createBlock("LOAD_GLOBAL.OK");
             builder.CreateCondBr(is_not_null, bb, unwind_block, likely_true);
@@ -378,7 +371,7 @@ void Translator::emitBlock(unsigned index) {
             break;
         }
         case LOAD_NAME: {
-            auto value = do_CallSymbol<handle_LOAD_NAME>(func->getArg(1), asValue(instr.oparg));
+            auto value = do_CallSymbol<handle_LOAD_NAME>(simple_frame, asValue(instr.oparg));
             auto is_not_null = builder.CreateICmpNE(value, c_null);
             auto bb = createBlock("LOAD_NAME.OK");
             builder.CreateCondBr(is_not_null, bb, unwind_block, likely_true);
@@ -388,7 +381,7 @@ void Translator::emitBlock(unsigned index) {
         }
         case LOAD_ATTR: {
             auto owner = do_POP();
-            auto attr = do_CallSymbol<handle_LOAD_ATTR>(func->getArg(1), asValue(instr.oparg), owner);
+            auto attr = do_CallSymbol<handle_LOAD_ATTR>(simple_frame, asValue(instr.oparg), owner);
             do_Py_DECREF(owner);
             auto is_not_null = builder.CreateICmpNE(attr, c_null);
             auto bb = createBlock("LOAD_ATTR.OK");
@@ -400,7 +393,7 @@ void Translator::emitBlock(unsigned index) {
         case LOAD_METHOD: {
             auto obj = do_POP();
             auto attr = do_CallSymbol<handle_LOAD_METHOD, &Translator::attr_inaccessible_or_arg>(
-                    func->getArg(1), asValue(instr.oparg), obj, py_stack[stack_height]);
+                    simple_frame, asValue(instr.oparg), obj, py_stack[stack_height]);
             do_Py_DECREF(obj);
             auto is_not_null = builder.CreateICmpNE(attr, c_null);
             auto bb = createBlock("LOAD_METHOD.OK");
@@ -428,35 +421,73 @@ void Translator::emitBlock(unsigned index) {
             break;
         }
         case STORE_GLOBAL: {
-            auto names = readData(func->getArg(1), &SimplePyFrame::names);
+            auto names = readData(simple_frame, &SimplePyFrame::names);
             auto name = readData<PyObject *>(names, instr.oparg);
             auto value = do_POP();
-            auto globals = readData(func->getArg(1), &SimplePyFrame::globals);
+            auto globals = readData(simple_frame, &SimplePyFrame::globals);
             auto err = do_CallSymbol<PyDict_SetItem>(globals, name, value);
             do_Py_DECREF(value);
-            auto is_not_null = builder.CreateICmpSGE(err, asValue(0));
+            auto no_err = builder.CreateICmpSGE(err, asValue(0));
             auto bb = createBlock("STORE_GLOBAL.OK");
-            builder.CreateCondBr(is_not_null, bb, unwind_block, likely_true);
+            builder.CreateCondBr(no_err, bb, unwind_block, likely_true);
             builder.SetInsertPoint(bb);
             break;
         }
-        case STORE_NAME:
-            unimplemented();
-        case STORE_ATTR:
-            unimplemented();
-        case STORE_SUBSCR:
-            unimplemented();
+        case STORE_NAME: {
+            auto value = do_POP();
+            auto ok = do_CallSymbol<handle_STORE_NAME>(simple_frame, asValue(instr.oparg), value);
+            do_Py_DECREF(value);
+            auto is_ok = builder.CreateICmpNE(ok, asValue(0));
+            auto bb = createBlock("STORE_NAME.OK");
+            builder.CreateCondBr(is_ok, bb, unwind_block, likely_true);
+            builder.SetInsertPoint(bb);
+            break;
+        }
+        case STORE_ATTR: {
+            auto names = readData(simple_frame, &SimplePyFrame::names);
+            auto name = readData<PyObject *>(names, instr.oparg);
+            auto owner = do_POP();
+            auto value = do_POP();
+            auto err = do_CallSymbol<PyObject_SetAttr>(owner, name, value);
+            do_Py_DECREF(value);
+            do_Py_DECREF(owner);
+            auto no_err = builder.CreateICmpSGE(err, asValue(0));
+            auto bb = createBlock("STORE_ATTR.OK");
+            builder.CreateCondBr(no_err, bb, unwind_block, likely_true);
+            builder.SetInsertPoint(bb);
+        }
+        case STORE_SUBSCR:{
+            auto sub = do_POP();
+            auto container = do_POP();
+            auto value = do_POP();
+            auto err = do_CallSymbol<PyObject_SetAttr>(container, sub, value);
+            do_Py_DECREF(value);
+            do_Py_DECREF(container);
+            do_Py_DECREF(sub);
+            auto no_err = builder.CreateICmpSGE(err, asValue(0));
+            auto bb = createBlock("STORE_SUBSCR.OK");
+            builder.CreateCondBr(no_err, bb, unwind_block, likely_true);
+            builder.SetInsertPoint(bb);
+        }
         case DELETE_FAST: {
             auto value = do_GETLOCAL(instr.oparg);
             auto is_not_null = builder.CreateICmpNE(value, c_null);
             auto bb = createBlock("DELETE_FAST.OK");
             builder.CreateCondBr(is_not_null, bb, unwind_block, likely_true);
             do_SETLOCAL(instr.oparg, c_null, false);
-            do_PUSH(value);
             break;
         }
-        case DELETE_DEREF:
-            unimplemented();
+        case DELETE_DEREF:{
+            auto cell = builder.CreateLoad(types.get<PyObject *>(), py_freevars[instr.oparg]);
+            auto cell_ref = getPointer(cell, &PyCellObject::ob_ref);
+            auto old_value = builder.CreateLoad(types.get<PyObject *>(), cell_ref);
+            auto is_not_null = builder.CreateICmpNE(old_value, c_null);
+            auto bb = createBlock("DELETE_DEREF.OK");
+            builder.CreateCondBr(is_not_null, bb, unwind_block, likely_true);
+            builder.CreateStore(c_null, cell_ref);
+            do_Py_DECREF(old_value);
+            break;
+        }
         case DELETE_GLOBAL:
             unimplemented();
         case DELETE_NAME:

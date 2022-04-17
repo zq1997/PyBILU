@@ -63,6 +63,7 @@ class Translator {
     llvm::Function *func{llvm::Function::Create(
             LLVMType<TranslatedFunctionType>(context), llvm::Function::ExternalLinkage, "singleton_function", &mod
     )};
+    llvm::Argument *simple_frame{func->getArg(1)};
     llvm::MDNode *likely_true{llvm::MDBuilder(context).createBranchWeights(INT32_MAX, 0)};
     llvm::AttributeList attr_inaccessible_only{};
     llvm::AttributeList attr_inaccessible_or_arg{};

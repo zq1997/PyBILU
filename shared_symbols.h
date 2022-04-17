@@ -32,6 +32,7 @@ PyObject *handle_LOAD_GLOBAL(SimplePyFrame *f, PyOparg oparg);
 PyObject *handle_LOAD_NAME(SimplePyFrame *f, PyOparg oparg);
 PyObject *handle_LOAD_ATTR(SimplePyFrame *f, PyOparg oparg, PyObject *owner);
 PyObject *handle_LOAD_METHOD(SimplePyFrame *f, PyOparg oparg, PyObject *obj, PyObject **sp);
+int handle_STORE_NAME(SimplePyFrame *f, PyOparg oparg, PyObject *value);
 PyObject *unwindFrame(PyObject **stack, ptrdiff_t stack_height);
 
 constexpr std::tuple external_symbols{
@@ -79,6 +80,9 @@ constexpr std::tuple external_symbols{
         std::pair{&handle_LOAD_METHOD, "handle_LOAD_METHOD"},
         std::pair{&PyObject_GetItem, "PyObject_GetItem"},
         std::pair{&PyDict_SetItem, "PyDict_SetItem"},
+        std::pair{&handle_STORE_NAME, "handle_STORE_NAME"},
+        std::pair{&PyObject_SetAttr, "PyObject_SetAttr"},
+        std::pair{&PyObject_SetItem, "PyObject_SetItem"},
         std::pair{&unwindFrame, "unwindFrame"},
 
         std::pair{&memmove, "memmove"}

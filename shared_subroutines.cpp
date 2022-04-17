@@ -5,6 +5,8 @@
 #include <internal/pycore_code.h>
 #include <internal/pycore_pyerrors.h>
 
+// TODO: 在想，能不能设计俩版本，decref在这里实现
+
 PyObject *calcUnaryNot(PyObject *value) {
     int err = PyObject_IsTrue(value);
     if (err == 0) {
@@ -199,12 +201,27 @@ PyObject *handle_LOAD_METHOD(SimplePyFrame *f, PyOparg oparg, PyObject *obj, PyO
         sp[0] = meth;
         Py_INCREF(obj);
         sp[1] = obj;
-    }
-    else {
+    } else {
         sp[0] = nullptr;
         sp[1] = meth;
     }
     return meth;
+}
+
+int handle_STORE_NAME(SimplePyFrame *f, PyOparg oparg, PyObject *value) {
+    auto name = PyTuple_GET_ITEM(f->code->co_names, oparg);
+    if (f->locals) {
+        int err;
+        if (PyDict_CheckExact(f->locals)) {
+            err = PyDict_SetItem(f->locals, name, value);
+        } else {
+            err = PyObject_SetItem(f->locals, name, value);
+        }
+        return err == 0;
+    } else {
+        _PyErr_Format(f->tstate, PyExc_SystemError, "no locals found when storing %R", name);
+        return 0;
+    }
 }
 
 PyObject *unwindFrame(PyObject **stack, ptrdiff_t stack_height) {
