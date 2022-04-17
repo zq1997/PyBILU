@@ -70,7 +70,6 @@ l = [1, 2]
 @pynic.apply
 def foo():
     global l
-    l = 0
     return l
 
 

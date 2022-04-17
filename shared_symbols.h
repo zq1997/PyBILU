@@ -24,19 +24,22 @@ using PyOpcode = decltype(_Py_OPCODE(PyInstr{}));
 using PyOparg = decltype(_Py_OPCODE(PyInstr{}));
 constexpr auto EXTENDED_ARG_BITS = 8;
 
-PyObject *calcUnaryNot(PyObject *value);
-PyObject *calcBinaryPower(PyObject *base, PyObject *exp);
-PyObject *calcInPlacePower(PyObject *base, PyObject *exp);
+PyObject *handle_UNARY_NOT(PyObject *value);
+PyObject *handle_BINARY_POWER(PyObject *base, PyObject *exp);
+PyObject *handle_INPLACE_POWER(PyObject *base, PyObject *exp);
 PyObject *handle_LOAD_CLASSDEREF(SimplePyFrame *f, PyOparg oparg);
 PyObject *handle_LOAD_GLOBAL(SimplePyFrame *f, PyOparg oparg);
 PyObject *handle_LOAD_NAME(SimplePyFrame *f, PyOparg oparg);
 PyObject *handle_LOAD_ATTR(SimplePyFrame *f, PyOparg oparg, PyObject *owner);
 PyObject *handle_LOAD_METHOD(SimplePyFrame *f, PyOparg oparg, PyObject *obj, PyObject **sp);
 int handle_STORE_NAME(SimplePyFrame *f, PyOparg oparg, PyObject *value);
+int handle_DELETE_DEREF(SimplePyFrame *f, PyOparg oparg);
+int handle_DELETE_GLOBAL(SimplePyFrame *f, PyOparg oparg);
+int handle_DELETE_NAME(SimplePyFrame *f, PyOparg oparg);
 PyObject *unwindFrame(PyObject **stack, ptrdiff_t stack_height);
 
 constexpr std::tuple external_symbols{
-        std::pair{&calcUnaryNot, "calcUnaryNot"},
+        std::pair{&handle_UNARY_NOT, "handle_UNARY_NOT"},
         std::pair{&PyNumber_Positive, "PyNumber_Positive"},
         std::pair{&PyNumber_Negative, "PyNumber_Negative"},
         std::pair{&PyNumber_Invert, "PyNumber_Invert"},
@@ -47,7 +50,7 @@ constexpr std::tuple external_symbols{
         std::pair{&PyNumber_TrueDivide, "PyNumber_TrueDivide"},
         std::pair{&PyNumber_FloorDivide, "PyNumber_FloorDivide"},
         std::pair{&PyNumber_Remainder, "PyNumber_Remainder"},
-        std::pair{&calcBinaryPower, "calcBinaryPower"},
+        std::pair{&handle_BINARY_POWER, "handle_BINARY_POWER"},
         std::pair{&PyNumber_MatrixMultiply, "PyNumber_MatrixMultiply"},
         std::pair{&PyNumber_Lshift, "PyNumber_Lshift"},
         std::pair{&PyNumber_Rshift, "PyNumber_Rshift"},
@@ -61,7 +64,7 @@ constexpr std::tuple external_symbols{
         std::pair{&PyNumber_InPlaceTrueDivide, "PyNumber_InPlaceTrueDivide"},
         std::pair{&PyNumber_InPlaceFloorDivide, "PyNumber_InPlaceFloorDivide"},
         std::pair{&PyNumber_InPlaceRemainder, "PyNumber_InPlaceRemainder"},
-        std::pair{&calcInPlacePower, "calcInPlacePower"},
+        std::pair{&handle_INPLACE_POWER, "handle_INPLACE_POWER"},
         std::pair{&PyNumber_InPlaceMatrixMultiply, "PyNumber_InPlaceMatrixMultiply"},
         std::pair{&PyNumber_InPlaceLshift, "PyNumber_InPlaceLshift"},
         std::pair{&PyNumber_InPlaceRshift, "PyNumber_InPlaceRshift"},
@@ -73,6 +76,8 @@ constexpr std::tuple external_symbols{
         std::pair{&PyObject_IsTrue, "PyObject_IsTrue"},
         std::pair{&PyObject_RichCompare, "PyObject_RichCompare"},
 
+        std::pair{&unwindFrame, "unwindFrame"},
+
         std::pair{&handle_LOAD_CLASSDEREF, "handle_LOAD_CLASSDEREF"},
         std::pair{&handle_LOAD_GLOBAL, "handle_LOAD_GLOBAL"},
         std::pair{&handle_LOAD_NAME, "handle_LOAD_NAME"},
@@ -83,7 +88,9 @@ constexpr std::tuple external_symbols{
         std::pair{&handle_STORE_NAME, "handle_STORE_NAME"},
         std::pair{&PyObject_SetAttr, "PyObject_SetAttr"},
         std::pair{&PyObject_SetItem, "PyObject_SetItem"},
-        std::pair{&unwindFrame, "unwindFrame"},
+        std::pair{&handle_DELETE_DEREF, "handle_DELETE_DEREF"},
+        std::pair{&handle_DELETE_GLOBAL, "handle_DELETE_GLOBAL"},
+        std::pair{&handle_DELETE_NAME, "handle_DELETE_NAME"},
 
         std::pair{&memmove, "memmove"}
 };

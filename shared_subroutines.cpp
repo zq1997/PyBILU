@@ -7,39 +7,7 @@
 
 // TODO: 在想，能不能设计俩版本，decref在这里实现
 
-PyObject *calcUnaryNot(PyObject *value) {
-    int err = PyObject_IsTrue(value);
-    if (err == 0) {
-        Py_INCREF(Py_True);
-        return Py_True;
-    } else if (err > 0) {
-        Py_INCREF(Py_False);
-        return Py_False;
-    }
-    return nullptr;
-}
-
-PyObject *calcBinaryPower(PyObject *base, PyObject *exp) {
-    return PyNumber_Power(base, exp, Py_None);
-}
-
-PyObject *calcInPlacePower(PyObject *base, PyObject *exp) {
-    return PyNumber_InPlacePower(base, exp, Py_None);
-}
-
-
-// static void raiseUnboundLocalError(PyThreadState *tstate, PyObject *name_tuple, Py_ssize_t index) {
-//     auto name = PyTuple_GET_ITEM(name_tuple, index);
-//     auto name_u8 = PyUnicode_AsUTF8(name);
-//     if (name_u8) {
-//         return;
-//     }
-//     _PyErr_Format(tstate, PyExc_UnboundLocalError,
-//             "local variable '%.200s' referenced before assignment",
-//             name_u8);
-// }
-
-static void raiseNameError(PyThreadState *tstate, PyObject *name,
+static void raiseUndefinedName(PyThreadState *tstate, PyObject *name,
         const char *format_str = "name '%.200s' is not defined") {
     auto name_u8 = PyUnicode_AsUTF8(name);
     if (name_u8) {
@@ -56,21 +24,27 @@ static void raiseNameError(PyThreadState *tstate, PyObject *name,
     PyErr_Restore(type, value, traceback);
 }
 
-static void raiseFreeError(PyThreadState *tstate, PyObject *name) {
+static void raiseUndefinedLocal(PyThreadState *tstate, PyObject *name) {
     auto name_u8 = PyUnicode_AsUTF8(name);
     if (name_u8) {
         return;
     }
-    _PyErr_Format(tstate, PyExc_NameError,
-            "free variable '%.200s' referenced before assignment in enclosing scope", name_u8);
+    _PyErr_Format(tstate, PyExc_UnboundLocalError,
+            "local variable '%.200s' referenced before assignment",
+            name_u8);
+}
 
-    PyObject *type, *value, *traceback;
-    PyErr_Fetch(&type, &value, &traceback);
-    PyErr_NormalizeException(&type, &value, &traceback);
-    if (PyErr_GivenExceptionMatches(value, PyExc_NameError)) {
-        PyObject_SetAttrString(value, "name", name);
+static void raiseUndefinedFree(PyThreadState *tstate, PyObject *name) {
+    raiseUndefinedName(tstate, name, "free variable '%.200s' referenced before assignment in enclosing scope");
+}
+
+static void raiseUndefinedFreeOrCell(SimplePyFrame *f, PyOparg oparg) {
+    if (oparg < PyTuple_GET_SIZE(f->code->co_cellvars)) {
+        raiseUndefinedLocal(f->tstate, PyTuple_GET_ITEM(f->code->co_cellvars, oparg));
+    } else {
+        auto name = PyTuple_GET_ITEM(f->code->co_freevars, oparg - PyTuple_GET_SIZE(f->code->co_cellvars));
+        raiseUndefinedName(f->tstate, name);
     }
-    PyErr_Restore(type, value, traceback);
 }
 
 PyObject *handle_LOAD_CLASSDEREF(SimplePyFrame *f, PyOparg oparg) {
@@ -104,7 +78,7 @@ PyObject *handle_LOAD_CLASSDEREF(SimplePyFrame *f, PyOparg oparg) {
         Py_INCREF(value);
         return value;
     }
-    raiseFreeError(f->tstate, name);
+    raiseUndefinedFree(f->tstate, name);
     return nullptr;
 }
 
@@ -129,13 +103,13 @@ static PyObject *loadGlobalOrBuiltin(SimplePyFrame *f, PyObject *name, Py_hash_t
             Py_INCREF(v);
             return v;
         } else if (!_PyErr_Occurred(f->tstate)) {
-            raiseNameError(f->tstate, name);
+            raiseUndefinedName(f->tstate, name);
         }
     } else {
         if (auto v = PyObject_GetItem(f->builtins, name)) {
             return v;
         } else if (_PyErr_ExceptionMatches(f->tstate, PyExc_KeyError)) {
-            raiseNameError(f->tstate, name);
+            raiseUndefinedName(f->tstate, name);
         }
     }
     return nullptr;
@@ -222,6 +196,64 @@ int handle_STORE_NAME(SimplePyFrame *f, PyOparg oparg, PyObject *value) {
         _PyErr_Format(f->tstate, PyExc_SystemError, "no locals found when storing %R", name);
         return 0;
     }
+}
+
+int handle_DELETE_DEREF(SimplePyFrame *f, PyOparg oparg) {
+    PyObject *cell = f->localsplus[f->code->co_nlocals + oparg];
+    PyObject *oldobj = PyCell_GET(cell);
+    if (oldobj) {
+        PyCell_SET(cell, nullptr);
+        Py_DECREF(oldobj);
+        return 1;
+    }
+    raiseUndefinedFreeOrCell(f, oparg);
+    return 0;
+}
+
+int handle_DELETE_GLOBAL(SimplePyFrame *f, PyOparg oparg) {
+    auto name = PyTuple_GET_ITEM(f->code->co_names, oparg);
+    int err = PyDict_DelItem(f->globals, name);
+    if (err != 0) {
+        if (_PyErr_ExceptionMatches(f->tstate, PyExc_KeyError)) {
+            raiseUndefinedName(f->tstate, name);
+        }
+        return 0;
+    }
+    return 1;
+}
+
+int handle_DELETE_NAME(SimplePyFrame *f, PyOparg oparg) {
+    auto name = PyTuple_GET_ITEM(f->code->co_names, oparg);
+    PyObject *ns = f->locals;
+    if (ns) {
+        if (PyObject_DelItem(ns, name) != 0) {
+            raiseUndefinedName(f->tstate, name);
+            return 0;
+        }
+        return 1;
+    }
+    _PyErr_Format(f->tstate, PyExc_SystemError, "no locals when deleting %R", name);
+    return 0;
+}
+
+PyObject *handle_UNARY_NOT(PyObject *value) {
+    int err = PyObject_IsTrue(value);
+    if (err == 0) {
+        Py_INCREF(Py_True);
+        return Py_True;
+    } else if (err > 0) {
+        Py_INCREF(Py_False);
+        return Py_False;
+    }
+    return nullptr;
+}
+
+PyObject *handle_BINARY_POWER(PyObject *base, PyObject *exp) {
+    return PyNumber_Power(base, exp, Py_None);
+}
+
+PyObject *handle_INPLACE_POWER(PyObject *base, PyObject *exp) {
+    return PyNumber_InPlacePower(base, exp, Py_None);
 }
 
 PyObject *unwindFrame(PyObject **stack, ptrdiff_t stack_height) {
