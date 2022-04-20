@@ -69,8 +69,9 @@ l = [1, 2]
 
 @pynic.apply
 def foo():
-    global l
-    return l
+    a = 1
+    del a
+    return a
 
 
 print(foo())

@@ -21,16 +21,19 @@ static Py_ssize_t code_extra_index;
 
 PyObject *eval_func(PyThreadState *tstate, PyFrameObject *frame, int throwflag) {
     // TODO: manually implement set/get extra
-    void *jit_callee;
-    if (_PyCode_GetExtra(reinterpret_cast<PyObject *>(frame->f_code), code_extra_index, &jit_callee) == -1) {
+    void *compiled_code;
+    if (_PyCode_GetExtra(reinterpret_cast<PyObject *>(frame->f_code), code_extra_index, &compiled_code) == -1) {
         return nullptr;
     }
-    if (!jit_callee) {
+    if (!compiled_code) {
         return _PyEval_EvalFrameDefault(tstate, frame, throwflag);
     }
+    // Strictly speaking, converting void* to a function pointer is undefined behavior in C++
+    auto jit_callee = reinterpret_cast<TranslatedFunctionType *>(compiled_code);
     // TODO: support generator and throwflag
     assert(!throwflag);
     SimplePyFrame simple_frame{
+            0,
             &PyTuple_GET_ITEM(frame->f_code->co_consts, 0),
             frame->f_localsplus,
             frame->f_builtins,
@@ -38,10 +41,21 @@ PyObject *eval_func(PyThreadState *tstate, PyFrameObject *frame, int throwflag) 
             frame->f_locals,
             frame->f_code,
             &PyTuple_GET_ITEM(frame->f_code->co_names, 0),
-            tstate
+            tstate,
+            {}
     };
-    // Strictly speaking, converting void* to a function pointer is undefined behavior in C++
-    return reinterpret_cast<TranslatedFunctionType *>(jit_callee)(&symbol_addresses[0], &simple_frame);
+    if (!setjmp(simple_frame.the_jmp_buf)) {
+        return jit_callee(&symbol_addresses[0], &simple_frame);
+    } else {
+        auto nlocals = frame->f_code->co_nlocals;
+        auto ncells = PyTuple_GET_SIZE(frame->f_code->co_cellvars);
+        auto nfrees = PyTuple_GET_SIZE(frame->f_code->co_freevars);
+        auto stack = &frame->f_localsplus[nlocals + ncells + nfrees];
+        for (auto i : Range(simple_frame.stack_height)) {
+            Py_XDECREF(stack[i]);
+        }
+        return nullptr;
+    }
 }
 
 void freeExtra(void *extra) {

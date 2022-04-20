@@ -10,7 +10,7 @@
 static void raiseUndefinedName(PyThreadState *tstate, PyObject *name,
         const char *format_str = "name '%.200s' is not defined") {
     auto name_u8 = PyUnicode_AsUTF8(name);
-    if (name_u8) {
+    if (!name_u8) {
         return;
     }
     _PyErr_Format(tstate, PyExc_NameError, format_str, name_u8);
@@ -26,7 +26,7 @@ static void raiseUndefinedName(PyThreadState *tstate, PyObject *name,
 
 static void raiseUndefinedLocal(PyThreadState *tstate, PyObject *name) {
     auto name_u8 = PyUnicode_AsUTF8(name);
-    if (name_u8) {
+    if (!name_u8) {
         return;
     }
     _PyErr_Format(tstate, PyExc_UnboundLocalError,
@@ -45,6 +45,12 @@ static void raiseUndefinedFreeOrCell(SimplePyFrame *f, PyOparg oparg) {
         auto name = PyTuple_GET_ITEM(f->code->co_freevars, oparg - PyTuple_GET_SIZE(f->code->co_cellvars));
         raiseUndefinedName(f->tstate, name);
     }
+}
+
+void handleError_LOAD_FAST(SimplePyFrame *f, PyOparg oparg) {
+    auto name = PyTuple_GET_ITEM(f->code->co_varnames, oparg);
+    raiseUndefinedLocal(f->tstate, name);
+    longjmp(f->the_jmp_buf, 1);
 }
 
 PyObject *handle_LOAD_CLASSDEREF(SimplePyFrame *f, PyOparg oparg) {

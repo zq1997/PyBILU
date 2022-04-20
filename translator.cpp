@@ -12,7 +12,10 @@ using namespace llvm;
 Translator::Translator() {
     auto attr_builder = AttrBuilder(context);
     attr_builder
-            .addAttribute(Attribute::WillReturn)
+            .addAttribute(Attribute::NoReturn);
+    attr_inaccessible_noreturn = AttributeList::get(context, AttributeList::FunctionIndex, attr_builder);
+    attr_builder.clear();
+    attr_builder
             .addAttribute(Attribute::NoUnwind)
             .addAttribute(Attribute::InaccessibleMemOnly);
     attr_inaccessible_only = AttributeList::get(context, AttributeList::FunctionIndex, attr_builder);
@@ -57,8 +60,12 @@ void *Translator::operator()(Compiler &compiler, PyCodeObject *code) {
 
     auto localsplus = readData(simple_frame, &SimplePyFrame::localsplus, useName("$localsplus"));
     auto nlocals = code->co_nlocals;
+    auto start_cells = nlocals;
     auto ncells = PyTuple_GET_SIZE(code->co_cellvars);
+    auto start_frees = start_cells + ncells;
     auto nfrees = PyTuple_GET_SIZE(code->co_freevars);
+    auto start_stack = start_frees + nfrees;
+    auto nstack = code->co_stacksize;
     py_locals.reserve(nlocals);
     for (auto i : Range(nlocals)) {
         auto name = PyTuple_GET_ITEM(code->co_varnames, i);
@@ -67,55 +74,27 @@ void *Translator::operator()(Compiler &compiler, PyCodeObject *code) {
     py_freevars.reserve(ncells + nfrees);
     for (auto i : Range(ncells)) {
         auto name = PyTuple_GET_ITEM(code->co_cellvars, i);
-        py_freevars[i] = getPointer<PyObject *>(localsplus, nlocals + i, useName("$cell.", name));
+        py_freevars[i] = getPointer<PyObject *>(localsplus, start_cells + i, useName("$cell.", name));
     }
     for (auto i : Range(nfrees)) {
         auto name = PyTuple_GET_ITEM(code->co_freevars, i);
-        py_freevars[ncells + i] = getPointer<PyObject *>(localsplus, nlocals + ncells + i, useName("$free.", name));
+        py_freevars[ncells + i] = getPointer<PyObject *>(localsplus, start_frees + i, useName("$free.", name));
     }
-
-    py_stack.reserve(code->co_stacksize);
-    auto stack_space = builder.CreateAlloca(types.get<PyObject *>(),
-            asValue(code->co_stacksize),
-            useName("$stack")
-    );
-    for (auto i : Range(code->co_stacksize)) {
-        py_stack[i] = getPointer<PyObject *>(stack_space, i, useName("$stack.", i));
+    py_stack.reserve(nstack);
+    for (auto i : Range(nstack)) {
+        py_stack[i] = getPointer<PyObject *>(localsplus, start_stack + i, useName("$stack.", i));
     }
-    stack_height_value = builder.CreateAlloca(types.get<decltype(stack_height)>());
+    rt_stack_height_pointer = getPointer(simple_frame, &SimplePyFrame::stack_height, "$stack_height");
 
     for (auto &i : Range(block_num - 1, 1U)) {
         emitBlock(i);
     }
 
-
-    unwind_block->insertInto(func);
-    builder.SetInsertPoint(unwind_block);
-    auto sp = builder.CreateLoad(types.get<size_t>(), stack_height_value);
-    auto b_check_empty = createBlock(useName("check_stack_empty"), func);
-    builder.CreateBr(b_check_empty);
-
-    builder.SetInsertPoint(b_check_empty);
-    auto phi_node = builder.CreatePHI(sp->getType(), 2);
-    phi_node->addIncoming(sp, unwind_block);
-    auto stack_is_empty = builder.CreateICmpEQ(phi_node, ConstantInt::get(types.get<size_t>(), 0));
-    auto b_pop_stack = createBlock(useName("pop_stack"), func);
-    auto end_block = createBlock(useName("return_error"), func);
-    builder.CreateCondBr(stack_is_empty, end_block, b_pop_stack);
-
-    builder.SetInsertPoint(b_pop_stack);
-    auto new_sp = builder.CreateSub(sp, ConstantInt::get(types.get<size_t>(), 1));
-    auto obj_ref = builder.CreateInBoundsGEP(types.get<PyObject *>(), py_stack[0], new_sp);
-    auto obj = builder.CreateLoad(types.get<PyObject *>(), obj_ref);
-    do_Py_DECREF(obj);
-    phi_node->addIncoming(new_sp, b_pop_stack);
-    builder.CreateBr(b_check_empty);
-
-    builder.SetInsertPoint(end_block);
-    builder.CreateRet(c_null);
-
     builder.SetInsertPoint(blocks[0].llvm_block);
     builder.CreateBr(blocks[1].llvm_block);
+    unwind_block->insertInto(func);
+    builder.SetInsertPoint(unwind_block);
+    builder.CreateRet(c_null);
 
     auto result = compiler(mod);
 
@@ -222,13 +201,13 @@ void Translator::do_SETLOCAL(PyOparg oparg, llvm::Value *value, bool check_null)
 
 llvm::Value *Translator::do_POP() {
     auto value = builder.CreateLoad(types.get<PyObject *>(), py_stack[--stack_height]);
-    builder.CreateStore(asValue(stack_height), stack_height_value);
+    builder.CreateStore(asValue(stack_height), rt_stack_height_pointer);
     return value;
 }
 
 void Translator::do_PUSH(llvm::Value *value) {
     builder.CreateStore(value, py_stack[stack_height++]);
-    builder.CreateStore(asValue(stack_height), stack_height_value);
+    builder.CreateStore(asValue(stack_height), rt_stack_height_pointer);
 }
 
 
@@ -334,9 +313,14 @@ void Translator::emitBlock(unsigned index) {
         case LOAD_FAST: {
             auto value = do_GETLOCAL(instr.oparg);
             auto is_not_null = builder.CreateICmpNE(value, c_null);
-            auto bb = createBlock("LOAD_FAST.OK");
-            builder.CreateCondBr(is_not_null, bb, unwind_block, likely_true);
-            builder.SetInsertPoint(bb);
+            auto ok_block = createBlock("LOAD_FAST.OK");
+            auto err_block = createBlock("LOAD_FAST.ERR");
+            builder.CreateCondBr(is_not_null, ok_block, err_block, likely_true);
+            builder.SetInsertPoint(err_block);
+            do_CallSymbol<handleError_LOAD_FAST, &Translator::attr_inaccessible_noreturn>(
+                    simple_frame, asValue(instr.oparg));
+            builder.CreateUnreachable();
+            builder.SetInsertPoint(ok_block);
             do_Py_INCREF(value);
             do_PUSH(value);
             break;
@@ -474,9 +458,11 @@ void Translator::emitBlock(unsigned index) {
         case DELETE_FAST: {
             auto value = do_GETLOCAL(instr.oparg);
             auto is_not_null = builder.CreateICmpNE(value, c_null);
-            auto bb = createBlock("DELETE_FAST.OK");
-            builder.CreateCondBr(is_not_null, bb, unwind_block, likely_true);
-            do_SETLOCAL(instr.oparg, c_null, false);
+            auto ok_block = createBlock("DELETE_FAST.OK");
+            builder.CreateCondBr(is_not_null, ok_block, unwind_block, likely_true);
+            builder.SetInsertPoint(ok_block);
+            builder.CreateStore(c_null, py_locals[instr.oparg]);
+            do_Py_DECREF(value);
             break;
         }
         case DELETE_DEREF: {

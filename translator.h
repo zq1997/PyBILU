@@ -65,6 +65,7 @@ class Translator {
     )};
     llvm::Argument *simple_frame{func->getArg(1)};
     llvm::MDNode *likely_true{llvm::MDBuilder(context).createBranchWeights(INT32_MAX, 0)};
+    llvm::AttributeList attr_inaccessible_noreturn{};
     llvm::AttributeList attr_inaccessible_only{};
     llvm::AttributeList attr_inaccessible_or_arg{};
 
@@ -79,10 +80,10 @@ class Translator {
     DynamicArray<llvm::Value *> py_freevars;
     DynamicArray<llvm::Value *> py_stack;
     llvm::Value *py_symbols[external_symbol_count]{};
-    llvm::BasicBlock *unwind_block{}; // TODO: lazy
+    llvm::BasicBlock *unwind_block{};
 
     llvm::Constant *c_null{llvm::ConstantPointerNull::get(types.get<void *>())};
-    llvm::Value *stack_height_value{};
+    llvm::Value *rt_stack_height_pointer{};
     size_t stack_height{};
 
 
