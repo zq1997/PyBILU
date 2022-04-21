@@ -64,7 +64,11 @@ class Translator {
             LLVMType<TranslatedFunctionType>(context), llvm::Function::ExternalLinkage, "singleton_function", &mod
     )};
     llvm::Argument *simple_frame{func->getArg(1)};
-    llvm::MDNode *likely_true{llvm::MDBuilder(context).createBranchWeights(INT32_MAX, 0)};
+    llvm::MDNode *likely_true{};
+    llvm::MDNode *tbaa_refcnt{};
+    llvm::MDNode *tbaa_frame_slot{};
+    llvm::MDNode *tbaa_code_const{};
+    llvm::MDNode *tbaa_sp{};
     llvm::AttributeList attr_inaccessible_noreturn{};
     llvm::AttributeList attr_inaccessible_only{};
     llvm::AttributeList attr_inaccessible_or_arg{};
@@ -198,8 +202,9 @@ class Translator {
         do_Py_DECREF(left);
         do_Py_DECREF(right);
         auto is_not_null = builder.CreateICmpNE(res, c_null);
+        builder.CreateAssumption(is_not_null);
         auto bb = createBlock("BINARY.OK");
-        builder.CreateCondBr(is_not_null, bb, unwind_block, likely_true);
+        builder.CreateCondBr(is_not_null, bb, unwind_block);
         builder.SetInsertPoint(bb);
         do_PUSH(res);
     }

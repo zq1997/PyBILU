@@ -9,7 +9,23 @@
 using namespace std;
 using namespace llvm;
 
+static auto createTBAANode(MDBuilder &builder, MDNode *root, const char *name) {
+    if constexpr(!debug_build) {
+        name = "";
+    }
+    auto scalar_node = builder.createTBAANode(name, root);
+    return builder.createTBAAStructTagNode(scalar_node, scalar_node, 0);
+}
+
 Translator::Translator() {
+    auto md_builder = MDBuilder(context);
+    likely_true = md_builder.createBranchWeights(INT32_MAX, 0);
+    auto tbaa_root = md_builder.createTBAARoot("TBAA root for CPython");
+    tbaa_refcnt = createTBAANode(md_builder, tbaa_root, "refcnt");
+    tbaa_frame_slot = createTBAANode(md_builder, tbaa_root, "frame slot");
+    tbaa_code_const = createTBAANode(md_builder, tbaa_root, "code const");
+    tbaa_sp = createTBAANode(md_builder, tbaa_root, "stack pointer");
+
     auto attr_builder = AttrBuilder(context);
     attr_builder
             .addAttribute(Attribute::NoReturn);
@@ -163,14 +179,17 @@ void Translator::do_Py_INCREF(Value *py_obj) {
     auto *const_1 = asValue(decltype(PyObject::ob_refcnt){1});
     auto ref = getPointer(py_obj, &PyObject::ob_refcnt);
     auto old_value = builder.CreateLoad(const_1->getType(), ref);
-    builder.CreateStore(builder.CreateAdd(old_value, const_1), ref);
+    old_value->setMetadata(LLVMContext::MD_tbaa, tbaa_refcnt);
+    auto store_inst = builder.CreateStore(builder.CreateAdd(old_value, const_1), ref);
+    store_inst->setMetadata(LLVMContext::MD_tbaa, tbaa_refcnt);
 }
 
 void Translator::do_Py_DECREF(Value *py_obj) {
     auto *const_1 = asValue(decltype(PyObject::ob_refcnt){1});
     auto ref = getPointer(py_obj, &PyObject::ob_refcnt);
     auto old_value = builder.CreateLoad(const_1->getType(), ref);
-    builder.CreateStore(builder.CreateSub(old_value, const_1), ref);
+    old_value->setMetadata(LLVMContext::MD_tbaa, tbaa_refcnt);
+    builder.CreateStore(builder.CreateSub(old_value, const_1), ref)->setMetadata(LLVMContext::MD_tbaa, tbaa_refcnt);
 }
 
 void Translator::do_Py_XDECREF(Value *py_obj) {
@@ -186,12 +205,15 @@ void Translator::do_Py_XDECREF(Value *py_obj) {
 
 Value *Translator::do_GETLOCAL(PyOparg oparg) {
     auto varname = PyTuple_GET_ITEM(py_code->co_varnames, oparg);
-    return builder.CreateLoad(types.get<PyObject *>(), py_locals[oparg], useName(varname));
+    auto value = builder.CreateLoad(types.get<PyObject *>(), py_locals[oparg], useName(varname));
+    value->setMetadata(LLVMContext::MD_tbaa, tbaa_frame_slot);
+    return value;
 }
 
 void Translator::do_SETLOCAL(PyOparg oparg, llvm::Value *value, bool check_null) {
     auto old_value = do_GETLOCAL(oparg);
-    builder.CreateStore(value, py_locals[oparg]);
+    auto store_inst = builder.CreateStore(value, py_locals[oparg]);
+    store_inst->setMetadata(LLVMContext::MD_tbaa, tbaa_frame_slot);
     if (check_null) {
         do_Py_XDECREF(old_value);
     } else {
@@ -201,13 +223,14 @@ void Translator::do_SETLOCAL(PyOparg oparg, llvm::Value *value, bool check_null)
 
 llvm::Value *Translator::do_POP() {
     auto value = builder.CreateLoad(types.get<PyObject *>(), py_stack[--stack_height]);
-    builder.CreateStore(asValue(stack_height), rt_stack_height_pointer);
+    value->setMetadata(LLVMContext::MD_tbaa, tbaa_frame_slot);
+    builder.CreateStore(asValue(stack_height), rt_stack_height_pointer)->setMetadata(LLVMContext::MD_tbaa, tbaa_sp);
     return value;
 }
 
 void Translator::do_PUSH(llvm::Value *value) {
-    builder.CreateStore(value, py_stack[stack_height++]);
-    builder.CreateStore(asValue(stack_height), rt_stack_height_pointer);
+    builder.CreateStore(value, py_stack[stack_height++])->setMetadata(LLVMContext::MD_tbaa, tbaa_frame_slot);
+    builder.CreateStore(asValue(stack_height), rt_stack_height_pointer)->setMetadata(LLVMContext::MD_tbaa, tbaa_sp);
 }
 
 
@@ -306,6 +329,9 @@ void Translator::emitBlock(unsigned index) {
         }
         case LOAD_CONST: {
             auto value = builder.CreateLoad(types.get<PyObject *>(), py_consts[instr.oparg]);
+            value->setMetadata(LLVMContext::MD_tbaa, tbaa_code_const);
+            // auto is_not_null = builder.CreateICmpNE(value, c_null);
+            // builder.CreateAssumption(is_not_null);
             do_Py_INCREF(value);
             do_PUSH(value);
             break;
@@ -461,7 +487,7 @@ void Translator::emitBlock(unsigned index) {
             auto ok_block = createBlock("DELETE_FAST.OK");
             builder.CreateCondBr(is_not_null, ok_block, unwind_block, likely_true);
             builder.SetInsertPoint(ok_block);
-            builder.CreateStore(c_null, py_locals[instr.oparg]);
+            builder.CreateStore(c_null, py_locals[instr.oparg])->setMetadata(LLVMContext::MD_tbaa, tbaa_frame_slot);
             do_Py_DECREF(value);
             break;
         }
