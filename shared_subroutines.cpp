@@ -1,7 +1,5 @@
 #include "shared_symbols.h"
 
-#define Py_BUILD_CORE
-
 #include <internal/pycore_code.h>
 #include <internal/pycore_pyerrors.h>
 

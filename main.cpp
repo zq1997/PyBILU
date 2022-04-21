@@ -4,6 +4,7 @@ using namespace std;
 
 #include <Python.h>
 #include <frameobject.h>
+#include <internal/pycore_pyerrors.h>
 
 #include "translator.h"
 
@@ -47,6 +48,9 @@ PyObject *eval_func(PyThreadState *tstate, PyFrameObject *frame, int throwflag) 
     if (!setjmp(simple_frame.the_jmp_buf)) {
         return jit_callee(&symbol_addresses[0], &simple_frame);
     } else {
+        assert(_PyErr_Occurred(tstate));
+        // frame->f_lasti = 2;
+        PyTraceBack_Here(frame);
         auto nlocals = frame->f_code->co_nlocals;
         auto ncells = PyTuple_GET_SIZE(frame->f_code->co_cellvars);
         auto nfrees = PyTuple_GET_SIZE(frame->f_code->co_freevars);
@@ -82,7 +86,7 @@ PyObject *apply(PyObject *, PyObject *maybe_func) {
 PyMODINIT_FUNC PyInit_pynic() {
     try {
         compiler = make_unique<Compiler>();
-        translator = make_unique<Translator>();
+        translator = make_unique<Translator>(compiler->createDataLayout());
     } catch (runtime_error &err) {
         PyErr_SetString(PyExc_RuntimeError, err.what());
         return nullptr;

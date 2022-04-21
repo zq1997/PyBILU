@@ -8,6 +8,7 @@
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/Function.h>
 #include <llvm/IR/BasicBlock.h>
+#include <llvm/IR/DataLayout.h>
 
 
 struct SimplePyFrame {
@@ -169,18 +170,12 @@ constexpr auto Normalizer() {
     }
 }
 
-template <typename T>
-struct LLVMTypeImpl {
-private:
-    template <typename Ret, typename... Args>
-    static auto createTypeForFunction(llvm::LLVMContext &context, TypeWrapper<Ret(Args...)>) {
-        return llvm::FunctionType::get(
-                LLVMTypeImpl<Ret>(context),
-                {LLVMTypeImpl<Args>(context)...},
-                false
-        );
-    }
+template <typename T, typename = void>
+struct LLVMTypeImpl;
 
+template <typename T>
+struct LLVMTypeImpl<T, std::enable_if_t<!std::is_function_v<T>>> {
+public:
     static auto createType(llvm::LLVMContext &context) {
         if constexpr(std::is_void<T>::value) {
             return llvm::Type::getVoidTy(context);
@@ -194,18 +189,32 @@ private:
         if constexpr(std::is_pointer_v<T>) {
             return llvm::PointerType::getUnqual(context);
         }
-        if constexpr(std::is_function_v<T>) {
-            return createTypeForFunction(context, TypeWrapper<T>{});
-        }
     }
 
-public:
-    using DataType = std::invoke_result_t<decltype(createType), llvm::LLVMContext &>;
-    DataType const data;
-public:
-    explicit LLVMTypeImpl(llvm::LLVMContext &context) : data(createType(context)) {}
+    std::invoke_result_t<decltype(createType), llvm::LLVMContext &> type;
+    llvm::Align align;
 
-    operator DataType() const { return data; }
+    LLVMTypeImpl(llvm::LLVMContext &context, const llvm::DataLayout &dl) :
+            type{createType(context)}, align{dl.getABITypeAlign(type)} {}
+};
+
+template <typename T>
+struct LLVMTypeImpl<T, std::enable_if_t<std::is_function_v<T>>> {
+public:
+    template <typename Ret, typename... Args>
+    static auto createType(llvm::LLVMContext &context, TypeWrapper<Ret(Args...)>) {
+        return llvm::FunctionType::get(
+                LLVMTypeImpl<Ret>::createType(context),
+                {LLVMTypeImpl<Args>::createType(context)...},
+                false
+        );
+    }
+
+    llvm::FunctionType *type;
+
+    explicit LLVMTypeImpl(llvm::LLVMContext &context) : type{createType(context, TypeWrapper<T>{})} {}
+
+    LLVMTypeImpl(llvm::LLVMContext &context, const llvm::DataLayout &dl) : LLVMTypeImpl{context} {}
 };
 
 template <typename T>
@@ -252,10 +261,14 @@ class RegisteredLLVMTypes {
     filtered_types::type data;
 
 public:
-    explicit RegisteredLLVMTypes(llvm::LLVMContext &context) : data{filtered_types::create(context)} {}
+    template <typename... Args>
+    explicit RegisteredLLVMTypes(Args &&... args) : data{filtered_types::create(std::forward<Args>(args)...)} {}
 
     template <typename T>
-    [[nodiscard]] typename LLVMType<T>::DataType get() const { return std::get<LLVMType<T>>(data); }
+    [[nodiscard]] auto get() const { return std::get<LLVMType<T>>(data).type; }
+
+    template <typename T>
+    [[nodiscard]] auto getAll() const { return std::get<LLVMType<T>>(data); }
 };
 
 #endif

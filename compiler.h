@@ -30,6 +30,8 @@ public:
     Compiler();
 
     void *operator()(llvm::Module &mod);
+
+    auto createDataLayout() { return machine->createDataLayout(); }
 };
 
 #endif

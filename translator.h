@@ -56,12 +56,14 @@ struct PyBasicBlock {
 class Translator {
     friend class WrappedValue;
 
+    const llvm::DataLayout &data_layout;
     llvm::LLVMContext context{};
-    RegisteredLLVMTypes types{(context.enableOpaquePointers(), context)};
+    const RegisteredLLVMTypes types{(context.enableOpaquePointers(), context), data_layout};
     llvm::IRBuilder<> builder{context};
     llvm::Module mod{"singleton_module", context};
     llvm::Function *func{llvm::Function::Create(
-            LLVMType<TranslatedFunctionType>(context), llvm::Function::ExternalLinkage, "singleton_function", &mod
+            LLVMType<TranslatedFunctionType>(context).type,
+            llvm::Function::ExternalLinkage, "singleton_function", &mod
     )};
     llvm::Argument *simple_frame{func->getArg(1)};
     llvm::MDNode *likely_true{};
@@ -127,6 +129,34 @@ class Translator {
         return getPointer(instance, offset, name);
     }
 
+    auto loadValue(llvm::Type *type, llvm::Align align,
+            llvm::Value *ptr, llvm::MDNode *tbaa_node, const llvm::Twine &name = "") {
+        auto load_inst = new llvm::LoadInst(type, ptr, name, false, align);
+        builder.Insert(load_inst, name);
+        load_inst = builder.CreateLoad(type, ptr, name);
+        load_inst->setMetadata(llvm::LLVMContext::MD_tbaa, tbaa_node);
+        return load_inst;
+    }
+
+    void storeValue(llvm::Value *value, llvm::Align align,
+            llvm::Value *ptr, llvm::MDNode *tbaa_node) {
+        auto store_inst = new llvm::StoreInst(value, ptr, false, align);
+        builder.Insert(store_inst, "");
+        store_inst->setMetadata(llvm::LLVMContext::MD_tbaa, tbaa_node);
+    }
+
+    template <typename T>
+    auto loadValue(llvm::Value *ptr, llvm::MDNode *tbaa_node, const llvm::Twine &name = "") {
+        auto type = types.getAll<T>();
+        return loadValue(type.type, type.align, ptr, tbaa_node, name);
+    }
+
+    template <typename T>
+    auto storeValue(llvm::Value *value, llvm::Value *ptr, llvm::MDNode *tbaa_node) {
+        auto type = types.getAll<T>();
+        return storeValue(value, type.align, ptr, tbaa_node);
+    }
+
     template <typename T>
     auto readData(llvm::Value *base, size_t index, const llvm::Twine &name = "") {
         return builder.CreateLoad(types.get<T>(), getPointer<T>(base, index), name);
@@ -152,7 +182,7 @@ class Translator {
     void parseCFG();
     void emitBlock(unsigned index);
     llvm::Value *do_GETLOCAL(PyOparg oparg);
-    void do_SETLOCAL(PyOparg oparg, llvm::Value *value, bool check_null = true);
+    void do_SETLOCAL(PyOparg oparg, llvm::Value *value);
     llvm::Value *do_POP();
     void do_PUSH(llvm::Value *value);
 
@@ -225,7 +255,7 @@ class Translator {
     }
 
 public:
-    Translator();
+    explicit Translator(const llvm::DataLayout &dl);
 
     void *operator()(Compiler &compiler, PyCodeObject *code);
 };

@@ -99,8 +99,6 @@ void *Compiler::operator()(llvm::Module &mod) {
     opt_MAM.clear();
     debug.dump(".opt.ll", mod);
 
-    // TODO: module创建时候给它machine
-    mod.setDataLayout(machine->createDataLayout());
     out_PM.run(mod);
     debug.dump(".o", out_vec.data(), out_vec.size());
 
