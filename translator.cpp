@@ -10,9 +10,10 @@ using namespace std;
 using namespace llvm;
 
 static auto createTBAANode(MDBuilder &builder, MDNode *root, const char *name, bool is_const = false) {
-    if constexpr(!debug_build) {
-        name = "";
-    }
+    // TODO: 为啥name为空就会被合并
+    // if constexpr(!debug_build) {
+    //     name = "";
+    // }
     auto scalar_node = builder.createTBAANode(name, root);
     return builder.createTBAAStructTagNode(scalar_node, scalar_node, 0, is_const);
 }
@@ -73,7 +74,13 @@ void *Translator::operator()(Compiler &compiler, PyCodeObject *code) {
     auto consts = readData(simple_frame, &SimplePyFrame::consts, useName("$consts"));
     py_consts.reserve(PyTuple_GET_SIZE(code->co_consts));
     for (auto i : Range(PyTuple_GET_SIZE(code->co_consts))) {
-        py_consts[i] = getPointer<PyObject *>(consts, i, useName("$const.", i));
+        // TODO: 也合并
+        auto ptr = getPointer<PyObject *>(consts, i, useName("$const.", i));
+        PyObject *repr = nullptr;
+        if constexpr(debug_build) {
+            repr = PyObject_Repr(PyTuple_GET_ITEM(code->co_consts, i));
+        }
+        py_consts[i] = loadValue<PyObject *>(ptr, tbaa_code_const, useName(repr));
     }
 
     auto localsplus = readData(simple_frame, &SimplePyFrame::localsplus, useName("$localsplus"));
@@ -321,8 +328,7 @@ void Translator::emitBlock(unsigned index) {
         }
         case LOAD_CONST: {
             // TODO: non null
-            // TODO: const repre
-            auto value = loadValue<PyObject *>(py_consts[instr.oparg], tbaa_code_const);
+            auto value = py_consts[instr.oparg];
             // auto is_not_null = builder.CreateICmpNE(value, c_null);
             // builder.CreateAssumption(is_not_null);
             do_Py_INCREF(value);
@@ -867,8 +873,11 @@ llvm::Value *Translator::getSymbol(size_t i) {
         if constexpr (debug_build) {
             name = symbol_names[i];
         }
-        symbol = getPointer<FunctionPointer>(func->getArg(0), i, useName("$symbol.", name));
+        //TODO: 重命名或者两个tbaa
+        // TODO: 合并为READ
+        auto ptr = getPointer<FunctionPointer>(func->getArg(0), i, useName("$symbol.", i));
+        symbol = loadValue<FunctionPointer>(ptr, tbaa_code_const, useName("$symbol.", name));
         builder.SetInsertPoint(block);
     }
-    return builder.CreateLoad(types.get<FunctionPointer>(), symbol);
+    return symbol;
 }

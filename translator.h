@@ -46,8 +46,6 @@ auto useName(const T &arg, const Ts &... more) {
     }
 }
 
-using TranslatedFunctionType = PyObject *(const FunctionPointer *, SimplePyFrame *);
-
 struct PyBasicBlock {
     unsigned end;
     llvm::BasicBlock *llvm_block;
@@ -62,7 +60,7 @@ class Translator {
     llvm::IRBuilder<> builder{context};
     llvm::Module mod{"singleton_module", context};
     llvm::Function *func{llvm::Function::Create(
-            LLVMType<TranslatedFunctionType>(context).type,
+            types.get<TranslatedFunctionType>(),
             llvm::Function::ExternalLinkage, "singleton_function", &mod
     )};
     llvm::Argument *simple_frame{func->getArg(1)};
@@ -129,32 +127,21 @@ class Translator {
         return getPointer(instance, offset, name);
     }
 
-    auto loadValue(llvm::Type *type, llvm::Align align,
-            llvm::Value *ptr, llvm::MDNode *tbaa_node, const llvm::Twine &name = "") {
-        auto load_inst = new llvm::LoadInst(type, ptr, name, false, align);
+    template <typename T>
+    auto loadValue(llvm::Value *ptr, llvm::MDNode *tbaa_node, const llvm::Twine &name = "") {
+        auto type = types.getAll<T>();
+        auto load_inst = new llvm::LoadInst(type.type, ptr, name, false, type.align);
         builder.Insert(load_inst, name);
-        load_inst = builder.CreateLoad(type, ptr, name);
         load_inst->setMetadata(llvm::LLVMContext::MD_tbaa, tbaa_node);
         return load_inst;
     }
 
-    void storeValue(llvm::Value *value, llvm::Align align,
-            llvm::Value *ptr, llvm::MDNode *tbaa_node) {
-        auto store_inst = new llvm::StoreInst(value, ptr, false, align);
-        builder.Insert(store_inst, "");
+    template <typename T>
+    void storeValue(llvm::Value *value, llvm::Value *ptr, llvm::MDNode *tbaa_node) {
+        auto type = types.getAll<T>();
+        auto store_inst = new llvm::StoreInst(value, ptr, false, type.align);
+        builder.Insert(store_inst);
         store_inst->setMetadata(llvm::LLVMContext::MD_tbaa, tbaa_node);
-    }
-
-    template <typename T>
-    auto loadValue(llvm::Value *ptr, llvm::MDNode *tbaa_node, const llvm::Twine &name = "") {
-        auto type = types.getAll<T>();
-        return loadValue(type.type, type.align, ptr, tbaa_node, name);
-    }
-
-    template <typename T>
-    auto storeValue(llvm::Value *value, llvm::Value *ptr, llvm::MDNode *tbaa_node) {
-        auto type = types.getAll<T>();
-        return storeValue(value, type.align, ptr, tbaa_node);
     }
 
     template <typename T>

@@ -10,7 +10,6 @@
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/DataLayout.h>
 
-
 struct SimplePyFrame {
     int stack_height;
     PyObject **consts;
@@ -127,6 +126,7 @@ constexpr auto searchSymbol() {
 using FunctionPointer = void (*)();
 extern const std::array<const char *, external_symbol_count> symbol_names;
 extern const std::array<FunctionPointer, external_symbol_count> symbol_addresses;
+using TranslatedFunctionType = PyObject *(const FunctionPointer *, SimplePyFrame *);
 
 template <typename T>
 struct TypeWrapper {
@@ -170,56 +170,6 @@ constexpr auto Normalizer() {
     }
 }
 
-template <typename T, typename = void>
-struct LLVMTypeImpl;
-
-template <typename T>
-struct LLVMTypeImpl<T, std::enable_if_t<!std::is_function_v<T>>> {
-public:
-    static auto createType(llvm::LLVMContext &context) {
-        if constexpr(std::is_void<T>::value) {
-            return llvm::Type::getVoidTy(context);
-        }
-        if constexpr(std::is_integral_v<T>) {
-            return llvm::Type::getIntNTy(context, CHAR_BIT * sizeof(T));
-        }
-        if constexpr(std::is_same_v<T, double>) {
-            return llvm::Type::getDoubleTy(context);
-        }
-        if constexpr(std::is_pointer_v<T>) {
-            return llvm::PointerType::getUnqual(context);
-        }
-    }
-
-    std::invoke_result_t<decltype(createType), llvm::LLVMContext &> type;
-    llvm::Align align;
-
-    LLVMTypeImpl(llvm::LLVMContext &context, const llvm::DataLayout &dl) :
-            type{createType(context)}, align{dl.getABITypeAlign(type)} {}
-};
-
-template <typename T>
-struct LLVMTypeImpl<T, std::enable_if_t<std::is_function_v<T>>> {
-public:
-    template <typename Ret, typename... Args>
-    static auto createType(llvm::LLVMContext &context, TypeWrapper<Ret(Args...)>) {
-        return llvm::FunctionType::get(
-                LLVMTypeImpl<Ret>::createType(context),
-                {LLVMTypeImpl<Args>::createType(context)...},
-                false
-        );
-    }
-
-    llvm::FunctionType *type;
-
-    explicit LLVMTypeImpl(llvm::LLVMContext &context) : type{createType(context, TypeWrapper<T>{})} {}
-
-    LLVMTypeImpl(llvm::LLVMContext &context, const llvm::DataLayout &dl) : LLVMTypeImpl{context} {}
-};
-
-template <typename T>
-using LLVMType = LLVMTypeImpl<NormalizedType<T>>;
-
 template <typename...>
 struct TypeFilter;
 
@@ -240,35 +190,81 @@ struct TypeFilter<std::tuple<Ts...>, T, Us...> : std::conditional_t<(
         TypeFilter<std::tuple<Ts..., T>, Us...>> {
 };
 
+template <typename T>
+static auto createType(llvm::LLVMContext &context) {
+    if constexpr(std::is_void<T>::value) {
+        return llvm::Type::getVoidTy(context);
+    }
+    if constexpr(std::is_integral_v<T>) {
+        return llvm::Type::getIntNTy(context, CHAR_BIT * sizeof(T));
+    }
+    if constexpr(std::is_same_v<T, double>) {
+        return llvm::Type::getDoubleTy(context);
+    }
+    if constexpr(std::is_pointer_v<T>) {
+        return llvm::PointerType::getUnqual(context);
+    }
+}
+
+template <typename Ret, typename... Args>
+static auto createType(llvm::LLVMContext &context, TypeWrapper<Ret(Args...)>) {
+    return llvm::FunctionType::get(
+            createType<Ret>(context),
+            {createType<Args>(context)...},
+            false
+    );
+}
+
 class RegisteredLLVMTypes {
+    template <typename T, typename = void>
+    struct LLVMType;
+
+    template <typename T>
+    struct LLVMType<T, std::enable_if_t<!std::is_function_v<T>>> {
+        decltype(createType<T>(std::declval<llvm::LLVMContext &>())) type;
+        llvm::Align align;
+
+        LLVMType(llvm::LLVMContext &context, const llvm::DataLayout &dl) :
+                type{createType<T>(context)}, align{dl.getABITypeAlign(type)} {}
+    };
+
+    template <typename T>
+    struct LLVMType<T, std::enable_if_t<std::is_function_v<T>>> {
+        llvm::FunctionType *type{};
+
+        LLVMType(llvm::LLVMContext &context, const llvm::DataLayout &dl) : type{createType(context, TypeWrapper<T>{})} {}
+    };
+
+    template <typename T>
+    using NormalizedLLVMType = LLVMType<NormalizedType<T>>;
+
     template <typename...>
     struct TypeFilterHelper;
-
     template <typename... A, typename... B, typename ...C>
     struct TypeFilterHelper<std::tuple<A...>, const std::tuple<B...>, C...> : TypeFilter<
             std::tuple<>,
-            LLVMType<A>...,
-            LLVMType<std::remove_pointer_t<typename B::first_type>>...,
-            LLVMType<std::remove_pointer_t<C>>...
-    > {
+            NormalizedLLVMType<A>...,
+            NormalizedLLVMType<std::remove_pointer_t<typename B::first_type>>...,
+            NormalizedLLVMType<std::remove_pointer_t<C>>...,
+            NormalizedLLVMType<TranslatedFunctionType>> {
     };
-
-    using filtered_types = TypeFilterHelper<
+    using FilteredTypes = TypeFilterHelper<
             std::tuple<void *, char, short, int, long, long long>,
             decltype(external_symbols),
             decltype(PyTypeObject::tp_iternext)
     >;
-    filtered_types::type data;
+
+    FilteredTypes::type data;
 
 public:
     template <typename... Args>
-    explicit RegisteredLLVMTypes(Args &&... args) : data{filtered_types::create(std::forward<Args>(args)...)} {}
+    explicit RegisteredLLVMTypes(Args &&... args) : data{FilteredTypes::create(std::forward<Args>(args)...)} {}
 
     template <typename T>
-    [[nodiscard]] auto get() const { return std::get<LLVMType<T>>(data).type; }
+    [[nodiscard]] auto get() const { return std::get<NormalizedLLVMType<T>>(data).type; }
 
     template <typename T>
-    [[nodiscard]] auto getAll() const { return std::get<LLVMType<T>>(data); }
+    [[nodiscard]] auto getAll() const { return std::get<NormalizedLLVMType<T>>(data); }
 };
 
 #endif

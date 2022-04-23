@@ -70,8 +70,10 @@ l = [1, 2]
 @pynic.apply
 def foo():
     a = 1
-    del a
-    return a
+    b = 2
+    c = 2
+    d = a + b * 2 - c // 4
+    return d
 
 
 print(foo())
