@@ -1,9 +1,17 @@
 #include "shared_symbols.h"
 
+#include <Python.h>
+#include <frameobject.h>
 #include <internal/pycore_code.h>
 #include <internal/pycore_pyerrors.h>
 
 // TODO: 在想，能不能设计俩版本，decref在这里实现
+
+[[noreturn]] static void gotoErrorHandler() {
+    auto tstate = PyThreadState_Get();
+    auto cframe = static_cast<ExtendedCFrame &>(*tstate->cframe);
+    longjmp(cframe.frame_jmp_buf, 1);
+}
 
 static void raiseUndefinedName(PyThreadState *tstate, PyObject *name,
         const char *format_str = "name '%.200s' is not defined") {
@@ -36,25 +44,28 @@ static void raiseUndefinedFree(PyThreadState *tstate, PyObject *name) {
     raiseUndefinedName(tstate, name, "free variable '%.200s' referenced before assignment in enclosing scope");
 }
 
-static void raiseUndefinedFreeOrCell(SimplePyFrame *f, PyOparg oparg) {
-    if (oparg < PyTuple_GET_SIZE(f->code->co_cellvars)) {
-        raiseUndefinedLocal(f->tstate, PyTuple_GET_ITEM(f->code->co_cellvars, oparg));
+static void raiseUndefinedFreeOrCell(PyFrameObject *f, PyOparg oparg) {
+    auto tstate = PyThreadState_Get();
+    if (oparg < PyTuple_GET_SIZE(f->f_code->co_cellvars)) {
+        raiseUndefinedLocal(tstate, PyTuple_GET_ITEM(f->f_code->co_cellvars, oparg));
     } else {
-        auto name = PyTuple_GET_ITEM(f->code->co_freevars, oparg - PyTuple_GET_SIZE(f->code->co_cellvars));
-        raiseUndefinedName(f->tstate, name);
+        auto name = PyTuple_GET_ITEM(f->f_code->co_freevars, oparg - PyTuple_GET_SIZE(f->f_code->co_cellvars));
+        raiseUndefinedFree(tstate, name);
     }
 }
 
-void handleError_LOAD_FAST(SimplePyFrame *f, PyOparg oparg) {
-    auto name = PyTuple_GET_ITEM(f->code->co_varnames, oparg);
-    raiseUndefinedLocal(f->tstate, name);
-    longjmp(f->the_jmp_buf, 1);
+void handleError_LOAD_FAST(PyFrameObject *f, PyOparg oparg) {
+    auto tstate = PyThreadState_Get();
+    auto name = PyTuple_GET_ITEM(f->f_code->co_varnames, oparg);
+    raiseUndefinedLocal(tstate, name);
+    gotoErrorHandler();
 }
 
-PyObject *handle_LOAD_CLASSDEREF(SimplePyFrame *f, PyOparg oparg) {
-    auto locals = f->locals;
+PyObject *handle_LOAD_CLASSDEREF(PyFrameObject *f, PyOparg oparg) {
+    auto tstate = PyThreadState_Get(); // TODO: 延迟获取
+    auto locals = f->f_locals;
     assert(locals);
-    auto co = f->code;
+    auto co = f->f_code;
     auto free_index = oparg - PyTuple_GET_SIZE(co->co_cellvars);
     assert(free_index >= 0 && free_index < PyTuple_GET_SIZE(co->co_freevars));
     auto name = PyTuple_GET_ITEM(co->co_freevars, free_index);
@@ -63,7 +74,7 @@ PyObject *handle_LOAD_CLASSDEREF(SimplePyFrame *f, PyOparg oparg) {
         if (value) {
             Py_INCREF(value);
             return value;
-        } else if (_PyErr_Occurred(f->tstate)) {
+        } else if (_PyErr_Occurred(tstate)) {
             return nullptr;
         }
     } else {
@@ -71,18 +82,18 @@ PyObject *handle_LOAD_CLASSDEREF(SimplePyFrame *f, PyOparg oparg) {
         if (value) {
             return value;
         } else {
-            if (!_PyErr_ExceptionMatches(f->tstate, PyExc_KeyError)) {
+            if (!_PyErr_ExceptionMatches(tstate, PyExc_KeyError)) {
                 return nullptr;
             }
-            _PyErr_Clear(f->tstate);
+            _PyErr_Clear(tstate);
         }
     }
-    auto value = PyCell_GET(f->localsplus[f->code->co_nlocals + oparg]);
+    auto value = PyCell_GET(f->f_localsplus[f->f_code->co_nlocals + oparg]);
     if (value) {
         Py_INCREF(value);
         return value;
     }
-    raiseUndefinedFree(f->tstate, name);
+    raiseUndefinedFree(tstate, name);
     return nullptr;
 }
 
@@ -94,34 +105,35 @@ static Py_hash_t getHash(PyObject *name) {
     return hash;
 }
 
-static PyObject *loadGlobalOrBuiltin(SimplePyFrame *f, PyObject *name, Py_hash_t hash) {
-    if (auto v = _PyDict_GetItem_KnownHash(f->globals, name, hash)) {
+static PyObject *loadGlobalOrBuiltin(PyFrameObject *f, PyObject *name, Py_hash_t hash) {
+    auto tstate = PyThreadState_Get();
+    if (auto v = _PyDict_GetItem_KnownHash(f->f_globals, name, hash)) {
         Py_INCREF(v);
         return v;
-    } else if (_PyErr_Occurred(f->tstate)) {
+    } else if (_PyErr_Occurred(tstate)) {
         return nullptr;
     }
 
-    if (PyDict_CheckExact(f->builtins)) {
-        if (auto v = _PyDict_GetItem_KnownHash(f->builtins, name, hash)) {
+    if (PyDict_CheckExact(f->f_builtins)) {
+        if (auto v = _PyDict_GetItem_KnownHash(f->f_builtins, name, hash)) {
             Py_INCREF(v);
             return v;
-        } else if (!_PyErr_Occurred(f->tstate)) {
-            raiseUndefinedName(f->tstate, name);
+        } else if (!_PyErr_Occurred(tstate)) {
+            raiseUndefinedName(tstate, name);
         }
     } else {
-        if (auto v = PyObject_GetItem(f->builtins, name)) {
+        if (auto v = PyObject_GetItem(f->f_builtins, name)) {
             return v;
-        } else if (_PyErr_ExceptionMatches(f->tstate, PyExc_KeyError)) {
-            raiseUndefinedName(f->tstate, name);
+        } else if (_PyErr_ExceptionMatches(tstate, PyExc_KeyError)) {
+            raiseUndefinedName(tstate, name);
         }
     }
     return nullptr;
 }
 
-PyObject *handle_LOAD_GLOBAL(SimplePyFrame *f, PyOparg oparg) {
+PyObject *handle_LOAD_GLOBAL(PyFrameObject *f, PyOparg oparg) {
     // NOTE：global似乎默认必须就是dict
-    auto name = PyTuple_GET_ITEM(f->code->co_names, oparg);
+    auto name = PyTuple_GET_ITEM(f->f_code->co_names, oparg);
     assert(PyUnicode_CheckExact(name));
     auto hash = getHash(name);
     if (hash == -1) {
@@ -130,10 +142,11 @@ PyObject *handle_LOAD_GLOBAL(SimplePyFrame *f, PyOparg oparg) {
     return loadGlobalOrBuiltin(f, name, hash);
 }
 
-PyObject *handle_LOAD_NAME(SimplePyFrame *f, PyOparg oparg) {
-    auto name = PyTuple_GET_ITEM(f->code->co_names, oparg);
-    if (!f->locals) {
-        _PyErr_Format(f->tstate, PyExc_SystemError, "no locals when loading %R", name);
+PyObject *handle_LOAD_NAME(PyFrameObject *f, PyOparg oparg) {
+    auto tstate = PyThreadState_Get();
+    auto name = PyTuple_GET_ITEM(f->f_code->co_names, oparg);
+    if (!f->f_locals) {
+        _PyErr_Format(tstate, PyExc_SystemError, "no locals when loading %R", name);
         return nullptr;
     }
     auto hash = getHash(name);
@@ -141,33 +154,33 @@ PyObject *handle_LOAD_NAME(SimplePyFrame *f, PyOparg oparg) {
         return nullptr;
     }
 
-    if (PyDict_CheckExact(f->locals)) {
-        if (auto v = _PyDict_GetItem_KnownHash(f->locals, name, hash)) {
+    if (PyDict_CheckExact(f->f_locals)) {
+        if (auto v = _PyDict_GetItem_KnownHash(f->f_locals, name, hash)) {
             Py_INCREF(v);
             return v;
-        } else if (_PyErr_Occurred(f->tstate)) {
+        } else if (_PyErr_Occurred(tstate)) {
             return nullptr;
         }
     } else {
-        if (auto v = PyObject_GetItem(f->locals, name)) {
+        if (auto v = PyObject_GetItem(f->f_locals, name)) {
             return v;
-        } else if (!_PyErr_ExceptionMatches(f->tstate, PyExc_KeyError)) {
+        } else if (!_PyErr_ExceptionMatches(tstate, PyExc_KeyError)) {
             return nullptr;
         }
-        _PyErr_Clear(f->tstate);
+        _PyErr_Clear(tstate);
     }
 
     return loadGlobalOrBuiltin(f, name, hash);
 }
 
-PyObject *handle_LOAD_ATTR(SimplePyFrame *f, PyOparg oparg, PyObject *owner) {
-    auto name = PyTuple_GET_ITEM(f->code->co_names, oparg);
+PyObject *handle_LOAD_ATTR(PyFrameObject *f, PyOparg oparg, PyObject *owner) {
+    auto name = PyTuple_GET_ITEM(f->f_code->co_names, oparg);
     return PyObject_GetAttr(owner, name);
 }
 
-PyObject *handle_LOAD_METHOD(SimplePyFrame *f, PyOparg oparg, PyObject *obj, PyObject **sp) {
+PyObject *handle_LOAD_METHOD(PyFrameObject *f, PyOparg oparg, PyObject *obj, PyObject **sp) {
     // TODO: 直接生成，省去CALL_METHOD判断, INCREF优化
-    auto name = PyTuple_GET_ITEM(f->code->co_names, oparg);
+    auto name = PyTuple_GET_ITEM(f->f_code->co_names, oparg);
     PyObject *meth = nullptr;
     int meth_found = _PyObject_GetMethod(obj, name, &meth);
 
@@ -186,24 +199,25 @@ PyObject *handle_LOAD_METHOD(SimplePyFrame *f, PyOparg oparg, PyObject *obj, PyO
     return meth;
 }
 
-int handle_STORE_NAME(SimplePyFrame *f, PyOparg oparg, PyObject *value) {
-    auto name = PyTuple_GET_ITEM(f->code->co_names, oparg);
-    if (f->locals) {
+int handle_STORE_NAME(PyFrameObject *f, PyOparg oparg, PyObject *value) {
+    auto name = PyTuple_GET_ITEM(f->f_code->co_names, oparg);
+    if (f->f_locals) {
         int err;
-        if (PyDict_CheckExact(f->locals)) {
-            err = PyDict_SetItem(f->locals, name, value);
+        if (PyDict_CheckExact(f->f_locals)) {
+            err = PyDict_SetItem(f->f_locals, name, value);
         } else {
-            err = PyObject_SetItem(f->locals, name, value);
+            err = PyObject_SetItem(f->f_locals, name, value);
         }
         return err == 0;
     } else {
-        _PyErr_Format(f->tstate, PyExc_SystemError, "no locals found when storing %R", name);
+        auto tstate = PyThreadState_Get();
+        _PyErr_Format(tstate, PyExc_SystemError, "no locals found when storing %R", name);
         return 0;
     }
 }
 
-int handle_DELETE_DEREF(SimplePyFrame *f, PyOparg oparg) {
-    PyObject *cell = f->localsplus[f->code->co_nlocals + oparg];
+int handle_DELETE_DEREF(PyFrameObject *f, PyOparg oparg) {
+    PyObject *cell = f->f_localsplus[f->f_code->co_nlocals + oparg];
     PyObject *oldobj = PyCell_GET(cell);
     if (oldobj) {
         PyCell_SET(cell, nullptr);
@@ -214,46 +228,51 @@ int handle_DELETE_DEREF(SimplePyFrame *f, PyOparg oparg) {
     return 0;
 }
 
-int handle_DELETE_GLOBAL(SimplePyFrame *f, PyOparg oparg) {
-    auto name = PyTuple_GET_ITEM(f->code->co_names, oparg);
-    int err = PyDict_DelItem(f->globals, name);
+int handle_DELETE_GLOBAL(PyFrameObject *f, PyOparg oparg) {
+    auto name = PyTuple_GET_ITEM(f->f_code->co_names, oparg);
+    int err = PyDict_DelItem(f->f_globals, name);
     if (err != 0) {
-        if (_PyErr_ExceptionMatches(f->tstate, PyExc_KeyError)) {
-            raiseUndefinedName(f->tstate, name);
+        auto tstate = PyThreadState_Get();
+        if (_PyErr_ExceptionMatches(tstate, PyExc_KeyError)) {
+            raiseUndefinedName(tstate, name);
         }
         return 0;
     }
     return 1;
 }
 
-int handle_DELETE_NAME(SimplePyFrame *f, PyOparg oparg) {
-    auto name = PyTuple_GET_ITEM(f->code->co_names, oparg);
-    PyObject *ns = f->locals;
+int handle_DELETE_NAME(PyFrameObject *f, PyOparg oparg) {
+    auto name = PyTuple_GET_ITEM(f->f_code->co_names, oparg);
+    PyObject *ns = f->f_locals;
+    auto tstate = PyThreadState_Get();
     if (ns) {
         if (PyObject_DelItem(ns, name) != 0) {
-            raiseUndefinedName(f->tstate, name);
+            raiseUndefinedName(tstate, name);
             return 0;
         }
         return 1;
     }
-    _PyErr_Format(f->tstate, PyExc_SystemError, "no locals when deleting %R", name);
+    _PyErr_Format(tstate, PyExc_SystemError, "no locals when deleting %R", name);
     return 0;
 }
 
 PyObject *handle_UNARY_NOT(PyObject *value) {
-    int err = PyObject_IsTrue(value);
-    if (err == 0) {
-        Py_INCREF(Py_True);
-        return Py_True;
-    } else if (err > 0) {
-        Py_INCREF(Py_False);
-        return Py_False;
+    auto res = PyObject_IsTrue(value);
+    if (res < 0) [[unlikely]] {
+        gotoErrorHandler();
     }
-    return nullptr;
+    static const std::array bool_values{Py_False, Py_True};
+    auto not_value = bool_values[res == 0];
+    Py_INCREF(not_value);
+    return not_value;
 }
 
 PyObject *handle_BINARY_POWER(PyObject *base, PyObject *exp) {
-    return PyNumber_Power(base, exp, Py_None);
+    auto res = PyNumber_Power(base, exp, Py_None);
+    if (!res) [[unlikely]] {
+        gotoErrorHandler();
+    }
+    return res;
 }
 
 PyObject *handle_INPLACE_POWER(PyObject *base, PyObject *exp) {

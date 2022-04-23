@@ -27,7 +27,7 @@ Translator::Translator(const DataLayout &dl) : data_layout{dl} {
     tbaa_refcnt = createTBAANode(md_builder, tbaa_root, "refcnt");
     tbaa_frame_slot = createTBAANode(md_builder, tbaa_root, "frame slot");
     tbaa_code_const = createTBAANode(md_builder, tbaa_root, "code const", true);
-    tbaa_sp = createTBAANode(md_builder, tbaa_root, "stack pointer");
+    tbaa_frame_status = createTBAANode(md_builder, tbaa_root, "stack pointer");
 
     auto attr_builder = AttrBuilder(context);
     attr_builder
@@ -35,13 +35,14 @@ Translator::Translator(const DataLayout &dl) : data_layout{dl} {
     attr_inaccessible_noreturn = AttributeList::get(context, AttributeList::FunctionIndex, attr_builder);
     attr_builder.clear();
     attr_builder
-            .addAttribute(Attribute::NoUnwind)
-            .addAttribute(Attribute::InaccessibleMemOnly);
+            .addAttribute(Attribute::NoUnwind);
+            // .addAttribute(Attribute::InaccessibleMemOnly); // TODO: 不合理
     attr_inaccessible_only = AttributeList::get(context, AttributeList::FunctionIndex, attr_builder);
-    attr_builder
-            .removeAttribute(Attribute::InaccessibleMemOnly)
-            .addAttribute(Attribute::InaccessibleMemOrArgMemOnly);
-    attr_inaccessible_or_arg = AttributeList::get(context, AttributeList::FunctionIndex, attr_builder);
+    attr_inaccessible_or_arg = attr_inaccessible_only;
+    // attr_builder
+    //         .removeAttribute(Attribute::InaccessibleMemOnly)
+    //         .addAttribute(Attribute::InaccessibleMemOrArgMemOnly);
+    // attr_inaccessible_or_arg = AttributeList::get(context, AttributeList::FunctionIndex, attr_builder);
 
     attr_builder.clear();
     attr_builder
@@ -50,9 +51,9 @@ Translator::Translator(const DataLayout &dl) : data_layout{dl} {
     func->setAttributes(AttributeList::get(context, AttributeList::FunctionIndex, attr_builder));
     func->getArg(0)->setName(useName("$symbols"));
     simple_frame->setName(useName("$frame"));
-    for (auto &arg : func->args()) {
-        arg.addAttr(Attribute::NoAlias);
-    }
+    // for (auto &arg : func->args()) {
+    //     arg.addAttr(Attribute::NoAlias);
+    // }
 }
 
 void *Translator::operator()(Compiler &compiler, PyCodeObject *code) {
@@ -71,7 +72,12 @@ void *Translator::operator()(Compiler &compiler, PyCodeObject *code) {
 
     builder.SetInsertPoint(blocks[0].llvm_block);
 
-    auto consts = readData(simple_frame, &SimplePyFrame::consts, useName("$consts"));
+    auto rt_code = readData(simple_frame, &PyFrameObject::f_code, useName("$code"));
+    auto rt_names_obj = readData(rt_code, &PyCodeObject::co_names);
+    rt_names = getPointer(rt_names_obj, &PyTupleObject::ob_item, "$names");
+    auto rt_consts_obj = readData(rt_code, &PyCodeObject::co_consts);
+    auto consts = getPointer(rt_consts_obj, &PyTupleObject::ob_item, "$names");
+
     py_consts.reserve(PyTuple_GET_SIZE(code->co_consts));
     for (auto i : Range(PyTuple_GET_SIZE(code->co_consts))) {
         // TODO: 也合并
@@ -83,7 +89,7 @@ void *Translator::operator()(Compiler &compiler, PyCodeObject *code) {
         py_consts[i] = loadValue<PyObject *>(ptr, tbaa_code_const, useName(repr));
     }
 
-    auto localsplus = readData(simple_frame, &SimplePyFrame::localsplus, useName("$localsplus"));
+    auto localsplus = getPointer(simple_frame, &PyFrameObject::f_localsplus, useName("$localsplus"));
     auto nlocals = code->co_nlocals;
     auto start_cells = nlocals;
     auto ncells = PyTuple_GET_SIZE(code->co_cellvars);
@@ -109,7 +115,8 @@ void *Translator::operator()(Compiler &compiler, PyCodeObject *code) {
     for (auto i : Range(nstack)) {
         py_stack[i] = getPointer<PyObject *>(localsplus, start_stack + i, useName("$stack.", i));
     }
-    rt_stack_height_pointer = getPointer(simple_frame, &SimplePyFrame::stack_height, "$stack_height");
+    rt_stack_height_pointer = getPointer(simple_frame, &PyFrameObject::f_stackdepth, "$stack_height");
+    rt_lasti = getPointer(simple_frame, &PyFrameObject::f_lasti, "$lasti");
 
     for (auto &i : Range(block_num - 1, 1U)) {
         emitBlock(i);
@@ -223,32 +230,14 @@ void Translator::do_SETLOCAL(PyOparg oparg, llvm::Value *value) {
 }
 
 llvm::Value *Translator::do_POP() {
-    storeValue<decltype(stack_height)>(asValue(--stack_height), rt_stack_height_pointer, tbaa_sp);
+    storeValue<decltype(stack_height)>(asValue(--stack_height), rt_stack_height_pointer, tbaa_frame_status);
     return loadValue<PyObject *>(py_stack[stack_height], tbaa_frame_slot);
 }
 
 void Translator::do_PUSH(llvm::Value *value) {
     storeValue<PyObject *>(value, py_stack[stack_height++], tbaa_frame_slot);
-    storeValue<decltype(stack_height)>(asValue(stack_height), rt_stack_height_pointer, tbaa_sp);
+    storeValue<decltype(stack_height)>(asValue(stack_height), rt_stack_height_pointer, tbaa_frame_status);
 }
-
-
-class WrappedValue {
-public:
-    llvm::Value *value;
-private:
-    Translator &translator;
-public:
-    WrappedValue(llvm::Value *v, Translator &t) : value{v}, translator{t} {}
-
-    WrappedValue operator+(WrappedValue &v) {
-        return {translator.builder.CreateAdd(value, v.value), translator};
-    }
-
-    WrappedValue operator==(WrappedValue &v) {
-        return {translator.builder.CreateICmpEQ(value, v.value), translator};
-    }
-};
 
 [[noreturn]] inline void unimplemented() {
     throw runtime_error("unimplemented opcode");
@@ -263,9 +252,11 @@ void Translator::emitBlock(unsigned index) {
     auto first = blocks[index - 1].end;
     auto last = blocks[index].end;
     for (PyInstrIter instr(py_instructions, first, last); instr;) {
-        instr_offset = instr.offset - 1;
-        instr_sp[instr_offset] = stack_height;
         instr.next();
+        lasti = instr.offset - 1;
+        instr_sp[lasti] = stack_height;
+        storeValue<decltype(lasti)>(asValue(lasti), rt_lasti, tbaa_frame_status);
+
         switch (instr.opcode) {
         case EXTENDED_ARG:
             instr.extend_current_oparg();
@@ -430,10 +421,9 @@ void Translator::emitBlock(unsigned index) {
             break;
         }
         case STORE_GLOBAL: {
-            auto names = readData(simple_frame, &SimplePyFrame::names);
-            auto name = readData<PyObject *>(names, instr.oparg);
+            auto name = readData<PyObject *>(rt_names, instr.oparg);
             auto value = do_POP();
-            auto globals = readData(simple_frame, &SimplePyFrame::globals);
+            auto globals = readData(simple_frame, &PyFrameObject::f_globals);
             auto err = do_CallSymbol<PyDict_SetItem>(globals, name, value);
             do_Py_DECREF(value);
             auto no_err = builder.CreateICmpSGE(err, asValue(0));
@@ -453,8 +443,7 @@ void Translator::emitBlock(unsigned index) {
             break;
         }
         case STORE_ATTR: {
-            auto names = readData(simple_frame, &SimplePyFrame::names);
-            auto name = readData<PyObject *>(names, instr.oparg);
+            auto name = readData<PyObject *>(rt_names, instr.oparg);
             auto owner = do_POP();
             auto value = do_POP();
             auto err = do_CallSymbol<PyObject_SetAttr>(owner, name, value);
@@ -515,8 +504,7 @@ void Translator::emitBlock(unsigned index) {
             break;
         }
         case DELETE_ATTR: {
-            auto names = readData(simple_frame, &SimplePyFrame::names);
-            auto name = readData<PyObject *>(names, instr.oparg);
+            auto name = readData<PyObject *>(rt_names, instr.oparg);
             auto owner = do_POP();
             auto err = do_CallSymbol<PyObject_SetAttr>(owner, name, c_null);
             do_Py_DECREF(owner);

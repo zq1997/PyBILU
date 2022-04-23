@@ -2,6 +2,7 @@
 #define PYNIC_TRANSLATOR
 
 #include <Python.h>
+#include <frameobject.h>
 #include <opcode.h>
 
 #include <llvm/IR/LLVMContext.h>
@@ -68,14 +69,15 @@ class Translator {
     llvm::MDNode *tbaa_refcnt{};
     llvm::MDNode *tbaa_frame_slot{};
     llvm::MDNode *tbaa_code_const{};
-    llvm::MDNode *tbaa_sp{};
+    llvm::MDNode *tbaa_frame_status{};
     llvm::AttributeList attr_inaccessible_noreturn{};
     llvm::AttributeList attr_inaccessible_only{};
     llvm::AttributeList attr_inaccessible_or_arg{};
 
     PyCodeObject *py_code{};
     PyInstr *py_instructions{};
-    size_t instr_offset{};
+    decltype(PyFrameObject::f_lasti) lasti{};
+    decltype(PyFrameObject::f_stackdepth) stack_height{};
     unsigned block_num{};
     DynamicArray<int> instr_sp;
     DynamicArray<PyBasicBlock> blocks;
@@ -87,8 +89,9 @@ class Translator {
     llvm::BasicBlock *unwind_block{};
 
     llvm::Constant *c_null{llvm::ConstantPointerNull::get(types.get<void *>())};
+    llvm::Value *rt_names{};
+    llvm::Value *rt_lasti{};
     llvm::Value *rt_stack_height_pointer{};
-    size_t stack_height{};
 
 
     template <typename T>
@@ -108,7 +111,7 @@ class Translator {
     }
 
     auto createBlock(const char *extra) {
-        return llvm::BasicBlock::Create(context, useName("$instr.", instr_offset, ".", extra), func);
+        return llvm::BasicBlock::Create(context, useName("$instr.", lasti, ".", extra), func);
     }
 
     template <typename T=char>
@@ -218,11 +221,12 @@ class Translator {
         auto res = do_Call(types.get<BinaryFunction>(), getSymbol(i), left, right);
         do_Py_DECREF(left);
         do_Py_DECREF(right);
-        auto is_not_null = builder.CreateICmpNE(res, c_null);
-        builder.CreateAssumption(is_not_null);
-        auto bb = createBlock("BINARY.OK");
-        builder.CreateCondBr(is_not_null, bb, unwind_block);
-        builder.SetInsertPoint(bb);
+        // 不需要了
+        // auto is_not_null = builder.CreateICmpNE(res, c_null);
+        // builder.CreateAssumption(is_not_null);
+        // auto bb = createBlock("BINARY.OK");
+        // builder.CreateCondBr(is_not_null, bb, unwind_block);
+        // builder.SetInsertPoint(bb);
         do_PUSH(res);
     }
 

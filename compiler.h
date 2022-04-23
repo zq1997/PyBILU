@@ -31,7 +31,7 @@ public:
 
     void *operator()(llvm::Module &mod);
 
-    auto createDataLayout() { return machine->createDataLayout(); }
+    decltype(auto) createDataLayout() { return machine->createDataLayout(); }
 };
 
 #endif

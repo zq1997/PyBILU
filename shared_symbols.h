@@ -10,17 +10,8 @@
 #include <llvm/IR/BasicBlock.h>
 #include <llvm/IR/DataLayout.h>
 
-struct SimplePyFrame {
-    int stack_height;
-    PyObject **consts;
-    PyObject **localsplus;
-    PyObject *builtins;
-    PyObject *globals;
-    PyObject *locals;
-    PyCodeObject *code;
-    PyObject **names;
-    PyThreadState *tstate;
-    jmp_buf the_jmp_buf;
+struct ExtendedCFrame : CFrame {
+    jmp_buf frame_jmp_buf;
 };
 
 using PyInstr = const _Py_CODEUNIT;
@@ -28,19 +19,19 @@ using PyOpcode = decltype(_Py_OPCODE(PyInstr{}));
 using PyOparg = decltype(_Py_OPCODE(PyInstr{}));
 constexpr auto EXTENDED_ARG_BITS = 8;
 
-void handleError_LOAD_FAST(SimplePyFrame *f, PyOparg oparg);
+void handleError_LOAD_FAST(PyFrameObject *f, PyOparg oparg);
 PyObject *handle_UNARY_NOT(PyObject *value);
 PyObject *handle_BINARY_POWER(PyObject *base, PyObject *exp);
 PyObject *handle_INPLACE_POWER(PyObject *base, PyObject *exp);
-PyObject *handle_LOAD_CLASSDEREF(SimplePyFrame *f, PyOparg oparg);
-PyObject *handle_LOAD_GLOBAL(SimplePyFrame *f, PyOparg oparg);
-PyObject *handle_LOAD_NAME(SimplePyFrame *f, PyOparg oparg);
-PyObject *handle_LOAD_ATTR(SimplePyFrame *f, PyOparg oparg, PyObject *owner);
-PyObject *handle_LOAD_METHOD(SimplePyFrame *f, PyOparg oparg, PyObject *obj, PyObject **sp);
-int handle_STORE_NAME(SimplePyFrame *f, PyOparg oparg, PyObject *value);
-int handle_DELETE_DEREF(SimplePyFrame *f, PyOparg oparg);
-int handle_DELETE_GLOBAL(SimplePyFrame *f, PyOparg oparg);
-int handle_DELETE_NAME(SimplePyFrame *f, PyOparg oparg);
+PyObject *handle_LOAD_CLASSDEREF(PyFrameObject *f, PyOparg oparg);
+PyObject *handle_LOAD_GLOBAL(PyFrameObject *f, PyOparg oparg);
+PyObject *handle_LOAD_NAME(PyFrameObject *f, PyOparg oparg);
+PyObject *handle_LOAD_ATTR(PyFrameObject *f, PyOparg oparg, PyObject *owner);
+PyObject *handle_LOAD_METHOD(PyFrameObject *f, PyOparg oparg, PyObject *obj, PyObject **sp);
+int handle_STORE_NAME(PyFrameObject *f, PyOparg oparg, PyObject *value);
+int handle_DELETE_DEREF(PyFrameObject *f, PyOparg oparg);
+int handle_DELETE_GLOBAL(PyFrameObject *f, PyOparg oparg);
+int handle_DELETE_NAME(PyFrameObject *f, PyOparg oparg);
 PyObject *unwindFrame(PyObject **stack, ptrdiff_t stack_height);
 
 #define ENTRY(X) std::pair{&(X), #X}
@@ -126,7 +117,7 @@ constexpr auto searchSymbol() {
 using FunctionPointer = void (*)();
 extern const std::array<const char *, external_symbol_count> symbol_names;
 extern const std::array<FunctionPointer, external_symbol_count> symbol_addresses;
-using TranslatedFunctionType = PyObject *(const FunctionPointer *, SimplePyFrame *);
+using TranslatedFunctionType = PyObject *(const FunctionPointer *, PyFrameObject *);
 
 template <typename T>
 struct TypeWrapper {
@@ -197,9 +188,6 @@ static auto createType(llvm::LLVMContext &context) {
     }
     if constexpr(std::is_integral_v<T>) {
         return llvm::Type::getIntNTy(context, CHAR_BIT * sizeof(T));
-    }
-    if constexpr(std::is_same_v<T, double>) {
-        return llvm::Type::getDoubleTy(context);
     }
     if constexpr(std::is_pointer_v<T>) {
         return llvm::PointerType::getUnqual(context);

@@ -14,7 +14,7 @@ ENDIF()
 add_definitions(${LLVM_DEFINITIONS})
 add_compile_definitions(Py_BUILD_CORE)
 include_directories(${LLVM_INCLUDE_DIRS} ${CPython_INCLUDE_DIRS})
-add_compile_options(-Wall -Wpedantic -Wno-unused-but-set-variable -fno-rtti)
+add_compile_options(-Wall -Wpedantic -Wno-unused-but-set-variable -Wno-c++20-attribute-extensions -fno-rtti)
 link_directories(${LLVM_LIBRARY_DIRS})
 add_link_options(-Wl,--exclude-libs,ALL,--gc-sections)
 

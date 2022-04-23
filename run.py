@@ -1,5 +1,5 @@
 from opcode import *
-
+from dis import dis
 import pynic
 
 # import time
@@ -64,17 +64,12 @@ import pynic
 # stat('有优化', bar)
 
 
-l = [1, 2]
-
-
 @pynic.apply
 def foo():
-    a = 1
-    b = 2
-    c = 2
-    d = a + b * 2 - c // 4
-    return d
+    a = 2
+    b = 'd'
+    return a ** b
 
+dis(foo)
 
 print(foo())
-print(l)

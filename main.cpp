@@ -3,7 +3,6 @@
 using namespace std;
 
 #include <Python.h>
-#include <frameobject.h>
 #include <internal/pycore_pyerrors.h>
 
 #include "translator.h"
@@ -33,29 +32,22 @@ PyObject *eval_func(PyThreadState *tstate, PyFrameObject *frame, int throwflag) 
     auto jit_callee = reinterpret_cast<TranslatedFunctionType *>(compiled_code);
     // TODO: support generator and throwflag
     assert(!throwflag);
-    SimplePyFrame simple_frame{
-            0,
-            &PyTuple_GET_ITEM(frame->f_code->co_consts, 0),
-            frame->f_localsplus,
-            frame->f_builtins,
-            frame->f_globals,
-            frame->f_locals,
-            frame->f_code,
-            &PyTuple_GET_ITEM(frame->f_code->co_names, 0),
-            tstate,
-            {}
-    };
-    if (!setjmp(simple_frame.the_jmp_buf)) {
-        return jit_callee(&symbol_addresses[0], &simple_frame);
+
+    auto prev_cframe = tstate->cframe;
+    ExtendedCFrame cframe;
+    cframe.use_tracing = prev_cframe->use_tracing;
+    cframe.previous = prev_cframe;
+    tstate->cframe = &cframe;
+    if (!setjmp(cframe.frame_jmp_buf)) {
+        return jit_callee(&symbol_addresses[0], frame);
     } else {
         assert(_PyErr_Occurred(tstate));
-        // frame->f_lasti = 2;
         PyTraceBack_Here(frame);
         auto nlocals = frame->f_code->co_nlocals;
         auto ncells = PyTuple_GET_SIZE(frame->f_code->co_cellvars);
         auto nfrees = PyTuple_GET_SIZE(frame->f_code->co_freevars);
         auto stack = &frame->f_localsplus[nlocals + ncells + nfrees];
-        for (auto i : Range(simple_frame.stack_height)) {
+        for (auto i : Range(frame->f_stackdepth)) {
             Py_XDECREF(stack[i]);
         }
         return nullptr;
