@@ -23,19 +23,23 @@ void raiseException();
 PyObject *handle_LOAD_CLASSDEREF(PyFrameObject *f, PyOparg oparg);
 PyObject *handle_LOAD_GLOBAL(PyFrameObject *f, PyObject *name);
 void handle_STORE_GLOBAL(PyFrameObject *f, PyObject *name, PyObject *value);
+void handle_DELETE_GLOBAL(PyFrameObject *f, PyObject *name);
 PyObject *handle_LOAD_NAME(PyFrameObject *f, PyObject *name);
 void handle_STORE_NAME(PyFrameObject *f, PyObject *name, PyObject *value);
+void handle_DELETE_NAME(PyFrameObject *f, PyObject *name);
 PyObject *handle_LOAD_ATTR(PyObject *owner, PyObject *name);
 PyObject *handle_LOAD_METHOD(PyObject *obj, PyObject *name, PyObject **sp);
 void handle_STORE_ATTR(PyObject *owner, PyObject *name, PyObject *value);
 PyObject *handle_BINARY_SUBSCR(PyObject *container, PyObject *sub);
 void handle_STORE_SUBSCR(PyObject *container, PyObject *sub, PyObject *value);
 PyObject *handle_UNARY_NOT(PyObject *value);
+PyObject *handle_UNARY_POSITIVE(PyObject *value);
+PyObject *handle_UNARY_NEGATIVE(PyObject *value);
+PyObject *handle_UNARY_INVERT(PyObject *value);
+PyObject *handle_BINARY_ADD(PyObject *base, PyObject *exp);
+
 PyObject *handle_BINARY_POWER(PyObject *base, PyObject *exp);
 PyObject *handle_INPLACE_POWER(PyObject *base, PyObject *exp);
-int handle_DELETE_DEREF(PyFrameObject *f, PyOparg oparg);
-int handle_DELETE_GLOBAL(PyFrameObject *f, PyOparg oparg);
-int handle_DELETE_NAME(PyFrameObject *f, PyOparg oparg);
 PyObject *unwindFrame(PyObject **stack, ptrdiff_t stack_height);
 
 #define ENTRY(X) std::pair{&(X), #X}
@@ -46,20 +50,25 @@ constexpr std::tuple external_symbols{
         ENTRY(handle_LOAD_CLASSDEREF),
         ENTRY(handle_LOAD_GLOBAL),
         ENTRY(handle_STORE_GLOBAL),
+        ENTRY(handle_DELETE_GLOBAL),
         ENTRY(handle_LOAD_NAME),
         ENTRY(handle_STORE_NAME),
+        ENTRY(handle_DELETE_NAME),
         ENTRY(handle_LOAD_ATTR),
         ENTRY(handle_LOAD_METHOD),
         ENTRY(handle_STORE_ATTR),
         ENTRY(handle_BINARY_SUBSCR),
         ENTRY(handle_STORE_SUBSCR),
+        ENTRY(handle_UNARY_NOT),
+        ENTRY(handle_UNARY_POSITIVE),
+        ENTRY(handle_UNARY_NEGATIVE),
+        ENTRY(handle_UNARY_INVERT),
+        ENTRY(handle_BINARY_ADD),
 
-        std::pair{&handle_UNARY_NOT, "handle_UNARY_NOT"},
         std::pair{&PyNumber_Positive, "PyNumber_Positive"},
         std::pair{&PyNumber_Negative, "PyNumber_Negative"},
         std::pair{&PyNumber_Invert, "PyNumber_Invert"},
 
-        std::pair{&PyNumber_Add, "PyNumber_Add"},
         std::pair{&PyNumber_Subtract, "PyNumber_Subtract"},
         std::pair{&PyNumber_Multiply, "PyNumber_Multiply"},
         std::pair{&PyNumber_TrueDivide, "PyNumber_TrueDivide"},
@@ -92,9 +101,6 @@ constexpr std::tuple external_symbols{
         std::pair{&PyObject_RichCompare, "PyObject_RichCompare"},
 
         std::pair{&unwindFrame, "unwindFrame"},
-        std::pair{&handle_DELETE_DEREF, "handle_DELETE_DEREF"},
-        std::pair{&handle_DELETE_GLOBAL, "handle_DELETE_GLOBAL"},
-        std::pair{&handle_DELETE_NAME, "handle_DELETE_NAME"}
 };
 
 constexpr auto external_symbol_count = std::tuple_size_v<decltype(external_symbols)>;

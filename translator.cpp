@@ -371,6 +371,11 @@ void Translator::emitBlock(unsigned index) {
             do_PUSH(value);
             break;
         }
+        case LOAD_CLASSDEREF: {
+            auto value = do_CallSymbol<handle_LOAD_CLASSDEREF>(simple_frame, asValue(instr.oparg));
+            do_PUSH(value);
+            break;
+        }
         case STORE_DEREF: {
             auto cell = loadValue<PyObject *>(py_freevars[instr.oparg], tbaa_code_const);
             auto cell_slot = getPointer(cell, &PyCellObject::ob_ref);
@@ -380,9 +385,15 @@ void Translator::emitBlock(unsigned index) {
             do_Py_XDECREF(old_value);
             break;
         }
-        case LOAD_CLASSDEREF: {
-            auto value = do_CallSymbol<handle_LOAD_CLASSDEREF>(simple_frame, asValue(instr.oparg));
-            do_PUSH(value);
+        case DELETE_DEREF: {
+            auto cell = loadValue<PyObject *>(py_freevars[instr.oparg], tbaa_code_const);
+            auto cell_slot = getPointer(cell, &PyCellObject::ob_ref);
+            auto old_value = loadValue<PyObject *>(cell_slot, tbaa_frame_cells);
+            auto ok_block = createBlock("DELETE_DEREF.OK");
+            builder.CreateCondBr(builder.CreateICmpNE(old_value, c_null), ok_block, error_block, likely_true);
+            builder.SetInsertPoint(ok_block);
+            storeValue<PyObject *>(c_null, cell_slot, tbaa_frame_cells);
+            do_Py_DECREF(old_value);
             break;
         }
         case LOAD_GLOBAL: {
@@ -396,6 +407,10 @@ void Translator::emitBlock(unsigned index) {
             do_Py_DECREF(value);
             break;
         }
+        case DELETE_GLOBAL: {
+            do_CallSymbol<handle_DELETE_GLOBAL>(simple_frame, py_names[instr.oparg]);
+            break;
+        }
         case LOAD_NAME: {
             auto value = do_CallSymbol<handle_LOAD_NAME>(simple_frame, py_names[instr.oparg]);
             do_PUSH(value);
@@ -405,6 +420,10 @@ void Translator::emitBlock(unsigned index) {
             auto value = do_POP();
             do_CallSymbol<handle_STORE_NAME>(simple_frame, py_names[instr.oparg], value);
             do_Py_DECREF(value);
+            break;
+        }
+        case DELETE_NAME: {
+            do_CallSymbol<handle_DELETE_NAME>(simple_frame, py_names[instr.oparg]);
             break;
         }
         case LOAD_ATTR: {
@@ -429,6 +448,12 @@ void Translator::emitBlock(unsigned index) {
             do_Py_DECREF(owner);
             break;
         }
+        case DELETE_ATTR: {
+            auto owner = do_POP();
+            do_CallSymbol<handle_STORE_ATTR>(owner, py_names[instr.oparg], c_null);
+            do_Py_DECREF(owner);
+            break;
+        }
         case BINARY_SUBSCR: {
             handle_BINARY_OP(searchSymbol<handle_BINARY_SUBSCR>());
             break;
@@ -443,67 +468,28 @@ void Translator::emitBlock(unsigned index) {
             do_Py_DECREF(sub);
             break;
         }
-        // todo: 继续
-        case DELETE_DEREF: {
-            auto ok = do_CallSymbol<handle_DELETE_DEREF>(simple_frame, asValue(instr.oparg));
-            auto is_ok = builder.CreateICmpNE(ok, asValue(0));
-            auto bb = createBlock("DELETE_DEREF.OK");
-            builder.CreateCondBr(is_ok, bb, unwind_block, likely_true);
-            builder.SetInsertPoint(bb);
-            break;
-        }
-        case DELETE_GLOBAL: {
-            auto ok = do_CallSymbol<handle_DELETE_GLOBAL>(simple_frame, asValue(instr.oparg));
-            auto is_ok = builder.CreateICmpNE(ok, asValue(0));
-            auto bb = createBlock("DELETE_GLOBAL.OK");
-            builder.CreateCondBr(is_ok, bb, unwind_block, likely_true);
-            builder.SetInsertPoint(bb);
-            break;
-        }
-        case DELETE_NAME: {
-            auto ok = do_CallSymbol<handle_DELETE_NAME>(simple_frame, asValue(instr.oparg));
-            auto is_ok = builder.CreateICmpNE(ok, asValue(0));
-            auto bb = createBlock("DELETE_NAME.OK");
-            builder.CreateCondBr(is_ok, bb, unwind_block, likely_true);
-            builder.SetInsertPoint(bb);
-            break;
-        }
-        case DELETE_ATTR: {
-            // auto owner = do_POP();
-            // auto err = do_CallSymbol<PyObject_SetAttr>(owner, py_names[instr.oparg], c_null);
-            // do_Py_DECREF(owner);
-            // auto no_err = builder.CreateICmpSGE(err, asValue(0));
-            // auto bb = createBlock("DELETE_ATTR.OK");
-            // builder.CreateCondBr(no_err, bb, unwind_block, likely_true);
-            // builder.SetInsertPoint(bb);
-            // break;
-        }
         case DELETE_SUBSCR: {
-            // auto sub = do_POP();
-            // auto container = do_POP();
-            // auto err = do_CallSymbol<PyObject_SetAttr>(container, sub, c_null);
-            // do_Py_DECREF(container);
-            // do_Py_DECREF(sub);
-            // auto no_err = builder.CreateICmpSGE(err, asValue(0));
-            // auto bb = createBlock("DELETE_SUBSCR.OK");
-            // builder.CreateCondBr(no_err, bb, unwind_block, likely_true);
-            // builder.SetInsertPoint(bb);
+            auto sub = do_POP();
+            auto container = do_POP();
+            do_CallSymbol<handle_STORE_SUBSCR>(container, sub, c_null);
+            do_Py_DECREF(container);
+            do_Py_DECREF(sub);
             break;
         }
-        case UNARY_POSITIVE:
-            handle_UNARY_OP(searchSymbol<PyNumber_Positive>());
-            break;
-        case UNARY_NEGATIVE:
-            handle_UNARY_OP(searchSymbol<PyNumber_Negative>());
-            break;
         case UNARY_NOT:
             handle_UNARY_OP(searchSymbol<handle_UNARY_NOT>());
             break;
+        case UNARY_POSITIVE:
+            handle_UNARY_OP(searchSymbol<handle_UNARY_POSITIVE>());
+            break;
+        case UNARY_NEGATIVE:
+            handle_UNARY_OP(searchSymbol<handle_UNARY_NEGATIVE>());
+            break;
         case UNARY_INVERT:
-            handle_UNARY_OP(searchSymbol<PyNumber_Invert>());
+            handle_UNARY_OP(searchSymbol<handle_UNARY_INVERT>());
             break;
         case BINARY_ADD:
-            handle_BINARY_OP(searchSymbol<PyNumber_Add>());
+            handle_BINARY_OP(searchSymbol<handle_BINARY_ADD>());
             break;
         case BINARY_SUBTRACT:
             handle_BINARY_OP(searchSymbol<PyNumber_Subtract>());
@@ -595,6 +581,8 @@ void Translator::emitBlock(unsigned index) {
             unimplemented();
         case RETURN_VALUE: {
             auto retval = do_POP();
+            // 或者INCREF，防止DECREF两次
+            storeValue<decltype(stack_height)>(asValue(stack_height), rt_stack_height_pointer, tbaa_frame_status);
             builder.CreateRet(retval);
             fall_through = false;
             break;

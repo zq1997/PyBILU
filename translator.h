@@ -232,8 +232,8 @@ class Translator {
         auto value = do_POP();
         using UnaryFunction = PyObject *(PyObject *);
         auto res = do_Call(types.get<UnaryFunction>(), getSymbol(i), value);
-        do_Py_DECREF(value);
         do_PUSH(res);
+        do_Py_DECREF(value);
     }
 
     // TODO:泛型化

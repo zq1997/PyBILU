@@ -64,11 +64,17 @@ import pynic
 # stat('有优化', bar)
 
 b = 'd'
+
+
 @pynic.apply
 def foo():
-    global b
     a = 2
-    return a ** b
+    b = 3
+    return a + b
+    # global b
+    # a = 2
+    # return a ** b
+
 
 dis(foo)
 del b

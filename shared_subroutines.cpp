@@ -3,11 +3,13 @@
 #include <Python.h>
 #include <opcode.h>
 #include <frameobject.h>
+#include <internal/pycore_pystate.h>
 #include <internal/pycore_code.h>
 #include <internal/pycore_pyerrors.h>
 
 // TODO: 在想，能不能设计俩版本，decref在这里实现
-// TODO: 很多函数是否应该展开
+// TODO: 很多函数是否应该展开，把Python的实现复制过来，降低调用层数
+// TODO: 能否设置hot inline等确保展开
 
 [[noreturn]] static void gotoErrorHandler(PyThreadState *tstate) {
     auto cframe = static_cast<ExtendedCFrame &>(*tstate->cframe);
@@ -15,7 +17,7 @@
 }
 
 [[noreturn]] static void gotoErrorHandler() {
-    gotoErrorHandler(PyThreadState_Get());
+    gotoErrorHandler(_PyThreadState_GET());
 }
 
 template <typename... T>
@@ -57,18 +59,8 @@ static void raiseUndefinedFree(PyThreadState *tstate, PyObject *name) {
     raiseUndefinedName(tstate, name, "free variable '%.200s' referenced before assignment in enclosing scope");
 }
 
-static void raiseUndefinedFreeOrCell(PyFrameObject *f, PyOparg oparg) {
-    auto tstate = PyThreadState_Get();
-    if (oparg < PyTuple_GET_SIZE(f->f_code->co_cellvars)) {
-        raiseUndefinedLocal(tstate, PyTuple_GET_ITEM(f->f_code->co_cellvars, oparg));
-    } else {
-        auto name = PyTuple_GET_ITEM(f->f_code->co_freevars, oparg - PyTuple_GET_SIZE(f->f_code->co_cellvars));
-        raiseUndefinedFree(tstate, name);
-    }
-}
-
 void raiseException() {
-    auto tstate = PyThreadState_Get();
+    auto tstate = _PyThreadState_GET();
     auto frame = tstate->frame;
     auto code = frame->f_code;
     auto instr_array = reinterpret_cast<PyInstr *>(&PyTuple_GET_ITEM(code->co_code, 0));
@@ -81,8 +73,20 @@ void raiseException() {
         oparg |= _Py_OPARG(instr_array[i]) << shift;
     }
     assert(opcode == LOAD_FAST);
-    auto name = PyTuple_GET_ITEM(code->co_varnames, oparg);
-    raiseUndefinedLocal(tstate, name);
+    if (opcode == LOAD_FAST || opcode == DELETE_FAST) {
+        auto name = PyTuple_GET_ITEM(code->co_varnames, oparg);
+        raiseUndefinedLocal(tstate, name);
+    } else if (opcode == LOAD_DEREF || opcode == DELETE_DEREF) {
+        auto cell_num = PyTuple_GET_SIZE(code->co_cellvars);
+        if (oparg < cell_num) {
+            raiseUndefinedLocal(tstate, PyTuple_GET_ITEM(code->co_cellvars, oparg));
+        } else {
+            auto name = PyTuple_GET_ITEM(code->co_freevars, oparg - cell_num);
+            raiseUndefinedFree(tstate, name);
+        }
+    } else {
+        _PyErr_Format(tstate, PyExc_SystemError, "error block遇到了未知opcode");
+    }
     gotoErrorHandler(tstate);
 }
 
@@ -99,7 +103,7 @@ PyObject *handle_LOAD_CLASSDEREF(PyFrameObject *f, PyOparg oparg) {
             Py_INCREF(value);
             return value;
         } else {
-            auto tstate = PyThreadState_Get();
+            auto tstate = _PyThreadState_GET();
             gotoErrorHandler(_PyErr_Occurred(tstate), tstate);
         }
     } else {
@@ -107,7 +111,7 @@ PyObject *handle_LOAD_CLASSDEREF(PyFrameObject *f, PyOparg oparg) {
         if (value) {
             return value;
         } else {
-            auto tstate = PyThreadState_Get();
+            auto tstate = _PyThreadState_GET();
             gotoErrorHandler(!_PyErr_ExceptionMatches(tstate, PyExc_KeyError), tstate);
             _PyErr_Clear(tstate);
         }
@@ -117,7 +121,7 @@ PyObject *handle_LOAD_CLASSDEREF(PyFrameObject *f, PyOparg oparg) {
         Py_INCREF(value);
         return value;
     }
-    auto tstate = PyThreadState_Get();
+    auto tstate = _PyThreadState_GET();
     raiseUndefinedFree(tstate, name);
     gotoErrorHandler(tstate);
 }
@@ -136,7 +140,7 @@ static PyObject *loadGlobalOrBuiltin(PyFrameObject *f, PyObject *name, Py_hash_t
         Py_INCREF(v);
         return v;
     } else {
-        auto tstate = PyThreadState_Get();
+        auto tstate = _PyThreadState_GET();
         gotoErrorHandler(_PyErr_Occurred(tstate), tstate);
     }
 
@@ -145,7 +149,7 @@ static PyObject *loadGlobalOrBuiltin(PyFrameObject *f, PyObject *name, Py_hash_t
             Py_INCREF(v);
             return v;
         } else {
-            auto tstate = PyThreadState_Get();
+            auto tstate = _PyThreadState_GET();
             if (!_PyErr_Occurred(tstate)) {
                 raiseUndefinedName(tstate, name);
             }
@@ -155,7 +159,7 @@ static PyObject *loadGlobalOrBuiltin(PyFrameObject *f, PyObject *name, Py_hash_t
         if (auto v = PyObject_GetItem(f->f_builtins, name)) {
             return v;
         } else {
-            auto tstate = PyThreadState_Get();
+            auto tstate = _PyThreadState_GET();
             if (_PyErr_ExceptionMatches(tstate, PyExc_KeyError)) {
                 raiseUndefinedName(tstate, name);
             }
@@ -175,9 +179,21 @@ void handle_STORE_GLOBAL(PyFrameObject *f, PyObject *name, PyObject *value) {
     gotoErrorHandler(err);
 }
 
+void handle_DELETE_GLOBAL(PyFrameObject *f, PyObject *name) {
+    int err = PyDict_DelItem(f->f_globals, name);
+    // TODO: 类似地，unlikely都加上
+    if (err) [[unlikely]] {
+        auto tstate = _PyThreadState_GET();
+        if (_PyErr_ExceptionMatches(tstate, PyExc_KeyError)) {
+            raiseUndefinedName(tstate, name);
+        }
+        gotoErrorHandler(tstate);
+    }
+}
+
 PyObject *handle_LOAD_NAME(PyFrameObject *f, PyObject *name) {
     if (!f->f_locals) {
-        auto tstate = PyThreadState_Get();
+        auto tstate = _PyThreadState_GET();
         _PyErr_Format(tstate, PyExc_SystemError, "no locals when loading %R", name);
         gotoErrorHandler(tstate);
     }
@@ -189,14 +205,14 @@ PyObject *handle_LOAD_NAME(PyFrameObject *f, PyObject *name) {
             Py_INCREF(v);
             return v;
         } else {
-            auto tstate = PyThreadState_Get();
+            auto tstate = _PyThreadState_GET();
             gotoErrorHandler(_PyErr_Occurred(tstate), tstate);
         }
     } else {
         if (auto v = PyObject_GetItem(f->f_locals, name)) {
             return v;
         } else {
-            auto tstate = PyThreadState_Get();
+            auto tstate = _PyThreadState_GET();
             gotoErrorHandler(!_PyErr_ExceptionMatches(tstate, PyExc_KeyError), tstate);
             _PyErr_Clear(tstate);
         }
@@ -207,7 +223,7 @@ PyObject *handle_LOAD_NAME(PyFrameObject *f, PyObject *name) {
 
 void handle_STORE_NAME(PyFrameObject *f, PyObject *name, PyObject *value) {
     if (!f->f_locals) {
-        auto tstate = PyThreadState_Get();
+        auto tstate = _PyThreadState_GET();
         _PyErr_Format(tstate, PyExc_SystemError, "no locals found when storing %R", name);
         gotoErrorHandler(tstate);
     }
@@ -218,6 +234,22 @@ void handle_STORE_NAME(PyFrameObject *f, PyObject *name, PyObject *value) {
         err = PyObject_SetItem(f->f_locals, name, value);
     }
     gotoErrorHandler(err);
+}
+
+void handle_DELETE_NAME(PyFrameObject *f, PyObject *name) {
+    // TODO: 类似这种东西，感觉可以放到主程序中直接执行，失败则进行二次校验
+    PyObject *ns = f->f_locals;
+    if (!ns) [[unlikely]] {
+        auto tstate = _PyThreadState_GET();
+        _PyErr_Format(tstate, PyExc_SystemError, "no locals when deleting %R", name);
+        gotoErrorHandler(tstate);
+    }
+    auto err = PyObject_DelItem(ns, name);
+    if (err) [[unlikely]] {
+        auto tstate = _PyThreadState_GET();
+        raiseUndefinedName(tstate, name);
+        gotoErrorHandler(tstate);
+    }
 }
 
 PyObject *handle_LOAD_ATTR(PyObject *owner, PyObject *name) {
@@ -259,44 +291,22 @@ void handle_STORE_SUBSCR(PyObject *container, PyObject *sub, PyObject *value) {
     gotoErrorHandler(err);
 }
 
-int handle_DELETE_DEREF(PyFrameObject *f, PyOparg oparg) {
-    PyObject *cell = f->f_localsplus[f->f_code->co_nlocals + oparg];
-    PyObject *oldobj = PyCell_GET(cell);
-    if (oldobj) {
-        PyCell_SET(cell, nullptr);
-        Py_DECREF(oldobj);
-        return 1;
-    }
-    raiseUndefinedFreeOrCell(f, oparg);
-    return 0;
-}
-
-int handle_DELETE_GLOBAL(PyFrameObject *f, PyOparg oparg) {
-    auto name = PyTuple_GET_ITEM(f->f_code->co_names, oparg);
-    int err = PyDict_DelItem(f->f_globals, name);
-    if (err != 0) {
-        auto tstate = PyThreadState_Get();
-        if (_PyErr_ExceptionMatches(tstate, PyExc_KeyError)) {
-            raiseUndefinedName(tstate, name);
+int _Py_CheckSlotResult(PyObject *obj, const char *slot_name, int success) {
+    PyThreadState *tstate = _PyThreadState_GET();
+    if (!success) {
+        if (!_PyErr_Occurred(tstate)) {
+            _Py_FatalErrorFormat(__func__,
+                    "Slot %s of type %s failed without setting an exception",
+                    slot_name, Py_TYPE(obj)->tp_name);
         }
-        return 0;
+    } else {
+        if (_PyErr_Occurred(tstate)) {
+            _Py_FatalErrorFormat(__func__,
+                    "Slot %s of type %s succeeded with an exception set",
+                    slot_name, Py_TYPE(obj)->tp_name);
+        }
     }
     return 1;
-}
-
-int handle_DELETE_NAME(PyFrameObject *f, PyOparg oparg) {
-    auto name = PyTuple_GET_ITEM(f->f_code->co_names, oparg);
-    PyObject *ns = f->f_locals;
-    auto tstate = PyThreadState_Get();
-    if (ns) {
-        if (PyObject_DelItem(ns, name) != 0) {
-            raiseUndefinedName(tstate, name);
-            return 0;
-        }
-        return 1;
-    }
-    _PyErr_Format(tstate, PyExc_SystemError, "no locals when deleting %R", name);
-    return 0;
 }
 
 PyObject *handle_UNARY_NOT(PyObject *value) {
@@ -308,6 +318,184 @@ PyObject *handle_UNARY_NOT(PyObject *value) {
     auto not_value = bool_values[res == 0];
     Py_INCREF(not_value);
     return not_value;
+}
+
+// TODO: 删了
+// static PyObject *null_error() {
+//     auto tstate = _PyThreadState_GET();
+//     // TODO: 需要么，应该是一定没有err叭，tstate我觉得也不必校验
+//     if (!_PyErr_Occurred(tstate)) {
+//         _PyErr_SetString(tstate, PyExc_SystemError, "null argument to internal routine");
+//     }
+//     return nullptr;
+// }
+
+// static PyObject *type_error(const char *msg, PyObject *obj) {
+//     PyErr_Format(PyExc_TypeError, msg, Py_TYPE(obj)->tp_name);
+//     return nullptr;
+// }
+
+template <unaryfunc PyNumberMethods::*P, char SIGN, const char *SLOT>
+PyObject *handle_UNARY(PyObject *value) {
+    auto type = Py_TYPE(value);
+    auto *m = type->tp_as_number;
+    if (m && m->*P) [[unlikely]] {
+        PyObject *res = (*(m->*P))(value);
+        assert(_Py_CheckSlotResult(value, SLOT, res != nullptr));
+        return res;
+    }
+    PyErr_Format(PyExc_TypeError, "bad operand type for unary %c: '%.200s'", SIGN, type->tp_name);
+    gotoErrorHandler();
+}
+
+PyObject *handle_UNARY_POSITIVE(PyObject *value) {
+    static const char slot[]{"__pos__"};
+    return handle_UNARY<&PyNumberMethods::nb_positive, '+', slot>(value);
+}
+
+PyObject *handle_UNARY_NEGATIVE(PyObject *value) {
+    static const char slot[]{"__neg__"};
+    return handle_UNARY<&PyNumberMethods::nb_negative, '-', slot>(value);
+}
+
+PyObject *handle_UNARY_INVERT(PyObject *value) {
+    static const char slot[]{"__invert__"};
+    return handle_UNARY<&PyNumberMethods::nb_invert, '~', slot>(value);
+}
+
+#define NB_SLOT(x) offsetof(PyNumberMethods, x)
+#define NB_BINOP(nb_methods, slot) \
+        (*(binaryfunc*)(& ((char*)nb_methods)[slot]))
+#define NB_TERNOP(nb_methods, slot) \
+        (*(ternaryfunc*)(& ((char*)nb_methods)[slot]))
+
+static PyObject *
+binary_op1(PyObject *v, PyObject *w, const int op_slot
+#ifndef NDEBUG
+        , const char *op_name
+#endif
+) {
+    binaryfunc slotv;
+    if (Py_TYPE(v)->tp_as_number != nullptr) {
+        slotv = NB_BINOP(Py_TYPE(v)->tp_as_number, op_slot);
+    } else {
+        slotv = nullptr;
+    }
+
+    binaryfunc slotw;
+    if (!Py_IS_TYPE(w, Py_TYPE(v)) && Py_TYPE(w)->tp_as_number != nullptr) {
+        slotw = NB_BINOP(Py_TYPE(w)->tp_as_number, op_slot);
+        if (slotw == slotv) {
+            slotw = nullptr;
+        }
+    } else {
+        slotw = nullptr;
+    }
+
+    if (slotv) {
+        PyObject *x;
+        if (slotw && PyType_IsSubtype(Py_TYPE(w), Py_TYPE(v))) {
+            x = slotw(v, w);
+            if (x != Py_NotImplemented) {
+                return x;
+            }
+            Py_DECREF(x); /* can't do it */
+            slotw = nullptr;
+        }
+        x = slotv(v, w);
+        // assert(_Py_CheckSlotResult(v, op_name, x != nullptr));
+        if (x != Py_NotImplemented) {
+            return x;
+        }
+        Py_DECREF(x); /* can't do it */
+    }
+    if (slotw) {
+        PyObject *x = slotw(v, w);
+        // assert(_Py_CheckSlotResult(w, op_name, x != nullptr));
+        if (x != Py_NotImplemented) {
+            return x;
+        }
+        Py_DECREF(x); /* can't do it */
+    }
+    Py_RETURN_NOTIMPLEMENTED;
+}
+
+#ifdef NDEBUG
+#  define BINARY_OP1(v, w, op_slot, op_name) binary_op1(v, w, op_slot)
+#else
+#  define BINARY_OP1(v, w, op_slot, op_name) binary_op1(v, w, op_slot, op_name)
+#endif
+
+static PyObject *
+binop_type_error(PyObject *v, PyObject *w, const char *op_name) {
+    PyErr_Format(PyExc_TypeError,
+            "unsupported operand type(s) for %.100s: "
+            "'%.100s' and '%.100s'",
+            op_name,
+            Py_TYPE(v)->tp_name,
+            Py_TYPE(w)->tp_name);
+    return nullptr;
+}
+
+static PyObject *
+binary_op(PyObject *v, PyObject *w, const int op_slot, const char *op_name) {
+    PyObject *result = BINARY_OP1(v, w, op_slot, op_name);
+    if (result == Py_NotImplemented) {
+        Py_DECREF(result);
+
+        if (op_slot == NB_SLOT(nb_rshift) &&
+                PyCFunction_CheckExact(v) &&
+                strcmp(((PyCFunctionObject *) v)->m_ml->ml_name, "print") == 0) {
+            PyErr_Format(PyExc_TypeError,
+                    "unsupported operand type(s) for %.100s: "
+                    "'%.100s' and '%.100s'. Did you mean \"print(<message>, "
+                    "file=<output_stream>)\"?",
+                    op_name,
+                    Py_TYPE(v)->tp_name,
+                    Py_TYPE(w)->tp_name);
+            return nullptr;
+        }
+        return binop_type_error(v, w, op_name);
+    }
+    return result;
+}
+
+#define BINARY_FUNC(func, op, op_name) \
+    PyObject * \
+    func(PyObject *v, PyObject *w) { \
+        return binary_op(v, w, NB_SLOT(op), op_name); \
+    }
+
+BINARY_FUNC(PyNumber_Or, nb_or, "|")
+
+BINARY_FUNC(PyNumber_Xor, nb_xor, "^")
+
+BINARY_FUNC(PyNumber_And, nb_and, "&")
+
+BINARY_FUNC(PyNumber_Lshift, nb_lshift, "<<")
+
+BINARY_FUNC(PyNumber_Rshift, nb_rshift, ">>")
+
+BINARY_FUNC(PyNumber_Subtract, nb_subtract, "-")
+
+BINARY_FUNC(PyNumber_Divmod, nb_divmod, "divmod()")
+
+PyObject * handle_BINARY_ADD(PyObject *v, PyObject *w) {
+    PyObject *result = BINARY_OP1(v, w, NB_SLOT(nb_add), "+");
+    if (result != Py_NotImplemented) {
+        return result;
+    }
+    Py_DECREF(result);
+
+    PySequenceMethods *m = Py_TYPE(v)->tp_as_sequence;
+    if (m && m->sq_concat) {
+        result = (*m->sq_concat)(v, w);
+        assert(_Py_CheckSlotResult(v, "+", result != nullptr));
+        return result;
+    }
+
+    binop_type_error(v, w, "+");
+    gotoErrorHandler();
 }
 
 PyObject *handle_BINARY_POWER(PyObject *base, PyObject *exp) {
