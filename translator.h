@@ -53,8 +53,6 @@ struct PyBasicBlock {
 };
 
 class Translator {
-    friend class WrappedValue;
-
     const llvm::DataLayout &data_layout;
     llvm::LLVMContext context{};
     const RegisteredLLVMTypes types{(context.enableOpaquePointers(), context), data_layout};
@@ -68,6 +66,7 @@ class Translator {
     llvm::MDNode *likely_true{};
     llvm::MDNode *tbaa_refcnt{};
     llvm::MDNode *tbaa_frame_slot{};
+    llvm::MDNode *tbaa_frame_cells{};
     llvm::MDNode *tbaa_code_const{};
     llvm::MDNode *tbaa_frame_status{};
     llvm::AttributeList attr_noreturn{};
@@ -237,24 +236,20 @@ class Translator {
         do_PUSH(res);
     }
 
+    // TODO:泛型化
     void handle_BINARY_OP(size_t i) {
         auto right = do_POP();
         auto left = do_POP();
         using BinaryFunction = PyObject *(PyObject *, PyObject *);
         auto res = do_Call(types.get<BinaryFunction>(), getSymbol(i), left, right);
+        do_PUSH(res);
         do_Py_DECREF(left);
         do_Py_DECREF(right);
-        // 不需要了
-        // auto is_not_null = builder.CreateICmpNE(res, c_null);
-        // builder.CreateAssumption(is_not_null);
-        // auto bb = createBlock("BINARY.OK");
-        // builder.CreateCondBr(is_not_null, bb, unwind_block);
-        // builder.SetInsertPoint(bb);
-        do_PUSH(res);
     }
 
     llvm::BasicBlock *findBlock(unsigned instr_offset);
 
+    // TODO：删除
     void createIf(llvm::Value *cond, const std::function<void()> &make_body, bool terminated = false) {
         auto block_true = createBlock(useName("if_true"), func);
         auto block_end = createBlock(useName("if_false"), nullptr);

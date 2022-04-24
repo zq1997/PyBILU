@@ -22,13 +22,17 @@ constexpr auto EXTENDED_ARG_BITS = 8;
 void raiseException();
 PyObject *handle_LOAD_CLASSDEREF(PyFrameObject *f, PyOparg oparg);
 PyObject *handle_LOAD_GLOBAL(PyFrameObject *f, PyObject *name);
+void handle_STORE_GLOBAL(PyFrameObject *f, PyObject *name, PyObject *value);
 PyObject *handle_LOAD_NAME(PyFrameObject *f, PyObject *name);
-PyObject *handle_LOAD_ATTR(PyObject *name, PyObject *owner);
-PyObject *handle_LOAD_METHOD(PyObject *name, PyObject *obj, PyObject **sp);
+void handle_STORE_NAME(PyFrameObject *f, PyObject *name, PyObject *value);
+PyObject *handle_LOAD_ATTR(PyObject *owner, PyObject *name);
+PyObject *handle_LOAD_METHOD(PyObject *obj, PyObject *name, PyObject **sp);
+void handle_STORE_ATTR(PyObject *owner, PyObject *name, PyObject *value);
+PyObject *handle_BINARY_SUBSCR(PyObject *container, PyObject *sub);
+void handle_STORE_SUBSCR(PyObject *container, PyObject *sub, PyObject *value);
 PyObject *handle_UNARY_NOT(PyObject *value);
 PyObject *handle_BINARY_POWER(PyObject *base, PyObject *exp);
 PyObject *handle_INPLACE_POWER(PyObject *base, PyObject *exp);
-int handle_STORE_NAME(PyFrameObject *f, PyOparg oparg, PyObject *value);
 int handle_DELETE_DEREF(PyFrameObject *f, PyOparg oparg);
 int handle_DELETE_GLOBAL(PyFrameObject *f, PyOparg oparg);
 int handle_DELETE_NAME(PyFrameObject *f, PyOparg oparg);
@@ -41,9 +45,14 @@ constexpr std::tuple external_symbols{
         ENTRY(memmove),
         ENTRY(handle_LOAD_CLASSDEREF),
         ENTRY(handle_LOAD_GLOBAL),
+        ENTRY(handle_STORE_GLOBAL),
         ENTRY(handle_LOAD_NAME),
+        ENTRY(handle_STORE_NAME),
         ENTRY(handle_LOAD_ATTR),
         ENTRY(handle_LOAD_METHOD),
+        ENTRY(handle_STORE_ATTR),
+        ENTRY(handle_BINARY_SUBSCR),
+        ENTRY(handle_STORE_SUBSCR),
 
         std::pair{&handle_UNARY_NOT, "handle_UNARY_NOT"},
         std::pair{&PyNumber_Positive, "PyNumber_Positive"},
@@ -83,11 +92,6 @@ constexpr std::tuple external_symbols{
         std::pair{&PyObject_RichCompare, "PyObject_RichCompare"},
 
         std::pair{&unwindFrame, "unwindFrame"},
-        std::pair{&PyObject_GetItem, "PyObject_GetItem"},
-        std::pair{&PyDict_SetItem, "PyDict_SetItem"},
-        std::pair{&handle_STORE_NAME, "handle_STORE_NAME"},
-        std::pair{&PyObject_SetAttr, "PyObject_SetAttr"},
-        std::pair{&PyObject_SetItem, "PyObject_SetItem"},
         std::pair{&handle_DELETE_DEREF, "handle_DELETE_DEREF"},
         std::pair{&handle_DELETE_GLOBAL, "handle_DELETE_GLOBAL"},
         std::pair{&handle_DELETE_NAME, "handle_DELETE_NAME"}

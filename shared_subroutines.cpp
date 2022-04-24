@@ -7,6 +7,7 @@
 #include <internal/pycore_pyerrors.h>
 
 // TODO: 在想，能不能设计俩版本，decref在这里实现
+// TODO: 很多函数是否应该展开
 
 [[noreturn]] static void gotoErrorHandler(PyThreadState *tstate) {
     auto cframe = static_cast<ExtendedCFrame &>(*tstate->cframe);
@@ -169,6 +170,11 @@ PyObject *handle_LOAD_GLOBAL(PyFrameObject *f, PyObject *name) {
     return loadGlobalOrBuiltin(f, name, hash);
 }
 
+void handle_STORE_GLOBAL(PyFrameObject *f, PyObject *name, PyObject *value) {
+    auto err = PyDict_SetItem(f->f_globals, name, value);
+    gotoErrorHandler(err);
+}
+
 PyObject *handle_LOAD_NAME(PyFrameObject *f, PyObject *name) {
     if (!f->f_locals) {
         auto tstate = PyThreadState_Get();
@@ -199,14 +205,28 @@ PyObject *handle_LOAD_NAME(PyFrameObject *f, PyObject *name) {
     return loadGlobalOrBuiltin(f, name, hash);
 }
 
-PyObject *handle_LOAD_ATTR(PyObject *name, PyObject *owner) {
-    // TODO: 把它展开
+void handle_STORE_NAME(PyFrameObject *f, PyObject *name, PyObject *value) {
+    if (!f->f_locals) {
+        auto tstate = PyThreadState_Get();
+        _PyErr_Format(tstate, PyExc_SystemError, "no locals found when storing %R", name);
+        gotoErrorHandler(tstate);
+    }
+    int err;
+    if (PyDict_CheckExact(f->f_locals)) {
+        err = PyDict_SetItem(f->f_locals, name, value);
+    } else {
+        err = PyObject_SetItem(f->f_locals, name, value);
+    }
+    gotoErrorHandler(err);
+}
+
+PyObject *handle_LOAD_ATTR(PyObject *owner, PyObject *name) {
     auto value = PyObject_GetAttr(owner, name);
     gotoErrorHandler(!value);
     return value;
 }
 
-PyObject *handle_LOAD_METHOD(PyObject *name, PyObject *obj, PyObject **sp) {
+PyObject *handle_LOAD_METHOD(PyObject *obj, PyObject *name, PyObject **sp) {
     PyObject *meth = nullptr;
     int meth_found = _PyObject_GetMethod(obj, name, &meth);
     gotoErrorHandler(!meth);
@@ -222,21 +242,21 @@ PyObject *handle_LOAD_METHOD(PyObject *name, PyObject *obj, PyObject **sp) {
     return meth;
 }
 
-int handle_STORE_NAME(PyFrameObject *f, PyOparg oparg, PyObject *value) {
-    auto name = PyTuple_GET_ITEM(f->f_code->co_names, oparg);
-    if (f->f_locals) {
-        int err;
-        if (PyDict_CheckExact(f->f_locals)) {
-            err = PyDict_SetItem(f->f_locals, name, value);
-        } else {
-            err = PyObject_SetItem(f->f_locals, name, value);
-        }
-        return err == 0;
-    } else {
-        auto tstate = PyThreadState_Get();
-        _PyErr_Format(tstate, PyExc_SystemError, "no locals found when storing %R", name);
-        return 0;
-    }
+void handle_STORE_ATTR(PyObject *owner, PyObject *name, PyObject *value) {
+    // TODO: 把它展开
+    auto err = PyObject_SetAttr(owner, name, value);
+    gotoErrorHandler(err);
+}
+
+PyObject *handle_BINARY_SUBSCR(PyObject *container, PyObject *sub) {
+    auto value = PyObject_GetItem(container, sub);
+    gotoErrorHandler(!value);
+    return value;
+}
+
+void handle_STORE_SUBSCR(PyObject *container, PyObject *sub, PyObject *value) {
+    auto err = PyObject_SetItem(container, sub, value);
+    gotoErrorHandler(err);
 }
 
 int handle_DELETE_DEREF(PyFrameObject *f, PyOparg oparg) {

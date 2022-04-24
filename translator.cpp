@@ -26,6 +26,7 @@ Translator::Translator(const DataLayout &dl) : data_layout{dl} {
     auto tbaa_root = md_builder.createTBAARoot("TBAA root for CPython");
     tbaa_refcnt = createTBAANode(md_builder, tbaa_root, "refcnt");
     tbaa_frame_slot = createTBAANode(md_builder, tbaa_root, "frame slot");
+    tbaa_frame_cells = createTBAANode(md_builder, tbaa_root, "frame cells");
     tbaa_code_const = createTBAANode(md_builder, tbaa_root, "code const", true);
     tbaa_frame_status = createTBAANode(md_builder, tbaa_root, "stack pointer");
 
@@ -262,6 +263,7 @@ void Translator::emitBlock(unsigned index) {
     for (PyInstrIter instr(py_instructions, first, last); instr;) {
         instr.next();
         lasti = instr.offset - 1;
+        // TODO：不如合并到cframe中去，一次性写入
         storeValue<decltype(lasti)>(asValue(lasti), rt_lasti, tbaa_frame_status);
         // 注意stack_height记录于此，这就意味着在调用”风险函数“之前不允许DECREF，否则可能DEC两次
         storeValue<decltype(stack_height)>(asValue(stack_height), rt_stack_height_pointer, tbaa_frame_status);
@@ -345,14 +347,37 @@ void Translator::emitBlock(unsigned index) {
             do_PUSH(value);
             break;
         }
+        case STORE_FAST: {
+            auto value = do_POP();
+            do_SETLOCAL(instr.oparg, value);
+            break;
+        }
+        case DELETE_FAST: {
+            auto value = do_GETLOCAL(instr.oparg);
+            auto ok_block = createBlock("DELETE_FAST.OK");
+            builder.CreateCondBr(builder.CreateICmpNE(value, c_null), ok_block, error_block, likely_true);
+            builder.SetInsertPoint(ok_block);
+            storeValue<PyObject *>(c_null, py_locals[instr.oparg], tbaa_frame_slot);
+            do_Py_DECREF(value);
+            break;
+        }
         case LOAD_DEREF: {
             auto cell = loadValue<PyObject *>(py_freevars[instr.oparg], tbaa_code_const);
-            auto value = readData(cell, &PyCellObject::ob_ref);
+            auto value = loadFieldValue(cell, &PyCellObject::ob_ref, tbaa_frame_cells);
             auto ok_block = createBlock("LOAD_DEREF.OK");
             builder.CreateCondBr(builder.CreateICmpNE(value, c_null), ok_block, error_block, likely_true);
             builder.SetInsertPoint(ok_block);
             do_Py_INCREF(value);
             do_PUSH(value);
+            break;
+        }
+        case STORE_DEREF: {
+            auto cell = loadValue<PyObject *>(py_freevars[instr.oparg], tbaa_code_const);
+            auto cell_slot = getPointer(cell, &PyCellObject::ob_ref);
+            auto old_value = loadValue<PyObject *>(cell_slot, tbaa_frame_cells);
+            auto value = do_POP();
+            storeValue<PyObject *>(value, cell_slot, tbaa_frame_cells);
+            do_Py_XDECREF(old_value);
             break;
         }
         case LOAD_CLASSDEREF: {
@@ -365,100 +390,60 @@ void Translator::emitBlock(unsigned index) {
             do_PUSH(value);
             break;
         }
+        case STORE_GLOBAL: {
+            auto value = do_POP();
+            do_CallSymbol<handle_STORE_GLOBAL>(simple_frame, py_names[instr.oparg], value);
+            do_Py_DECREF(value);
+            break;
+        }
         case LOAD_NAME: {
             auto value = do_CallSymbol<handle_LOAD_NAME>(simple_frame, py_names[instr.oparg]);
             do_PUSH(value);
             break;
         }
+        case STORE_NAME: {
+            auto value = do_POP();
+            do_CallSymbol<handle_STORE_NAME>(simple_frame, py_names[instr.oparg], value);
+            do_Py_DECREF(value);
+            break;
+        }
         case LOAD_ATTR: {
             auto owner = do_POP();
-            auto attr = do_CallSymbol<handle_LOAD_ATTR>(py_names[instr.oparg], owner);
+            auto attr = do_CallSymbol<handle_LOAD_ATTR>(owner, py_names[instr.oparg]);
             do_PUSH(attr);
             do_Py_DECREF(owner);
             break;
         }
         case LOAD_METHOD: {
             auto obj = do_POP();
-            auto attr = do_CallSymbol<handle_LOAD_METHOD>(py_names[instr.oparg], obj, py_stack[stack_height]);
+            auto attr = do_CallSymbol<handle_LOAD_METHOD>(obj, py_names[instr.oparg], py_stack[stack_height]);
             do_PUSH(attr);
             do_Py_DECREF(obj);
-            break;
-        }
-        case BINARY_SUBSCR: {
-            handle_BINARY_OP(searchSymbol<PyObject_GetItem>());
-            break;
-        }
-        case STORE_FAST: {
-            auto value = do_POP();
-            do_SETLOCAL(instr.oparg, value);
-            break;
-        }
-        case STORE_DEREF: {
-            auto value = do_POP();
-            auto cell = builder.CreateLoad(types.get<PyObject *>(), py_freevars[instr.oparg]);
-            auto cell_ref = getPointer(cell, &PyCellObject::ob_ref);
-            auto old_value = builder.CreateLoad(types.get<PyObject *>(), cell_ref);
-            builder.CreateStore(value, cell_ref);
-            do_Py_XDECREF(old_value);
-            break;
-        }
-        case STORE_GLOBAL: {
-            auto value = do_POP();
-            auto globals = readData(simple_frame, &PyFrameObject::f_globals);
-            auto err = do_CallSymbol<PyDict_SetItem>(globals, py_names[instr.oparg], value);
-            do_Py_DECREF(value);
-            auto no_err = builder.CreateICmpSGE(err, asValue(0));
-            auto bb = createBlock("STORE_GLOBAL.OK");
-            builder.CreateCondBr(no_err, bb, unwind_block, likely_true);
-            builder.SetInsertPoint(bb);
-            break;
-        }
-        case STORE_NAME: {
-            auto value = do_POP();
-            auto ok = do_CallSymbol<handle_STORE_NAME>(simple_frame, asValue(instr.oparg), value);
-            do_Py_DECREF(value);
-            auto is_ok = builder.CreateICmpNE(ok, asValue(0));
-            auto bb = createBlock("STORE_NAME.OK");
-            builder.CreateCondBr(is_ok, bb, unwind_block, likely_true);
-            builder.SetInsertPoint(bb);
             break;
         }
         case STORE_ATTR: {
             auto owner = do_POP();
             auto value = do_POP();
-            auto err = do_CallSymbol<PyObject_SetAttr>(owner, py_names[instr.oparg], value);
+            do_CallSymbol<handle_STORE_ATTR>(owner, py_names[instr.oparg], value);
             do_Py_DECREF(value);
             do_Py_DECREF(owner);
-            auto no_err = builder.CreateICmpSGE(err, asValue(0));
-            auto bb = createBlock("STORE_ATTR.OK");
-            builder.CreateCondBr(no_err, bb, unwind_block, likely_true);
-            builder.SetInsertPoint(bb);
+            break;
+        }
+        case BINARY_SUBSCR: {
+            handle_BINARY_OP(searchSymbol<handle_BINARY_SUBSCR>());
             break;
         }
         case STORE_SUBSCR: {
             auto sub = do_POP();
             auto container = do_POP();
             auto value = do_POP();
-            auto err = do_CallSymbol<PyObject_SetAttr>(container, sub, value);
+            do_CallSymbol<handle_STORE_SUBSCR>(container, sub, value);
             do_Py_DECREF(value);
             do_Py_DECREF(container);
             do_Py_DECREF(sub);
-            auto no_err = builder.CreateICmpSGE(err, asValue(0));
-            auto bb = createBlock("STORE_SUBSCR.OK");
-            builder.CreateCondBr(no_err, bb, unwind_block, likely_true);
-            builder.SetInsertPoint(bb);
             break;
         }
-        case DELETE_FAST: {
-            auto value = do_GETLOCAL(instr.oparg);
-            auto is_not_null = builder.CreateICmpNE(value, c_null);
-            auto ok_block = createBlock("DELETE_FAST.OK");
-            builder.CreateCondBr(is_not_null, ok_block, unwind_block, likely_true);
-            builder.SetInsertPoint(ok_block);
-            storeValue<PyObject *>(c_null, py_locals[instr.oparg], tbaa_frame_slot);
-            do_Py_DECREF(value);
-            break;
-        }
+        // todo: 继续
         case DELETE_DEREF: {
             auto ok = do_CallSymbol<handle_DELETE_DEREF>(simple_frame, asValue(instr.oparg));
             auto is_ok = builder.CreateICmpNE(ok, asValue(0));
@@ -484,25 +469,25 @@ void Translator::emitBlock(unsigned index) {
             break;
         }
         case DELETE_ATTR: {
-            auto owner = do_POP();
-            auto err = do_CallSymbol<PyObject_SetAttr>(owner, py_names[instr.oparg], c_null);
-            do_Py_DECREF(owner);
-            auto no_err = builder.CreateICmpSGE(err, asValue(0));
-            auto bb = createBlock("DELETE_ATTR.OK");
-            builder.CreateCondBr(no_err, bb, unwind_block, likely_true);
-            builder.SetInsertPoint(bb);
-            break;
+            // auto owner = do_POP();
+            // auto err = do_CallSymbol<PyObject_SetAttr>(owner, py_names[instr.oparg], c_null);
+            // do_Py_DECREF(owner);
+            // auto no_err = builder.CreateICmpSGE(err, asValue(0));
+            // auto bb = createBlock("DELETE_ATTR.OK");
+            // builder.CreateCondBr(no_err, bb, unwind_block, likely_true);
+            // builder.SetInsertPoint(bb);
+            // break;
         }
         case DELETE_SUBSCR: {
-            auto sub = do_POP();
-            auto container = do_POP();
-            auto err = do_CallSymbol<PyObject_SetAttr>(container, sub, c_null);
-            do_Py_DECREF(container);
-            do_Py_DECREF(sub);
-            auto no_err = builder.CreateICmpSGE(err, asValue(0));
-            auto bb = createBlock("DELETE_SUBSCR.OK");
-            builder.CreateCondBr(no_err, bb, unwind_block, likely_true);
-            builder.SetInsertPoint(bb);
+            // auto sub = do_POP();
+            // auto container = do_POP();
+            // auto err = do_CallSymbol<PyObject_SetAttr>(container, sub, c_null);
+            // do_Py_DECREF(container);
+            // do_Py_DECREF(sub);
+            // auto no_err = builder.CreateICmpSGE(err, asValue(0));
+            // auto bb = createBlock("DELETE_SUBSCR.OK");
+            // builder.CreateCondBr(no_err, bb, unwind_block, likely_true);
+            // builder.SetInsertPoint(bb);
             break;
         }
         case UNARY_POSITIVE:
