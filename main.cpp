@@ -38,6 +38,7 @@ PyObject *eval_func(PyThreadState *tstate, PyFrameObject *frame, int throwflag) 
     cframe.use_tracing = prev_cframe->use_tracing;
     cframe.previous = prev_cframe;
     tstate->cframe = &cframe;
+    tstate->frame = frame;
     if (!setjmp(cframe.frame_jmp_buf)) {
         return jit_callee(&symbol_addresses[0], frame);
     } else {

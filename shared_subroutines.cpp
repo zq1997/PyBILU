@@ -1,16 +1,28 @@
 #include "shared_symbols.h"
 
 #include <Python.h>
+#include <opcode.h>
 #include <frameobject.h>
 #include <internal/pycore_code.h>
 #include <internal/pycore_pyerrors.h>
 
 // TODO: 在想，能不能设计俩版本，decref在这里实现
 
-[[noreturn]] static void gotoErrorHandler() {
-    auto tstate = PyThreadState_Get();
+[[noreturn]] static void gotoErrorHandler(PyThreadState *tstate) {
     auto cframe = static_cast<ExtendedCFrame &>(*tstate->cframe);
     longjmp(cframe.frame_jmp_buf, 1);
+}
+
+[[noreturn]] static void gotoErrorHandler() {
+    gotoErrorHandler(PyThreadState_Get());
+}
+
+template <typename... T>
+static inline void gotoErrorHandler(bool cond, T... args) {
+    // TODO: 是不是都是unlikely
+    if (cond) [[unlikely]] {
+        gotoErrorHandler(std::forward<T>(args)...);
+    }
 }
 
 static void raiseUndefinedName(PyThreadState *tstate, PyObject *name,
@@ -54,15 +66,26 @@ static void raiseUndefinedFreeOrCell(PyFrameObject *f, PyOparg oparg) {
     }
 }
 
-void handleError_LOAD_FAST(PyFrameObject *f, PyOparg oparg) {
+void raiseException() {
     auto tstate = PyThreadState_Get();
-    auto name = PyTuple_GET_ITEM(f->f_code->co_varnames, oparg);
+    auto frame = tstate->frame;
+    auto code = frame->f_code;
+    auto instr_array = reinterpret_cast<PyInstr *>(&PyTuple_GET_ITEM(code->co_code, 0));
+    auto i = frame->f_lasti;
+    auto opcode = _Py_OPCODE(instr_array[i]);
+    auto oparg = _Py_OPARG(instr_array[i]);
+    unsigned shift = 0;
+    while (i && _Py_OPCODE(instr_array[--i]) == EXTENDED_ARG) {
+        shift += EXTENDED_ARG_BITS;
+        oparg |= _Py_OPARG(instr_array[i]) << shift;
+    }
+    assert(opcode == LOAD_FAST);
+    auto name = PyTuple_GET_ITEM(code->co_varnames, oparg);
     raiseUndefinedLocal(tstate, name);
-    gotoErrorHandler();
+    gotoErrorHandler(tstate);
 }
 
 PyObject *handle_LOAD_CLASSDEREF(PyFrameObject *f, PyOparg oparg) {
-    auto tstate = PyThreadState_Get(); // TODO: 延迟获取
     auto locals = f->f_locals;
     assert(locals);
     auto co = f->f_code;
@@ -74,17 +97,17 @@ PyObject *handle_LOAD_CLASSDEREF(PyFrameObject *f, PyOparg oparg) {
         if (value) {
             Py_INCREF(value);
             return value;
-        } else if (_PyErr_Occurred(tstate)) {
-            return nullptr;
+        } else {
+            auto tstate = PyThreadState_Get();
+            gotoErrorHandler(_PyErr_Occurred(tstate), tstate);
         }
     } else {
         auto value = PyObject_GetItem(locals, name);
         if (value) {
             return value;
         } else {
-            if (!_PyErr_ExceptionMatches(tstate, PyExc_KeyError)) {
-                return nullptr;
-            }
+            auto tstate = PyThreadState_Get();
+            gotoErrorHandler(!_PyErr_ExceptionMatches(tstate, PyExc_KeyError), tstate);
             _PyErr_Clear(tstate);
         }
     }
@@ -93,11 +116,13 @@ PyObject *handle_LOAD_CLASSDEREF(PyFrameObject *f, PyOparg oparg) {
         Py_INCREF(value);
         return value;
     }
+    auto tstate = PyThreadState_Get();
     raiseUndefinedFree(tstate, name);
-    return nullptr;
+    gotoErrorHandler(tstate);
 }
 
 static Py_hash_t getHash(PyObject *name) {
+    assert(PyUnicode_CheckExact(name));
     auto hash = ((PyASCIIObject *) name)->hash;
     if (hash == -1) {
         hash = PyObject_Hash(name);
@@ -106,87 +131,85 @@ static Py_hash_t getHash(PyObject *name) {
 }
 
 static PyObject *loadGlobalOrBuiltin(PyFrameObject *f, PyObject *name, Py_hash_t hash) {
-    auto tstate = PyThreadState_Get();
     if (auto v = _PyDict_GetItem_KnownHash(f->f_globals, name, hash)) {
         Py_INCREF(v);
         return v;
-    } else if (_PyErr_Occurred(tstate)) {
-        return nullptr;
+    } else {
+        auto tstate = PyThreadState_Get();
+        gotoErrorHandler(_PyErr_Occurred(tstate), tstate);
     }
 
     if (PyDict_CheckExact(f->f_builtins)) {
         if (auto v = _PyDict_GetItem_KnownHash(f->f_builtins, name, hash)) {
             Py_INCREF(v);
             return v;
-        } else if (!_PyErr_Occurred(tstate)) {
-            raiseUndefinedName(tstate, name);
+        } else {
+            auto tstate = PyThreadState_Get();
+            if (!_PyErr_Occurred(tstate)) {
+                raiseUndefinedName(tstate, name);
+            }
+            gotoErrorHandler(tstate);
         }
     } else {
         if (auto v = PyObject_GetItem(f->f_builtins, name)) {
             return v;
-        } else if (_PyErr_ExceptionMatches(tstate, PyExc_KeyError)) {
-            raiseUndefinedName(tstate, name);
+        } else {
+            auto tstate = PyThreadState_Get();
+            if (_PyErr_ExceptionMatches(tstate, PyExc_KeyError)) {
+                raiseUndefinedName(tstate, name);
+            }
+            gotoErrorHandler(tstate);
         }
     }
-    return nullptr;
 }
 
-PyObject *handle_LOAD_GLOBAL(PyFrameObject *f, PyOparg oparg) {
-    // NOTE：global似乎默认必须就是dict
-    auto name = PyTuple_GET_ITEM(f->f_code->co_names, oparg);
-    assert(PyUnicode_CheckExact(name));
+PyObject *handle_LOAD_GLOBAL(PyFrameObject *f, PyObject *name) {
     auto hash = getHash(name);
-    if (hash == -1) {
-        return nullptr;
-    }
+    gotoErrorHandler(hash == -1);
     return loadGlobalOrBuiltin(f, name, hash);
 }
 
-PyObject *handle_LOAD_NAME(PyFrameObject *f, PyOparg oparg) {
-    auto tstate = PyThreadState_Get();
-    auto name = PyTuple_GET_ITEM(f->f_code->co_names, oparg);
+PyObject *handle_LOAD_NAME(PyFrameObject *f, PyObject *name) {
     if (!f->f_locals) {
+        auto tstate = PyThreadState_Get();
         _PyErr_Format(tstate, PyExc_SystemError, "no locals when loading %R", name);
-        return nullptr;
+        gotoErrorHandler(tstate);
     }
     auto hash = getHash(name);
-    if (hash == -1) {
-        return nullptr;
-    }
+    gotoErrorHandler(hash == -1);
 
     if (PyDict_CheckExact(f->f_locals)) {
         if (auto v = _PyDict_GetItem_KnownHash(f->f_locals, name, hash)) {
             Py_INCREF(v);
             return v;
-        } else if (_PyErr_Occurred(tstate)) {
-            return nullptr;
+        } else {
+            auto tstate = PyThreadState_Get();
+            gotoErrorHandler(_PyErr_Occurred(tstate), tstate);
         }
     } else {
         if (auto v = PyObject_GetItem(f->f_locals, name)) {
             return v;
-        } else if (!_PyErr_ExceptionMatches(tstate, PyExc_KeyError)) {
-            return nullptr;
+        } else {
+            auto tstate = PyThreadState_Get();
+            gotoErrorHandler(!_PyErr_ExceptionMatches(tstate, PyExc_KeyError), tstate);
+            _PyErr_Clear(tstate);
         }
-        _PyErr_Clear(tstate);
     }
 
     return loadGlobalOrBuiltin(f, name, hash);
 }
 
-PyObject *handle_LOAD_ATTR(PyFrameObject *f, PyOparg oparg, PyObject *owner) {
-    auto name = PyTuple_GET_ITEM(f->f_code->co_names, oparg);
-    return PyObject_GetAttr(owner, name);
+PyObject *handle_LOAD_ATTR(PyObject *name, PyObject *owner) {
+    // TODO: 把它展开
+    auto value = PyObject_GetAttr(owner, name);
+    gotoErrorHandler(!value);
+    return value;
 }
 
-PyObject *handle_LOAD_METHOD(PyFrameObject *f, PyOparg oparg, PyObject *obj, PyObject **sp) {
-    // TODO: 直接生成，省去CALL_METHOD判断, INCREF优化
-    auto name = PyTuple_GET_ITEM(f->f_code->co_names, oparg);
+PyObject *handle_LOAD_METHOD(PyObject *name, PyObject *obj, PyObject **sp) {
     PyObject *meth = nullptr;
     int meth_found = _PyObject_GetMethod(obj, name, &meth);
-
-    if (!meth) {
-        return nullptr;
-    }
+    gotoErrorHandler(!meth);
 
     if (meth_found) {
         sp[0] = meth;

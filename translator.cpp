@@ -30,19 +30,13 @@ Translator::Translator(const DataLayout &dl) : data_layout{dl} {
     tbaa_frame_status = createTBAANode(md_builder, tbaa_root, "stack pointer");
 
     auto attr_builder = AttrBuilder(context);
-    attr_builder
-            .addAttribute(Attribute::NoReturn);
-    attr_inaccessible_noreturn = AttributeList::get(context, AttributeList::FunctionIndex, attr_builder);
+    attr_builder.addAttribute(Attribute::NoReturn);
+    attr_noreturn = AttributeList::get(context, AttributeList::FunctionIndex, attr_builder);
     attr_builder.clear();
     attr_builder
-            .addAttribute(Attribute::NoUnwind);
-            // .addAttribute(Attribute::InaccessibleMemOnly); // TODO: 不合理
-    attr_inaccessible_only = AttributeList::get(context, AttributeList::FunctionIndex, attr_builder);
-    attr_inaccessible_or_arg = attr_inaccessible_only;
-    // attr_builder
-    //         .removeAttribute(Attribute::InaccessibleMemOnly)
-    //         .addAttribute(Attribute::InaccessibleMemOrArgMemOnly);
-    // attr_inaccessible_or_arg = AttributeList::get(context, AttributeList::FunctionIndex, attr_builder);
+            .addAttribute(Attribute::NoUnwind)
+            .addAttribute(Attribute::InaccessibleMemOrArgMemOnly);
+    attr_inaccessible_or_arg = AttributeList::get(context, AttributeList::FunctionIndex, attr_builder);
 
     attr_builder.clear();
     attr_builder
@@ -51,19 +45,18 @@ Translator::Translator(const DataLayout &dl) : data_layout{dl} {
     func->setAttributes(AttributeList::get(context, AttributeList::FunctionIndex, attr_builder));
     func->getArg(0)->setName(useName("$symbols"));
     simple_frame->setName(useName("$frame"));
-    // for (auto &arg : func->args()) {
-    //     arg.addAttr(Attribute::NoAlias);
-    // }
+    // TODO: 下面的，不知是否有必要
+    for (auto &arg : func->args()) {
+        arg.addAttr(Attribute::NoAlias);
+    }
 }
 
 void *Translator::operator()(Compiler &compiler, PyCodeObject *code) {
     py_code = code;
     // TODO: 重复了
-    instr_sp.reserve(PyBytes_GET_SIZE(py_code->co_code) / sizeof(PyInstr));
     parseCFG();
 
     blocks[0].llvm_block = createBlock("$entry_block", func);
-    unwind_block = createBlock("$unwind_block", nullptr);
     auto start = blocks[0].end;
     for (auto &b : Range(block_num - 1, &blocks[1])) {
         b.llvm_block = createBlock(useName("$instr.", start), nullptr);
@@ -72,21 +65,28 @@ void *Translator::operator()(Compiler &compiler, PyCodeObject *code) {
 
     builder.SetInsertPoint(blocks[0].llvm_block);
 
-    auto rt_code = readData(simple_frame, &PyFrameObject::f_code, useName("$code"));
-    auto rt_names_obj = readData(rt_code, &PyCodeObject::co_names);
-    rt_names = getPointer(rt_names_obj, &PyTupleObject::ob_item, "$names");
-    auto rt_consts_obj = readData(rt_code, &PyCodeObject::co_consts);
-    auto consts = getPointer(rt_consts_obj, &PyTupleObject::ob_item, "$names");
+    auto code_obj = readData(simple_frame, &PyFrameObject::f_code, useName("$code"));
 
+    auto names_tuple = loadFieldValue(code_obj, &PyCodeObject::co_names, tbaa_code_const);
+    auto names_array = getPointer(names_tuple, &PyTupleObject::ob_item, "$names");
+    py_names.reserve(PyTuple_GET_SIZE(code->co_names));
+    for (auto i : Range(PyTuple_GET_SIZE(code->co_names))) {
+        PyObject *repr{};
+        if constexpr(debug_build) {
+            repr = PyTuple_GET_ITEM(code->co_names, i);
+        }
+        py_names[i] = loadElementValue<PyObject *>(names_array, i, tbaa_code_const, useName(repr));
+    }
+
+    auto consts_tuple = loadFieldValue(code_obj, &PyCodeObject::co_consts, tbaa_code_const);
+    auto consts_array = getPointer(consts_tuple, &PyTupleObject::ob_item, "$consts");
     py_consts.reserve(PyTuple_GET_SIZE(code->co_consts));
     for (auto i : Range(PyTuple_GET_SIZE(code->co_consts))) {
-        // TODO: 也合并
-        auto ptr = getPointer<PyObject *>(consts, i, useName("$const.", i));
-        PyObject *repr = nullptr;
+        PyObject *repr{};
         if constexpr(debug_build) {
             repr = PyObject_Repr(PyTuple_GET_ITEM(code->co_consts, i));
         }
-        py_consts[i] = loadValue<PyObject *>(ptr, tbaa_code_const, useName(repr));
+        py_consts[i] = loadElementValue<PyObject *>(consts_array, i, tbaa_code_const, useName(repr));
     }
 
     auto localsplus = getPointer(simple_frame, &PyFrameObject::f_localsplus, useName("$localsplus"));
@@ -105,6 +105,7 @@ void *Translator::operator()(Compiler &compiler, PyCodeObject *code) {
     py_freevars.reserve(ncells + nfrees);
     for (auto i : Range(ncells)) {
         auto name = PyTuple_GET_ITEM(code->co_cellvars, i);
+        // TODO: 直接read出来
         py_freevars[i] = getPointer<PyObject *>(localsplus, start_cells + i, useName("$cell.", name));
     }
     for (auto i : Range(nfrees)) {
@@ -118,19 +119,28 @@ void *Translator::operator()(Compiler &compiler, PyCodeObject *code) {
     rt_stack_height_pointer = getPointer(simple_frame, &PyFrameObject::f_stackdepth, "$stack_height");
     rt_lasti = getPointer(simple_frame, &PyFrameObject::f_lasti, "$lasti");
 
+    error_block = createBlock("$error_here", nullptr);
+    unwind_block = createBlock("$unwind_block", nullptr);
+
     for (auto &i : Range(block_num - 1, 1U)) {
         emitBlock(i);
     }
 
-    builder.SetInsertPoint(blocks[0].llvm_block);
-    builder.CreateBr(blocks[1].llvm_block);
+    error_block->insertInto(func);
+    builder.SetInsertPoint(error_block);
+    do_CallSymbol<raiseException, &Translator::attr_noreturn>();
+    builder.CreateUnreachable();
+
     unwind_block->insertInto(func);
     builder.SetInsertPoint(unwind_block);
     builder.CreateRet(c_null);
 
+    builder.SetInsertPoint(blocks[0].llvm_block);
+    builder.CreateBr(blocks[1].llvm_block);
+
     auto result = compiler(mod);
 
-    // 可能需要考虑mod.dropAllReferences();不复用函数了，改成复用module，甚至都不复用
+    // TODO: 可能需要考虑mod.dropAllReferences();不复用函数了，改成复用module，甚至都不复用
     func->dropAllReferences();
 
     return result;
@@ -230,13 +240,11 @@ void Translator::do_SETLOCAL(PyOparg oparg, llvm::Value *value) {
 }
 
 llvm::Value *Translator::do_POP() {
-    storeValue<decltype(stack_height)>(asValue(--stack_height), rt_stack_height_pointer, tbaa_frame_status);
-    return loadValue<PyObject *>(py_stack[stack_height], tbaa_frame_slot);
+    return loadValue<PyObject *>(py_stack[--stack_height], tbaa_frame_slot);
 }
 
 void Translator::do_PUSH(llvm::Value *value) {
     storeValue<PyObject *>(value, py_stack[stack_height++], tbaa_frame_slot);
-    storeValue<decltype(stack_height)>(asValue(stack_height), rt_stack_height_pointer, tbaa_frame_status);
 }
 
 [[noreturn]] inline void unimplemented() {
@@ -254,15 +262,18 @@ void Translator::emitBlock(unsigned index) {
     for (PyInstrIter instr(py_instructions, first, last); instr;) {
         instr.next();
         lasti = instr.offset - 1;
-        instr_sp[lasti] = stack_height;
         storeValue<decltype(lasti)>(asValue(lasti), rt_lasti, tbaa_frame_status);
+        // 注意stack_height记录于此，这就意味着在调用”风险函数“之前不允许DECREF，否则可能DEC两次
+        storeValue<decltype(stack_height)>(asValue(stack_height), rt_stack_height_pointer, tbaa_frame_status);
 
         switch (instr.opcode) {
-        case EXTENDED_ARG:
+        case EXTENDED_ARG: {
             instr.extend_current_oparg();
             break;
-        case NOP:
+        }
+        case NOP: {
             break;
+        }
         case ROT_TWO: {
             auto top = do_PEAK(1);
             auto second = do_PEAK(2);;
@@ -294,6 +305,7 @@ void Translator::emitBlock(unsigned index) {
             auto top = do_PEAK(1);
             auto dest = py_stack[stack_height - instr.oparg - 1];
             auto src = py_stack[stack_height - instr.oparg];
+            // TODO: 添加属性，willreturn argonly
             do_CallSymbol<memmove>(dest, src, asValue((instr.oparg - 1) * sizeof(PyObject *)));
             do_SET_PEAK(instr.oparg, top);
         }
@@ -318,88 +330,58 @@ void Translator::emitBlock(unsigned index) {
             break;
         }
         case LOAD_CONST: {
-            // TODO: non null
+            // TODO: 添加non null属性
             auto value = py_consts[instr.oparg];
-            // auto is_not_null = builder.CreateICmpNE(value, c_null);
-            // builder.CreateAssumption(is_not_null);
             do_Py_INCREF(value);
             do_PUSH(value);
             break;
         }
         case LOAD_FAST: {
             auto value = do_GETLOCAL(instr.oparg);
-            auto is_not_null = builder.CreateICmpNE(value, c_null);
             auto ok_block = createBlock("LOAD_FAST.OK");
-            auto err_block = createBlock("LOAD_FAST.ERR");
-            builder.CreateCondBr(is_not_null, ok_block, err_block, likely_true);
-            builder.SetInsertPoint(err_block);
-            do_CallSymbol<handleError_LOAD_FAST, &Translator::attr_inaccessible_noreturn>(
-                    simple_frame, asValue(instr.oparg));
-            builder.CreateUnreachable();
+            builder.CreateCondBr(builder.CreateICmpNE(value, c_null), ok_block, error_block, likely_true);
             builder.SetInsertPoint(ok_block);
             do_Py_INCREF(value);
             do_PUSH(value);
             break;
         }
         case LOAD_DEREF: {
-            auto cell = builder.CreateLoad(types.get<PyObject *>(), py_freevars[instr.oparg]);
+            auto cell = loadValue<PyObject *>(py_freevars[instr.oparg], tbaa_code_const);
             auto value = readData(cell, &PyCellObject::ob_ref);
-            auto is_not_null = builder.CreateICmpNE(value, c_null);
-            auto bb = createBlock("LOAD_DEREF.OK");
-            builder.CreateCondBr(is_not_null, bb, unwind_block, likely_true);
-            builder.SetInsertPoint(bb);
+            auto ok_block = createBlock("LOAD_DEREF.OK");
+            builder.CreateCondBr(builder.CreateICmpNE(value, c_null), ok_block, error_block, likely_true);
+            builder.SetInsertPoint(ok_block);
             do_Py_INCREF(value);
             do_PUSH(value);
             break;
         }
         case LOAD_CLASSDEREF: {
             auto value = do_CallSymbol<handle_LOAD_CLASSDEREF>(simple_frame, asValue(instr.oparg));
-            auto is_not_null = builder.CreateICmpNE(value, c_null);
-            auto bb = createBlock("LOAD_CLASSDEREF.OK");
-            builder.CreateCondBr(is_not_null, bb, unwind_block, likely_true);
-            builder.SetInsertPoint(bb);
             do_PUSH(value);
             break;
         }
         case LOAD_GLOBAL: {
-            auto value = do_CallSymbol<handle_LOAD_GLOBAL>(simple_frame, asValue(instr.oparg));
-            auto is_not_null = builder.CreateICmpNE(value, c_null);
-            auto bb = createBlock("LOAD_GLOBAL.OK");
-            builder.CreateCondBr(is_not_null, bb, unwind_block, likely_true);
-            builder.SetInsertPoint(bb);
+            auto value = do_CallSymbol<handle_LOAD_GLOBAL>(simple_frame, py_names[instr.oparg]);
             do_PUSH(value);
             break;
         }
         case LOAD_NAME: {
-            auto value = do_CallSymbol<handle_LOAD_NAME>(simple_frame, asValue(instr.oparg));
-            auto is_not_null = builder.CreateICmpNE(value, c_null);
-            auto bb = createBlock("LOAD_NAME.OK");
-            builder.CreateCondBr(is_not_null, bb, unwind_block, likely_true);
-            builder.SetInsertPoint(bb);
+            auto value = do_CallSymbol<handle_LOAD_NAME>(simple_frame, py_names[instr.oparg]);
             do_PUSH(value);
             break;
         }
         case LOAD_ATTR: {
             auto owner = do_POP();
-            auto attr = do_CallSymbol<handle_LOAD_ATTR>(simple_frame, asValue(instr.oparg), owner);
-            do_Py_DECREF(owner);
-            auto is_not_null = builder.CreateICmpNE(attr, c_null);
-            auto bb = createBlock("LOAD_ATTR.OK");
-            builder.CreateCondBr(is_not_null, bb, unwind_block, likely_true);
-            builder.SetInsertPoint(bb);
+            auto attr = do_CallSymbol<handle_LOAD_ATTR>(py_names[instr.oparg], owner);
             do_PUSH(attr);
+            do_Py_DECREF(owner);
             break;
         }
         case LOAD_METHOD: {
             auto obj = do_POP();
-            auto attr = do_CallSymbol<handle_LOAD_METHOD, &Translator::attr_inaccessible_or_arg>(
-                    simple_frame, asValue(instr.oparg), obj, py_stack[stack_height]);
-            do_Py_DECREF(obj);
-            auto is_not_null = builder.CreateICmpNE(attr, c_null);
-            auto bb = createBlock("LOAD_METHOD.OK");
-            builder.CreateCondBr(is_not_null, bb, unwind_block, likely_true);
-            builder.SetInsertPoint(bb);
+            auto attr = do_CallSymbol<handle_LOAD_METHOD>(py_names[instr.oparg], obj, py_stack[stack_height]);
             do_PUSH(attr);
+            do_Py_DECREF(obj);
             break;
         }
         case BINARY_SUBSCR: {
@@ -421,10 +403,9 @@ void Translator::emitBlock(unsigned index) {
             break;
         }
         case STORE_GLOBAL: {
-            auto name = readData<PyObject *>(rt_names, instr.oparg);
             auto value = do_POP();
             auto globals = readData(simple_frame, &PyFrameObject::f_globals);
-            auto err = do_CallSymbol<PyDict_SetItem>(globals, name, value);
+            auto err = do_CallSymbol<PyDict_SetItem>(globals, py_names[instr.oparg], value);
             do_Py_DECREF(value);
             auto no_err = builder.CreateICmpSGE(err, asValue(0));
             auto bb = createBlock("STORE_GLOBAL.OK");
@@ -443,10 +424,9 @@ void Translator::emitBlock(unsigned index) {
             break;
         }
         case STORE_ATTR: {
-            auto name = readData<PyObject *>(rt_names, instr.oparg);
             auto owner = do_POP();
             auto value = do_POP();
-            auto err = do_CallSymbol<PyObject_SetAttr>(owner, name, value);
+            auto err = do_CallSymbol<PyObject_SetAttr>(owner, py_names[instr.oparg], value);
             do_Py_DECREF(value);
             do_Py_DECREF(owner);
             auto no_err = builder.CreateICmpSGE(err, asValue(0));
@@ -504,9 +484,8 @@ void Translator::emitBlock(unsigned index) {
             break;
         }
         case DELETE_ATTR: {
-            auto name = readData<PyObject *>(rt_names, instr.oparg);
             auto owner = do_POP();
-            auto err = do_CallSymbol<PyObject_SetAttr>(owner, name, c_null);
+            auto err = do_CallSymbol<PyObject_SetAttr>(owner, py_names[instr.oparg], c_null);
             do_Py_DECREF(owner);
             auto no_err = builder.CreateICmpSGE(err, asValue(0));
             auto bb = createBlock("DELETE_ATTR.OK");

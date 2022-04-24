@@ -19,15 +19,15 @@ using PyOpcode = decltype(_Py_OPCODE(PyInstr{}));
 using PyOparg = decltype(_Py_OPCODE(PyInstr{}));
 constexpr auto EXTENDED_ARG_BITS = 8;
 
-void handleError_LOAD_FAST(PyFrameObject *f, PyOparg oparg);
+void raiseException();
+PyObject *handle_LOAD_CLASSDEREF(PyFrameObject *f, PyOparg oparg);
+PyObject *handle_LOAD_GLOBAL(PyFrameObject *f, PyObject *name);
+PyObject *handle_LOAD_NAME(PyFrameObject *f, PyObject *name);
+PyObject *handle_LOAD_ATTR(PyObject *name, PyObject *owner);
+PyObject *handle_LOAD_METHOD(PyObject *name, PyObject *obj, PyObject **sp);
 PyObject *handle_UNARY_NOT(PyObject *value);
 PyObject *handle_BINARY_POWER(PyObject *base, PyObject *exp);
 PyObject *handle_INPLACE_POWER(PyObject *base, PyObject *exp);
-PyObject *handle_LOAD_CLASSDEREF(PyFrameObject *f, PyOparg oparg);
-PyObject *handle_LOAD_GLOBAL(PyFrameObject *f, PyOparg oparg);
-PyObject *handle_LOAD_NAME(PyFrameObject *f, PyOparg oparg);
-PyObject *handle_LOAD_ATTR(PyFrameObject *f, PyOparg oparg, PyObject *owner);
-PyObject *handle_LOAD_METHOD(PyFrameObject *f, PyOparg oparg, PyObject *obj, PyObject **sp);
 int handle_STORE_NAME(PyFrameObject *f, PyOparg oparg, PyObject *value);
 int handle_DELETE_DEREF(PyFrameObject *f, PyOparg oparg);
 int handle_DELETE_GLOBAL(PyFrameObject *f, PyOparg oparg);
@@ -37,8 +37,14 @@ PyObject *unwindFrame(PyObject **stack, ptrdiff_t stack_height);
 #define ENTRY(X) std::pair{&(X), #X}
 
 constexpr std::tuple external_symbols{
-        std::pair{&memmove, "memmove"},
-        ENTRY(handleError_LOAD_FAST),
+        ENTRY(raiseException),
+        ENTRY(memmove),
+        ENTRY(handle_LOAD_CLASSDEREF),
+        ENTRY(handle_LOAD_GLOBAL),
+        ENTRY(handle_LOAD_NAME),
+        ENTRY(handle_LOAD_ATTR),
+        ENTRY(handle_LOAD_METHOD),
+
         std::pair{&handle_UNARY_NOT, "handle_UNARY_NOT"},
         std::pair{&PyNumber_Positive, "PyNumber_Positive"},
         std::pair{&PyNumber_Negative, "PyNumber_Negative"},
@@ -77,12 +83,6 @@ constexpr std::tuple external_symbols{
         std::pair{&PyObject_RichCompare, "PyObject_RichCompare"},
 
         std::pair{&unwindFrame, "unwindFrame"},
-
-        std::pair{&handle_LOAD_CLASSDEREF, "handle_LOAD_CLASSDEREF"},
-        std::pair{&handle_LOAD_GLOBAL, "handle_LOAD_GLOBAL"},
-        std::pair{&handle_LOAD_NAME, "handle_LOAD_NAME"},
-        std::pair{&handle_LOAD_ATTR, "handle_LOAD_ATTR"},
-        std::pair{&handle_LOAD_METHOD, "handle_LOAD_METHOD"},
         std::pair{&PyObject_GetItem, "PyObject_GetItem"},
         std::pair{&PyDict_SetItem, "PyDict_SetItem"},
         std::pair{&handle_STORE_NAME, "handle_STORE_NAME"},

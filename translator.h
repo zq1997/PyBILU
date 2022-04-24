@@ -70,8 +70,7 @@ class Translator {
     llvm::MDNode *tbaa_frame_slot{};
     llvm::MDNode *tbaa_code_const{};
     llvm::MDNode *tbaa_frame_status{};
-    llvm::AttributeList attr_inaccessible_noreturn{};
-    llvm::AttributeList attr_inaccessible_only{};
+    llvm::AttributeList attr_noreturn{};
     llvm::AttributeList attr_inaccessible_or_arg{};
 
     PyCodeObject *py_code{};
@@ -79,8 +78,9 @@ class Translator {
     decltype(PyFrameObject::f_lasti) lasti{};
     decltype(PyFrameObject::f_stackdepth) stack_height{};
     unsigned block_num{};
-    DynamicArray<int> instr_sp;
     DynamicArray<PyBasicBlock> blocks;
+    llvm::BasicBlock *error_block{};
+    DynamicArray<llvm::Value *> py_names;
     DynamicArray<llvm::Value *> py_consts;
     DynamicArray<llvm::Value *> py_locals;
     DynamicArray<llvm::Value *> py_freevars;
@@ -89,7 +89,6 @@ class Translator {
     llvm::BasicBlock *unwind_block{};
 
     llvm::Constant *c_null{llvm::ConstantPointerNull::get(types.get<void *>())};
-    llvm::Value *rt_names{};
     llvm::Value *rt_lasti{};
     llvm::Value *rt_stack_height_pointer{};
 
@@ -140,11 +139,35 @@ class Translator {
     }
 
     template <typename T>
+    auto loadElementValue(llvm::Value *base, size_t index, llvm::MDNode *tbaa_node, const llvm::Twine &name = "") {
+        auto ptr = getPointer<T>(base, index);
+        return loadValue<T>(ptr, tbaa_node, name);
+    }
+
+    template <typename T, typename M>
+    auto loadFieldValue(llvm::Value *instance, M T::* member, llvm::MDNode *tbaa_node, const llvm::Twine &name = "") {
+        auto ptr = getPointer(instance, member);
+        return loadValue<M>(ptr, tbaa_node, name);
+    }
+
+    template <typename T>
     void storeValue(llvm::Value *value, llvm::Value *ptr, llvm::MDNode *tbaa_node) {
         auto type = types.getAll<T>();
         auto store_inst = new llvm::StoreInst(value, ptr, false, type.align);
         builder.Insert(store_inst);
         store_inst->setMetadata(llvm::LLVMContext::MD_tbaa, tbaa_node);
+    }
+
+    template <typename T>
+    auto storeElementValue(llvm::Value *value, llvm::Value *base, size_t index, llvm::MDNode *tbaa_node) {
+        auto ptr = getPointer<T>(base, index);
+        return storeValue<T>(value, ptr, tbaa_node);
+    }
+
+    template <typename T, typename M>
+    auto storeFiledValue(llvm::Value *value, llvm::Value *instance, M T::* member, llvm::MDNode *tbaa_node) {
+        auto ptr = getPointer(instance, member);
+        return storeValue<M>(ptr, ptr, tbaa_node);
     }
 
     template <typename T>
@@ -189,7 +212,7 @@ class Translator {
     void do_Py_XDECREF(llvm::Value *v);
 
 
-    template <llvm::AttributeList Translator::* Attr = &Translator::attr_inaccessible_only, typename... Args>
+    template <llvm::AttributeList Translator::* Attr = &Translator::attr_inaccessible_or_arg, typename... Args>
     llvm::CallInst *do_Call(llvm::FunctionType *type, llvm::Value *callee, Args... args) {
         auto call_instr = builder.CreateCall(type, callee, {args...});
         call_instr->setAttributes(this->*Attr);
@@ -201,7 +224,7 @@ class Translator {
         return do_Call(types.get<M>(), readData(instance, member), args...);
     }
 
-    template <auto &S, llvm::AttributeList Translator::* Attr = &Translator::attr_inaccessible_only, typename... Args>
+    template <auto &S, llvm::AttributeList Translator::* Attr = &Translator::attr_inaccessible_or_arg, typename... Args>
     llvm::CallInst *do_CallSymbol(Args... args) {
         return do_Call<Attr>(types.get<std::remove_reference_t<decltype(S)>>(), getSymbol(searchSymbol<S>()), args...);
     }

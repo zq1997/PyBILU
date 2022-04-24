@@ -63,13 +63,13 @@ import pynic
 # stat('无优化', foo)
 # stat('有优化', bar)
 
-
+b = 'd'
 @pynic.apply
 def foo():
+    global b
     a = 2
-    b = 'd'
     return a ** b
 
 dis(foo)
-
+del b
 print(foo())
