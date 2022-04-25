@@ -476,96 +476,126 @@ void Translator::emitBlock(unsigned index) {
             do_Py_DECREF(sub);
             break;
         }
-        case UNARY_NOT:
+        case UNARY_NOT: {
             handle_UNARY_OP(searchSymbol<handle_UNARY_NOT>());
             break;
-        case UNARY_POSITIVE:
+        }
+        case UNARY_POSITIVE: {
             handle_UNARY_OP(searchSymbol<handle_UNARY_POSITIVE>());
             break;
-        case UNARY_NEGATIVE:
+        }
+        case UNARY_NEGATIVE: {
             handle_UNARY_OP(searchSymbol<handle_UNARY_NEGATIVE>());
             break;
-        case UNARY_INVERT:
+        }
+        case UNARY_INVERT: {
             handle_UNARY_OP(searchSymbol<handle_UNARY_INVERT>());
             break;
-        case BINARY_ADD:
+        }
+        case BINARY_ADD: {
             handle_BINARY_OP(searchSymbol<handle_BINARY_ADD>());
             break;
-        case BINARY_SUBTRACT:
-            handle_BINARY_OP(searchSymbol<PyNumber_Subtract>());
+        }
+        case INPLACE_ADD: {
+            handle_BINARY_OP(searchSymbol<handle_INPLACE_ADD>());
             break;
-        case BINARY_MULTIPLY:
-            handle_BINARY_OP(searchSymbol<PyNumber_Multiply>());
+        }
+        case BINARY_SUBTRACT: {
+            handle_BINARY_OP(searchSymbol<handle_BINARY_SUBTRACT>());
             break;
-        case BINARY_FLOOR_DIVIDE:
-            handle_BINARY_OP(searchSymbol<PyNumber_FloorDivide>());
+        }
+        case INPLACE_SUBTRACT: {
+            handle_BINARY_OP(searchSymbol<handle_INPLACE_SUBTRACT>());
             break;
-        case BINARY_TRUE_DIVIDE:
-            handle_BINARY_OP(searchSymbol<PyNumber_TrueDivide>());
+        }
+        case BINARY_MULTIPLY: {
+            handle_BINARY_OP(searchSymbol<handle_BINARY_MULTIPLY>());
             break;
-        case BINARY_MODULO:
-            handle_BINARY_OP(searchSymbol<PyNumber_Remainder>());
+        }
+        case INPLACE_MULTIPLY: {
+            handle_BINARY_OP(searchSymbol<handle_INPLACE_MULTIPLY>());
             break;
-        case BINARY_POWER:
+        }
+        case BINARY_FLOOR_DIVIDE: {
+            handle_BINARY_OP(searchSymbol<handle_BINARY_FLOOR_DIVIDE>());
+            break;
+        }
+        case INPLACE_FLOOR_DIVIDE: {
+            handle_BINARY_OP(searchSymbol<handle_INPLACE_FLOOR_DIVIDE>());
+            break;
+        }
+        case BINARY_TRUE_DIVIDE: {
+            handle_BINARY_OP(searchSymbol<handle_BINARY_TRUE_DIVIDE>());
+            break;
+        }
+        case INPLACE_TRUE_DIVIDE: {
+            handle_BINARY_OP(searchSymbol<handle_INPLACE_TRUE_DIVIDE>());
+            break;
+        }
+        case BINARY_MODULO: {
+            handle_BINARY_OP(searchSymbol<handle_BINARY_MODULO>());
+            break;
+        }
+        case INPLACE_MODULO: {
+            handle_BINARY_OP(searchSymbol<handle_INPLACE_MODULO>());
+            break;
+        }
+        case BINARY_POWER: {
             handle_BINARY_OP(searchSymbol<handle_BINARY_POWER>());
             break;
-        case BINARY_MATRIX_MULTIPLY:
-            handle_BINARY_OP(searchSymbol<PyNumber_MatrixMultiply>());
-            break;
-        case BINARY_LSHIFT:
-            handle_BINARY_OP(searchSymbol<PyNumber_Lshift>());
-            break;
-        case BINARY_RSHIFT:
-            handle_BINARY_OP(searchSymbol<PyNumber_Rshift>());
-            break;
-        case BINARY_AND:
-            handle_BINARY_OP(searchSymbol<PyNumber_And>());
-            break;
-        case BINARY_OR:
-            handle_BINARY_OP(searchSymbol<PyNumber_Or>());
-            break;
-        case BINARY_XOR:
-            handle_BINARY_OP(searchSymbol<PyNumber_Xor>());
-            break;
-        case INPLACE_ADD:
-            handle_BINARY_OP(searchSymbol<PyNumber_InPlaceAdd>());
-            break;
-        case INPLACE_SUBTRACT:
-            handle_BINARY_OP(searchSymbol<PyNumber_InPlaceSubtract>());
-            break;
-        case INPLACE_MULTIPLY:
-            handle_BINARY_OP(searchSymbol<PyNumber_InPlaceMultiply>());
-            break;
-        case INPLACE_FLOOR_DIVIDE:
-            handle_BINARY_OP(searchSymbol<PyNumber_InPlaceFloorDivide>());
-            break;
-        case INPLACE_TRUE_DIVIDE:
-            handle_BINARY_OP(searchSymbol<PyNumber_InPlaceTrueDivide>());
-            break;
-        case INPLACE_MODULO:
-            handle_BINARY_OP(searchSymbol<PyNumber_InPlaceRemainder>());
-            break;
-        case INPLACE_POWER:
+        }
+        case INPLACE_POWER: {
             handle_BINARY_OP(searchSymbol<handle_INPLACE_POWER>());
             break;
-        case INPLACE_MATRIX_MULTIPLY:
-            handle_BINARY_OP(searchSymbol<PyNumber_InPlaceMatrixMultiply>());
+        }
+        case BINARY_MATRIX_MULTIPLY: {
+            handle_BINARY_OP(searchSymbol<handle_BINARY_MATRIX_MULTIPLY>());
             break;
-        case INPLACE_LSHIFT:
-            handle_BINARY_OP(searchSymbol<PyNumber_InPlaceLshift>());
+        }
+        case INPLACE_MATRIX_MULTIPLY: {
+            handle_BINARY_OP(searchSymbol<handle_INPLACE_MATRIX_MULTIPLY>());
             break;
-        case INPLACE_RSHIFT:
-            handle_BINARY_OP(searchSymbol<PyNumber_InPlaceRshift>());
+        }
+        case BINARY_LSHIFT: {
+            handle_BINARY_OP(searchSymbol<handle_BINARY_LSHIFT>());
             break;
-        case INPLACE_AND:
-            handle_BINARY_OP(searchSymbol<PyNumber_InPlaceAnd>());
+        }
+        case INPLACE_LSHIFT: {
+            handle_BINARY_OP(searchSymbol<handle_INPLACE_LSHIFT>());
             break;
-        case INPLACE_OR:
-            handle_BINARY_OP(searchSymbol<PyNumber_InPlaceOr>());
+        }
+        case BINARY_RSHIFT: {
+            handle_BINARY_OP(searchSymbol<handle_BINARY_RSHIFT>());
             break;
-        case INPLACE_XOR:
-            handle_BINARY_OP(searchSymbol<PyNumber_InPlaceXor>());
+        }
+        case INPLACE_RSHIFT: {
+            handle_BINARY_OP(searchSymbol<handle_INPLACE_RSHIFT>());
             break;
+        }
+        case BINARY_AND: {
+            handle_BINARY_OP(searchSymbol<handle_BINARY_AND>());
+            break;
+        }
+        case INPLACE_AND: {
+            handle_BINARY_OP(searchSymbol<handle_INPLACE_AND>());
+            break;
+        }
+        case BINARY_OR: {
+            handle_BINARY_OP(searchSymbol<handle_BINARY_OR>());
+            break;
+        }
+        case INPLACE_OR: {
+            handle_BINARY_OP(searchSymbol<handle_INPLACE_OR>());
+            break;
+        }
+        case BINARY_XOR: {
+            handle_BINARY_OP(searchSymbol<handle_BINARY_XOR>());
+            break;
+        }
+        case INPLACE_XOR: {
+            handle_BINARY_OP(searchSymbol<handle_INPLACE_XOR>());
+            break;
+        }
         case COMPARE_OP: {
             auto right = do_POP();
             auto left = do_POP();

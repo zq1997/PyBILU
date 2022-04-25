@@ -32,13 +32,39 @@ PyObject *handle_LOAD_METHOD(PyObject *obj, PyObject *name, PyObject **sp);
 void handle_STORE_ATTR(PyObject *owner, PyObject *name, PyObject *value);
 PyObject *handle_BINARY_SUBSCR(PyObject *container, PyObject *sub);
 void handle_STORE_SUBSCR(PyObject *container, PyObject *sub, PyObject *value);
+
 PyObject *handle_UNARY_NOT(PyObject *value);
 PyObject *handle_UNARY_POSITIVE(PyObject *value);
 PyObject *handle_UNARY_NEGATIVE(PyObject *value);
 PyObject *handle_UNARY_INVERT(PyObject *value);
-PyObject *handle_BINARY_ADD(PyObject *base, PyObject *exp);
 
-PyObject *handle_BINARY_POWER(PyObject *base, PyObject *exp);
+PyObject *handle_BINARY_ADD(PyObject *v, PyObject *w);
+PyObject *handle_INPLACE_ADD(PyObject *v, PyObject *w);
+PyObject *handle_BINARY_SUBTRACT(PyObject *v, PyObject *w);
+PyObject *handle_INPLACE_SUBTRACT(PyObject *v, PyObject *w);
+PyObject *handle_BINARY_MULTIPLY(PyObject *v, PyObject *w);
+PyObject *handle_INPLACE_MULTIPLY(PyObject *v, PyObject *w);
+PyObject *handle_BINARY_FLOOR_DIVIDE(PyObject *v, PyObject *w);
+PyObject *handle_INPLACE_FLOOR_DIVIDE(PyObject *v, PyObject *w);
+PyObject *handle_BINARY_TRUE_DIVIDE(PyObject *v, PyObject *w);
+PyObject *handle_INPLACE_TRUE_DIVIDE(PyObject *v, PyObject *w);
+PyObject *handle_BINARY_MODULO(PyObject *v, PyObject *w);
+PyObject *handle_INPLACE_MODULO(PyObject *v, PyObject *w);
+PyObject *handle_BINARY_POWER(PyObject *v, PyObject *w);
+PyObject *handle_INPLACE_POWER(PyObject *v, PyObject *w);
+PyObject *handle_BINARY_MATRIX_MULTIPLY(PyObject *v, PyObject *w);
+PyObject *handle_INPLACE_MATRIX_MULTIPLY(PyObject *v, PyObject *w);
+PyObject *handle_BINARY_LSHIFT(PyObject *v, PyObject *w);
+PyObject *handle_INPLACE_LSHIFT(PyObject *v, PyObject *w);
+PyObject *handle_BINARY_RSHIFT(PyObject *v, PyObject *w);
+PyObject *handle_INPLACE_RSHIFT(PyObject *v, PyObject *w);
+PyObject *handle_BINARY_AND(PyObject *v, PyObject *w);
+PyObject *handle_INPLACE_AND(PyObject *v, PyObject *w);
+PyObject *handle_BINARY_OR(PyObject *v, PyObject *w);
+PyObject *handle_INPLACE_OR(PyObject *v, PyObject *w);
+PyObject *handle_BINARY_XOR(PyObject *v, PyObject *w);
+PyObject *handle_INPLACE_XOR(PyObject *v, PyObject *w);
+
 PyObject *handle_INPLACE_POWER(PyObject *base, PyObject *exp);
 PyObject *unwindFrame(PyObject **stack, ptrdiff_t stack_height);
 
@@ -63,38 +89,33 @@ constexpr std::tuple external_symbols{
         ENTRY(handle_UNARY_POSITIVE),
         ENTRY(handle_UNARY_NEGATIVE),
         ENTRY(handle_UNARY_INVERT),
+
         ENTRY(handle_BINARY_ADD),
-
-        std::pair{&PyNumber_Positive, "PyNumber_Positive"},
-        std::pair{&PyNumber_Negative, "PyNumber_Negative"},
-        std::pair{&PyNumber_Invert, "PyNumber_Invert"},
-
-        std::pair{&PyNumber_Subtract, "PyNumber_Subtract"},
-        std::pair{&PyNumber_Multiply, "PyNumber_Multiply"},
-        std::pair{&PyNumber_TrueDivide, "PyNumber_TrueDivide"},
-        std::pair{&PyNumber_FloorDivide, "PyNumber_FloorDivide"},
-        std::pair{&PyNumber_Remainder, "PyNumber_Remainder"},
-        std::pair{&handle_BINARY_POWER, "handle_BINARY_POWER"},
-        std::pair{&PyNumber_MatrixMultiply, "PyNumber_MatrixMultiply"},
-        std::pair{&PyNumber_Lshift, "PyNumber_Lshift"},
-        std::pair{&PyNumber_Rshift, "PyNumber_Rshift"},
-        std::pair{&PyNumber_And, "PyNumber_And"},
-        std::pair{&PyNumber_Or, "PyNumber_Or"},
-        std::pair{&PyNumber_Xor, "PyNumber_Xor"},
-
-        std::pair{&PyNumber_InPlaceAdd, "PyNumber_InPlaceAdd"},
-        std::pair{&PyNumber_InPlaceSubtract, "PyNumber_InPlaceSubtract"},
-        std::pair{&PyNumber_InPlaceMultiply, "PyNumber_InPlaceMultiply"},
-        std::pair{&PyNumber_InPlaceTrueDivide, "PyNumber_InPlaceTrueDivide"},
-        std::pair{&PyNumber_InPlaceFloorDivide, "PyNumber_InPlaceFloorDivide"},
-        std::pair{&PyNumber_InPlaceRemainder, "PyNumber_InPlaceRemainder"},
-        std::pair{&handle_INPLACE_POWER, "handle_INPLACE_POWER"},
-        std::pair{&PyNumber_InPlaceMatrixMultiply, "PyNumber_InPlaceMatrixMultiply"},
-        std::pair{&PyNumber_InPlaceLshift, "PyNumber_InPlaceLshift"},
-        std::pair{&PyNumber_InPlaceRshift, "PyNumber_InPlaceRshift"},
-        std::pair{&PyNumber_InPlaceAnd, "PyNumber_InPlaceAnd"},
-        std::pair{&PyNumber_InPlaceOr, "PyNumber_InPlaceOr"},
-        std::pair{&PyNumber_InPlaceXor, "PyNumber_InPlaceXor"},
+        ENTRY(handle_INPLACE_ADD),
+        ENTRY(handle_BINARY_SUBTRACT),
+        ENTRY(handle_INPLACE_SUBTRACT),
+        ENTRY(handle_BINARY_MULTIPLY),
+        ENTRY(handle_INPLACE_MULTIPLY),
+        ENTRY(handle_BINARY_FLOOR_DIVIDE),
+        ENTRY(handle_INPLACE_FLOOR_DIVIDE),
+        ENTRY(handle_BINARY_TRUE_DIVIDE),
+        ENTRY(handle_INPLACE_TRUE_DIVIDE),
+        ENTRY(handle_BINARY_MODULO),
+        ENTRY(handle_INPLACE_MODULO),
+        ENTRY(handle_BINARY_POWER),
+        ENTRY(handle_INPLACE_POWER),
+        ENTRY(handle_BINARY_MATRIX_MULTIPLY),
+        ENTRY(handle_INPLACE_MATRIX_MULTIPLY),
+        ENTRY(handle_BINARY_LSHIFT),
+        ENTRY(handle_INPLACE_LSHIFT),
+        ENTRY(handle_BINARY_RSHIFT),
+        ENTRY(handle_INPLACE_RSHIFT),
+        ENTRY(handle_BINARY_AND),
+        ENTRY(handle_INPLACE_AND),
+        ENTRY(handle_BINARY_OR),
+        ENTRY(handle_INPLACE_OR),
+        ENTRY(handle_BINARY_XOR),
+        ENTRY(handle_INPLACE_XOR),
 
         std::pair{&PyObject_GetIter, "PyObject_GetIter"},
         std::pair{&PyObject_IsTrue, "PyObject_IsTrue"},

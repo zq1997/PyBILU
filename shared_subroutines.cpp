@@ -6,6 +6,7 @@
 #include <internal/pycore_pystate.h>
 #include <internal/pycore_code.h>
 #include <internal/pycore_pyerrors.h>
+#include <internal/pycore_abstract.h>
 
 // TODO: 在想，能不能设计俩版本，decref在这里实现
 // TODO: 很多函数是否应该展开，把Python的实现复制过来，降低调用层数
@@ -349,165 +350,328 @@ PyObject *handle_UNARY(PyObject *value) {
 }
 
 PyObject *handle_UNARY_POSITIVE(PyObject *value) {
-    static const char slot[]{"__pos__"};
+    static constexpr char slot[]{"__pos__"};
     return handle_UNARY<&PyNumberMethods::nb_positive, '+', slot>(value);
 }
 
 PyObject *handle_UNARY_NEGATIVE(PyObject *value) {
-    static const char slot[]{"__neg__"};
+    static constexpr char slot[]{"__neg__"};
     return handle_UNARY<&PyNumberMethods::nb_negative, '-', slot>(value);
 }
 
 PyObject *handle_UNARY_INVERT(PyObject *value) {
-    static const char slot[]{"__invert__"};
+    static constexpr char slot[]{"__invert__"};
     return handle_UNARY<&PyNumberMethods::nb_invert, '~', slot>(value);
 }
 
-#define NB_SLOT(x) offsetof(PyNumberMethods, x)
-#define NB_BINOP(nb_methods, slot) \
-        (*(binaryfunc*)(& ((char*)nb_methods)[slot]))
-#define NB_TERNOP(nb_methods, slot) \
-        (*(ternaryfunc*)(& ((char*)nb_methods)[slot]))
-
-static PyObject *
-binary_op1(PyObject *v, PyObject *w, const int op_slot
-#ifndef NDEBUG
-        , const char *op_name
-#endif
-) {
-    binaryfunc slotv;
-    if (Py_TYPE(v)->tp_as_number != nullptr) {
-        slotv = NB_BINOP(Py_TYPE(v)->tp_as_number, op_slot);
-    } else {
-        slotv = nullptr;
-    }
-
-    binaryfunc slotw;
-    if (!Py_IS_TYPE(w, Py_TYPE(v)) && Py_TYPE(w)->tp_as_number != nullptr) {
-        slotw = NB_BINOP(Py_TYPE(w)->tp_as_number, op_slot);
-        if (slotw == slotv) {
-            slotw = nullptr;
-        }
-    } else {
-        slotw = nullptr;
-    }
+static PyObject *binary_op_impl(PyObject *v, PyObject *w, binaryfunc PyNumberMethods::* op_slot, const char *op_name) {
+    auto typev = Py_TYPE(v);
+    auto typew = Py_TYPE(w);
+    auto slotv = typev->tp_as_number ? typev->tp_as_number->*op_slot : nullptr;
+    auto slotw = typew->tp_as_number ? typew->tp_as_number->*op_slot : nullptr;
+    slotw = slotw == slotv ? nullptr : slotw;
 
     if (slotv) {
         PyObject *x;
-        if (slotw && PyType_IsSubtype(Py_TYPE(w), Py_TYPE(v))) {
+        if (slotw && PyType_IsSubtype(typew, typev)) {
             x = slotw(v, w);
+            assert(_Py_CheckSlotResult(v, op_name, x != nullptr));
             if (x != Py_NotImplemented) {
+                gotoErrorHandler(!x);
                 return x;
             }
-            Py_DECREF(x); /* can't do it */
+            Py_DECREF(x);
             slotw = nullptr;
         }
         x = slotv(v, w);
-        // assert(_Py_CheckSlotResult(v, op_name, x != nullptr));
+        assert(_Py_CheckSlotResult(v, op_name, x != nullptr));
         if (x != Py_NotImplemented) {
+            gotoErrorHandler(!x);
             return x;
         }
-        Py_DECREF(x); /* can't do it */
+        Py_DECREF(x);
     }
     if (slotw) {
         PyObject *x = slotw(v, w);
-        // assert(_Py_CheckSlotResult(w, op_name, x != nullptr));
+        assert(_Py_CheckSlotResult(w, op_name, x != nullptr));
         if (x != Py_NotImplemented) {
+            gotoErrorHandler(!x);
             return x;
         }
-        Py_DECREF(x); /* can't do it */
+        Py_DECREF(x);
     }
-    Py_RETURN_NOTIMPLEMENTED;
+    return Py_NotImplemented; // borrowed reference
 }
 
-#ifdef NDEBUG
-#  define BINARY_OP1(v, w, op_slot, op_name) binary_op1(v, w, op_slot)
-#else
-#  define BINARY_OP1(v, w, op_slot, op_name) binary_op1(v, w, op_slot, op_name)
-#endif
-
 static PyObject *
-binop_type_error(PyObject *v, PyObject *w, const char *op_name) {
+binary_iop_impl(PyObject *v, PyObject *w, binaryfunc PyNumberMethods::* iop_slot, binaryfunc PyNumberMethods::* op_slot,
+        const char *op_name) {
+    auto mv = Py_TYPE(v)->tp_as_number;
+    if (mv != nullptr) {
+        if (auto slot = mv->*iop_slot) {
+            PyObject *x = (slot)(v, w);
+            assert(_Py_CheckSlotResult(v, op_name, x != nullptr));
+            if (x != Py_NotImplemented) {
+                gotoErrorHandler(!x);
+                return x;
+            }
+            Py_DECREF(x);
+        }
+    }
+    return binary_op_impl(v, w, op_slot, op_name);
+}
+
+[[noreturn]] static void binop_type_error(PyObject *v, PyObject *w, const char *op_name) {
     PyErr_Format(PyExc_TypeError,
-            "unsupported operand type(s) for %.100s: "
-            "'%.100s' and '%.100s'",
+            "unsupported operand type(s) for %.100s: '%.100s' and '%.100s'",
             op_name,
             Py_TYPE(v)->tp_name,
             Py_TYPE(w)->tp_name);
-    return nullptr;
+    gotoErrorHandler();
 }
 
-static PyObject *
-binary_op(PyObject *v, PyObject *w, const int op_slot, const char *op_name) {
-    PyObject *result = BINARY_OP1(v, w, op_slot, op_name);
-    if (result == Py_NotImplemented) {
-        Py_DECREF(result);
+template <binaryfunc PyNumberMethods::*P, const char *SIGN, const char *NAME = SIGN>
+PyObject *binary_op(PyObject *v, PyObject *w) {
+    auto result = binary_op_impl(v, w, P, NAME);
+    if (result != Py_NotImplemented) {
+        return result;
+    }
 
-        if (op_slot == NB_SLOT(nb_rshift) &&
-                PyCFunction_CheckExact(v) &&
+    if constexpr(P == &PyNumberMethods::nb_rshift) {
+        if (PyCFunction_CheckExact(v) &&
                 strcmp(((PyCFunctionObject *) v)->m_ml->ml_name, "print") == 0) {
             PyErr_Format(PyExc_TypeError,
                     "unsupported operand type(s) for %.100s: "
                     "'%.100s' and '%.100s'. Did you mean \"print(<message>, "
                     "file=<output_stream>)\"?",
-                    op_name,
+                    SIGN,
                     Py_TYPE(v)->tp_name,
                     Py_TYPE(w)->tp_name);
-            return nullptr;
+            gotoErrorHandler();
         }
-        return binop_type_error(v, w, op_name);
     }
-    return result;
+    binop_type_error(v, w, SIGN);
 }
 
-#define BINARY_FUNC(func, op, op_name) \
-    PyObject * \
-    func(PyObject *v, PyObject *w) { \
-        return binary_op(v, w, NB_SLOT(op), op_name); \
-    }
-
-BINARY_FUNC(PyNumber_Or, nb_or, "|")
-
-BINARY_FUNC(PyNumber_Xor, nb_xor, "^")
-
-BINARY_FUNC(PyNumber_And, nb_and, "&")
-
-BINARY_FUNC(PyNumber_Lshift, nb_lshift, "<<")
-
-BINARY_FUNC(PyNumber_Rshift, nb_rshift, ">>")
-
-BINARY_FUNC(PyNumber_Subtract, nb_subtract, "-")
-
-BINARY_FUNC(PyNumber_Divmod, nb_divmod, "divmod()")
-
-PyObject * handle_BINARY_ADD(PyObject *v, PyObject *w) {
-    PyObject *result = BINARY_OP1(v, w, NB_SLOT(nb_add), "+");
+template <binaryfunc PyNumberMethods::*IP, binaryfunc PyNumberMethods::*P, const char *SIGN, const char *NAME = SIGN>
+PyObject *binary_iop(PyObject *v, PyObject *w) {
+    PyObject *result = binary_iop_impl(v, w, IP, P, NAME);
     if (result != Py_NotImplemented) {
         return result;
     }
-    Py_DECREF(result);
+    binop_type_error(v, w, SIGN);
+}
 
-    PySequenceMethods *m = Py_TYPE(v)->tp_as_sequence;
+static PyObject *
+sequence_repeat(ssizeargfunc repeatfunc, PyObject *seq, PyObject *n) {
+    Py_ssize_t count;
+    if (_PyIndex_Check(n)) {
+        count = PyNumber_AsSsize_t(n, PyExc_OverflowError);
+        if (count == -1 && PyErr_Occurred()) {
+            gotoErrorHandler();
+        }
+    } else {
+        PyErr_Format(PyExc_TypeError, "can't multiply sequence by non-int of type '%.200s'", Py_TYPE(n)->tp_name);
+        gotoErrorHandler();
+    }
+    PyObject *res = (*repeatfunc)(seq, count);
+    assert(_Py_CheckSlotResult(seq, "*", res != nullptr));
+    gotoErrorHandler(!res);
+    return res;
+}
+
+PyObject *handle_BINARY_ADD(PyObject *v, PyObject *w) {
+    auto result = binary_op_impl(v, w, &PyNumberMethods::nb_add, "+");
+    if (result != Py_NotImplemented) {
+        return result;
+    }
+
+    auto m = Py_TYPE(v)->tp_as_sequence;
     if (m && m->sq_concat) {
         result = (*m->sq_concat)(v, w);
         assert(_Py_CheckSlotResult(v, "+", result != nullptr));
+        gotoErrorHandler(!result);
         return result;
     }
 
     binop_type_error(v, w, "+");
-    gotoErrorHandler();
 }
 
-PyObject *handle_BINARY_POWER(PyObject *base, PyObject *exp) {
-    auto res = PyNumber_Power(base, exp, Py_None);
-    if (!res) [[unlikely]] {
-        gotoErrorHandler();
+PyObject *handle_INPLACE_ADD(PyObject *v, PyObject *w) {
+    auto result = binary_iop_impl(v, w, &PyNumberMethods::nb_inplace_add, &PyNumberMethods::nb_add, "+=");
+    if (result != Py_NotImplemented) {
+        return result;
     }
+    auto m = Py_TYPE(v)->tp_as_sequence;
+    if (m) {
+        binaryfunc func = m->sq_inplace_concat ? m->sq_inplace_concat : m->sq_concat;
+        if (func) {
+            result = func(v, w);
+            assert(_Py_CheckSlotResult(v, "+=", result != nullptr));
+            gotoErrorHandler(!result);
+            return result;
+        }
+    }
+    binop_type_error(v, w, "+=");
+}
+
+PyObject *handle_BINARY_SUBTRACT(PyObject *v, PyObject *w) {
+    static constexpr char op_sign[]{"-"};
+    return binary_op<&PyNumberMethods::nb_subtract, op_sign>(v, w);
+}
+
+PyObject *handle_INPLACE_SUBTRACT(PyObject *v, PyObject *w) {
+    static constexpr char op_sign[]{"-="};
+    return binary_iop<&PyNumberMethods::nb_inplace_subtract, &PyNumberMethods::nb_subtract, op_sign>(v, w);
+}
+
+PyObject *handle_BINARY_MULTIPLY(PyObject *v, PyObject *w) {
+    auto result = binary_op_impl(v, w, &PyNumberMethods::nb_multiply, "*");
+    if (result != Py_NotImplemented) {
+        return result;
+    }
+
+    auto mv = Py_TYPE(v)->tp_as_sequence;
+    auto mw = Py_TYPE(w)->tp_as_sequence;
+    if (mv && mv->sq_repeat) {
+        return sequence_repeat(mv->sq_repeat, v, w);
+    } else if (mw && mw->sq_repeat) {
+        return sequence_repeat(mw->sq_repeat, w, v);
+    }
+    binop_type_error(v, w, "*");
+}
+
+
+PyObject *handle_INPLACE_MULTIPLY(PyObject *v, PyObject *w) {
+    auto result = binary_iop_impl(v, w, &PyNumberMethods::nb_inplace_multiply, &PyNumberMethods::nb_multiply, "*=");
+    if (result != Py_NotImplemented) {
+        return result;
+    }
+
+    PySequenceMethods *mv = Py_TYPE(v)->tp_as_sequence;
+    PySequenceMethods *mw = Py_TYPE(w)->tp_as_sequence;
+    if (mv) {
+        auto f = mv->sq_inplace_repeat ? mv->sq_inplace_repeat : mv->sq_repeat;
+        if (f) {
+            return sequence_repeat(f, v, w);
+        }
+    } else if (mw && mw->sq_repeat) {
+        /* Note that the right hand operand should not be
+         * mutated in this case so sq_inplace_repeat is not
+         * used. */
+        return sequence_repeat(mw->sq_repeat, w, v);
+    }
+    binop_type_error(v, w, "*=");
+}
+
+PyObject *handle_BINARY_FLOOR_DIVIDE(PyObject *v, PyObject *w) {
+    static constexpr char op_sign[]{"//"};
+    return binary_op<&PyNumberMethods::nb_floor_divide, op_sign>(v, w);
+}
+
+PyObject *handle_INPLACE_FLOOR_DIVIDE(PyObject *v, PyObject *w) {
+    static constexpr char op_sign[]{"//="};
+    return binary_iop<&PyNumberMethods::nb_inplace_floor_divide, &PyNumberMethods::nb_floor_divide, op_sign>(v, w);
+}
+
+PyObject *handle_BINARY_TRUE_DIVIDE(PyObject *v, PyObject *w) {
+    static constexpr char op_sign[]{"/"};
+    return binary_op<&PyNumberMethods::nb_true_divide, op_sign>(v, w);
+}
+
+PyObject *handle_INPLACE_TRUE_DIVIDE(PyObject *v, PyObject *w) {
+    static constexpr char op_sign[]{"/="};
+    return binary_iop<&PyNumberMethods::nb_inplace_true_divide, &PyNumberMethods::nb_true_divide, op_sign>(v, w);
+}
+
+PyObject *handle_BINARY_MODULO(PyObject *v, PyObject *w) {
+    if (PyUnicode_CheckExact(v) && (PyUnicode_CheckExact(w) || !PyUnicode_Check(w))) {
+        // fast path; string formatting, but not if the RHS is a str subclass (see issue28598)
+        auto res = PyUnicode_Format(v, w);
+        gotoErrorHandler(!res);
+        return res;
+    } else {
+        static constexpr char op_sign[]{"%"};
+        return binary_op<&PyNumberMethods::nb_remainder, op_sign>(v, w);
+    }
+}
+
+PyObject *handle_INPLACE_MODULO(PyObject *v, PyObject *w) {
+    static constexpr char op_sign[]{"%="};
+    return binary_iop<&PyNumberMethods::nb_inplace_remainder, &PyNumberMethods::nb_remainder, op_sign>(v, w);
+}
+
+PyObject *handle_BINARY_POWER(PyObject *v, PyObject *w) {
+    // TODO: 简化
+    auto res = PyNumber_Power(v, w, Py_None);
+    gotoErrorHandler(!res);
     return res;
 }
 
-PyObject *handle_INPLACE_POWER(PyObject *base, PyObject *exp) {
-    return PyNumber_InPlacePower(base, exp, Py_None);
+PyObject *handle_INPLACE_POWER(PyObject *v, PyObject *w) {
+    auto res = PyNumber_InPlacePower(v, w, Py_None);
+    gotoErrorHandler(!res);
+    return res;
+}
+
+PyObject *handle_BINARY_MATRIX_MULTIPLY(PyObject *v, PyObject *w) {
+    static constexpr char op_sign[]{"@"};
+    return binary_op<&PyNumberMethods::nb_matrix_multiply, op_sign>(v, w);
+}
+
+PyObject *handle_INPLACE_MATRIX_MULTIPLY(PyObject *v, PyObject *w) {
+    static constexpr char op_sign[]{"@="};
+    return binary_iop<&PyNumberMethods::nb_inplace_matrix_multiply, &PyNumberMethods::nb_matrix_multiply, op_sign>(v, w);
+}
+
+PyObject *handle_BINARY_LSHIFT(PyObject *v, PyObject *w) {
+    static constexpr char op_sign[]{"<<"};
+    return binary_op<&PyNumberMethods::nb_lshift, op_sign>(v, w);
+}
+
+PyObject *handle_INPLACE_LSHIFT(PyObject *v, PyObject *w) {
+    static constexpr char op_sign[]{"<<="};
+    return binary_iop<&PyNumberMethods::nb_inplace_lshift, &PyNumberMethods::nb_lshift, op_sign>(v, w);
+}
+
+PyObject *handle_BINARY_RSHIFT(PyObject *v, PyObject *w) {
+    static constexpr char op_sign[]{">>"};
+    return binary_op<&PyNumberMethods::nb_rshift, op_sign>(v, w);
+}
+
+PyObject *handle_INPLACE_RSHIFT(PyObject *v, PyObject *w) {
+    static constexpr char op_sign[]{">>="};
+    return binary_iop<&PyNumberMethods::nb_inplace_rshift, &PyNumberMethods::nb_rshift, op_sign>(v, w);
+}
+
+PyObject *handle_BINARY_AND(PyObject *v, PyObject *w) {
+    static constexpr char op_sign[]{"&"};
+    return binary_op<&PyNumberMethods::nb_and, op_sign>(v, w);
+}
+
+PyObject *handle_INPLACE_AND(PyObject *v, PyObject *w) {
+    static constexpr char op_sign[]{"&="};
+    return binary_iop<&PyNumberMethods::nb_inplace_and, &PyNumberMethods::nb_and, op_sign>(v, w);
+}
+
+PyObject *handle_BINARY_OR(PyObject *v, PyObject *w) {
+    static constexpr char op_sign[]{"|"};
+    return binary_op<&PyNumberMethods::nb_or, op_sign>(v, w);
+}
+
+PyObject *handle_INPLACE_OR(PyObject *v, PyObject *w) {
+    static constexpr char op_sign[]{"|="};
+    return binary_iop<&PyNumberMethods::nb_inplace_or, &PyNumberMethods::nb_or, op_sign>(v, w);
+}
+
+PyObject *handle_BINARY_XOR(PyObject *v, PyObject *w) {
+    static constexpr char op_sign[]{"^"};
+    return binary_op<&PyNumberMethods::nb_xor, op_sign>(v, w);
+}
+
+PyObject *handle_INPLACE_XOR(PyObject *v, PyObject *w) {
+    static constexpr char op_sign[]{"^="};
+    return binary_iop<&PyNumberMethods::nb_inplace_xor, &PyNumberMethods::nb_xor, op_sign>(v, w);
 }
 
 PyObject *unwindFrame(PyObject **stack, ptrdiff_t stack_height) {
@@ -516,7 +680,6 @@ PyObject *unwindFrame(PyObject **stack, ptrdiff_t stack_height) {
     }
     return nullptr;
 }
-
 
 const auto symbol_names{std::apply(
         [](auto &&... x) noexcept { return std::array{x.second ...}; },
