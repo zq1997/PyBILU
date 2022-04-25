@@ -70,7 +70,8 @@ b = 'd'
 def foo():
     a = 2
     b = 3
-    return a ** b
+    a **= b
+    return a
     # global b
     # a = 2
     # return a ** b

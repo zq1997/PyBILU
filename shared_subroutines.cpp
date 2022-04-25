@@ -400,7 +400,7 @@ PyObject *handle_UNARY(PyObject *value) {
     auto type = Py_TYPE(value);
     auto *m = type->tp_as_number;
     if (m && m->*P) [[likely]] {
-        PyObject *res = (*(m->*P))(value);
+        PyObject *res = (m->*P)(value);
         assert(checkSlotResult(value, slot_name, res));
         return res;
     }
@@ -434,56 +434,81 @@ template <typename T>
     gotoErrorHandler();
 }
 
-template <bool force_return = false, typename T>
-static PyObject *binaryImpl(PyObject *v, PyObject *w, T op_slot) {
-    // TODO: inplace的checkSlotResult错误
+template <bool force_return = false, typename T, typename... IT>
+static PyObject *handleBinary(PyObject *v, PyObject *w, T op_slot, IT... more_op_slots) {
     constexpr auto is_power = is_same_v<T, ternaryfunc PyNumberMethods::*>;
-    if constexpr (is_power) {
-        assert(op_slot == &PyNumberMethods::nb_power);
-    }
+    auto type_v = Py_TYPE(v);
+    auto type_w = Py_TYPE(w);
+    auto slots_v = type_v->tp_as_number;
+    auto slots_w = type_w->tp_as_number;
+    auto err_msg_slot = op_slot;
 
-    auto typev = Py_TYPE(v);
-    auto typew = Py_TYPE(w);
-    auto slotv = typev->tp_as_number ? typev->tp_as_number->*op_slot : nullptr;
-    auto slotw = typew->tp_as_number ? typew->tp_as_number->*op_slot : nullptr;
-    slotw = slotw == slotv ? nullptr : slotw;
-
-    if (slotv) {
-        PyObject *x;
-        if (slotw && PyType_IsSubtype(typew, typev)) {
+    if constexpr(sizeof...(IT)) {
+        static_assert(sizeof...(IT) == 1);
+        if constexpr (is_power) {
+            assert(op_slot == &PyNumberMethods::nb_inplace_power);
+        }
+        auto islot = slots_v ? slots_v->*op_slot : nullptr;
+        if (islot) {
+            PyObject *x;
             if constexpr (is_power) {
-                x = slotw(v, w, Py_None);
+                x = islot(v, w, Py_None);
             } else {
-                x = slotw(v, w);
+                x = islot(v, w);
             }
-            assert(checkSlotResult(v, op_slot, x));
+            assert(checkSlotResult(v, err_msg_slot, x));
             if (x != Py_NotImplemented) {
                 gotoErrorHandler(!x);
                 return x;
             }
             Py_DECREF(x);
-            slotw = nullptr;
+        }
+        op_slot = std::get<0>(std::tuple{more_op_slots...});
+    }
+
+    if constexpr (is_power) {
+        assert(op_slot == &PyNumberMethods::nb_power);
+    }
+    auto slot_v = slots_v ? slots_v->*op_slot : nullptr;
+    auto slot_w = slots_w ? slots_w->*op_slot : nullptr;
+    slot_w = slot_w == slot_v ? nullptr : slot_w;
+
+    if (slot_v) {
+        PyObject *x;
+        if (slot_w && PyType_IsSubtype(type_w, type_v)) {
+            if constexpr (is_power) {
+                x = slot_w(v, w, Py_None);
+            } else {
+                x = slot_w(v, w);
+            }
+            assert(checkSlotResult(v, err_msg_slot, x));
+            if (x != Py_NotImplemented) {
+                gotoErrorHandler(!x);
+                return x;
+            }
+            Py_DECREF(x);
+            slot_w = nullptr;
         }
         if constexpr (is_power) {
-            x = slotv(v, w, Py_None);
+            x = slot_v(v, w, Py_None);
         } else {
-            x = slotv(v, w);
+            x = slot_v(v, w);
         }
-        assert(checkSlotResult(v, op_slot, x));
+        assert(checkSlotResult(v, err_msg_slot, x));
         if (x != Py_NotImplemented) {
             gotoErrorHandler(!x);
             return x;
         }
         Py_DECREF(x);
     }
-    if (slotw) {
+    if (slot_w) {
         PyObject *x;
         if constexpr (is_power) {
-            x = slotw(v, w, Py_None);
+            x = slot_w(v, w, Py_None);
         } else {
-            x = slotw(v, w);
+            x = slot_w(v, w);
         }
-        assert(checkSlotResult(w, op_slot, x));
+        assert(checkSlotResult(w, err_msg_slot, x));
         if (x != Py_NotImplemented) {
             gotoErrorHandler(!x);
             return x;
@@ -493,44 +518,20 @@ static PyObject *binaryImpl(PyObject *v, PyObject *w, T op_slot) {
     if constexpr (force_return) {
         return nullptr;
     } else {
-        raiseBinOpTypeError(v, w, op_slot);
+        raiseBinOpTypeError(v, w, err_msg_slot);
     }
-}
-
-template <bool force_return = false, typename T>
-static PyObject *inplaceImpl(PyObject *v, PyObject *w, T iop_slot, T op_slot) {
-    constexpr auto is_power = is_same_v<T, ternaryfunc PyNumberMethods::*>;
-
-    auto type = Py_TYPE(v);
-    auto slot = type->tp_as_number ? type->tp_as_number->*iop_slot : nullptr;
-    if (slot) {
-        PyObject *x;
-        if constexpr (is_power) {
-            x = slot(v, w, Py_None);
-        } else {
-            x = slot(v, w);
-        }
-        assert(checkSlotResult(v, iop_slot, x));
-        if (x != Py_NotImplemented) {
-            gotoErrorHandler(!x);
-            return x;
-        }
-        Py_DECREF(x);
-    }
-
-    return binaryImpl<force_return>(v, w, op_slot);
 }
 
 PyObject *handle_BINARY_ADD(PyObject *v, PyObject *w) {
     constexpr auto op_slot = &PyNumberMethods::nb_add;
-    auto result = binaryImpl<true>(v, w, op_slot);
+    auto result = handleBinary<true>(v, w, op_slot);
     if (result) {
         return result;
     }
 
     auto m = Py_TYPE(v)->tp_as_sequence;
     if (m && m->sq_concat) {
-        result = (*m->sq_concat)(v, w);
+        result = (m->sq_concat)(v, w);
         assert(checkSlotResult(v, op_slot, result));
         gotoErrorHandler(!result);
         return result;
@@ -541,13 +542,13 @@ PyObject *handle_BINARY_ADD(PyObject *v, PyObject *w) {
 
 PyObject *handle_INPLACE_ADD(PyObject *v, PyObject *w) {
     constexpr auto iop_slot = &PyNumberMethods::nb_inplace_add;
-    auto result = inplaceImpl<true>(v, w, iop_slot, &PyNumberMethods::nb_add);
+    auto result = handleBinary<true>(v, w, iop_slot, &PyNumberMethods::nb_add);
     if (result) {
         return result;
     }
     auto m = Py_TYPE(v)->tp_as_sequence;
     if (m) {
-        binaryfunc func = m->sq_inplace_concat ? m->sq_inplace_concat : m->sq_concat;
+        auto func = m->sq_inplace_concat ? m->sq_inplace_concat : m->sq_concat;
         if (func) {
             result = func(v, w);
             assert(checkSlotResult(v, iop_slot, result));
@@ -559,11 +560,11 @@ PyObject *handle_INPLACE_ADD(PyObject *v, PyObject *w) {
 }
 
 PyObject *handle_BINARY_SUBTRACT(PyObject *v, PyObject *w) {
-    return binaryImpl(v, w, &PyNumberMethods::nb_subtract);
+    return handleBinary(v, w, &PyNumberMethods::nb_subtract);
 }
 
 PyObject *handle_INPLACE_SUBTRACT(PyObject *v, PyObject *w) {
-    return inplaceImpl(v, w, &PyNumberMethods::nb_inplace_subtract, &PyNumberMethods::nb_subtract);
+    return handleBinary(v, w, &PyNumberMethods::nb_inplace_subtract, &PyNumberMethods::nb_subtract);
 }
 
 static PyObject *repeatSequence(ssizeargfunc repeatfunc, PyObject *seq, PyObject *n) {
@@ -575,7 +576,7 @@ static PyObject *repeatSequence(ssizeargfunc repeatfunc, PyObject *seq, PyObject
     if (count == -1 && PyErr_Occurred()) {
         gotoErrorHandler();
     }
-    PyObject *res = (*repeatfunc)(seq, count);
+    PyObject *res = repeatfunc(seq, count);
     assert(checkSlotResult(seq, "* or *=", res));
     gotoErrorHandler(!res);
     return res;
@@ -583,7 +584,7 @@ static PyObject *repeatSequence(ssizeargfunc repeatfunc, PyObject *seq, PyObject
 
 PyObject *handle_BINARY_MULTIPLY(PyObject *v, PyObject *w) {
     constexpr auto op_slot = &PyNumberMethods::nb_multiply;
-    auto result = binaryImpl<true>(v, w, op_slot);
+    auto result = handleBinary<true>(v, w, op_slot);
     if (result) {
         return result;
     }
@@ -601,7 +602,7 @@ PyObject *handle_BINARY_MULTIPLY(PyObject *v, PyObject *w) {
 
 PyObject *handle_INPLACE_MULTIPLY(PyObject *v, PyObject *w) {
     constexpr auto iop_slot = &PyNumberMethods::nb_inplace_multiply;
-    auto result = inplaceImpl<true>(v, w, iop_slot, &PyNumberMethods::nb_multiply);
+    auto result = handleBinary<true>(v, w, iop_slot, &PyNumberMethods::nb_multiply);
     if (result) {
         return result;
     }
@@ -623,19 +624,19 @@ PyObject *handle_INPLACE_MULTIPLY(PyObject *v, PyObject *w) {
 }
 
 PyObject *handle_BINARY_FLOOR_DIVIDE(PyObject *v, PyObject *w) {
-    return binaryImpl(v, w, &PyNumberMethods::nb_floor_divide);
+    return handleBinary(v, w, &PyNumberMethods::nb_floor_divide);
 }
 
 PyObject *handle_INPLACE_FLOOR_DIVIDE(PyObject *v, PyObject *w) {
-    return inplaceImpl(v, w, &PyNumberMethods::nb_inplace_floor_divide, &PyNumberMethods::nb_floor_divide);
+    return handleBinary(v, w, &PyNumberMethods::nb_inplace_floor_divide, &PyNumberMethods::nb_floor_divide);
 }
 
 PyObject *handle_BINARY_TRUE_DIVIDE(PyObject *v, PyObject *w) {
-    return binaryImpl(v, w, &PyNumberMethods::nb_true_divide);
+    return handleBinary(v, w, &PyNumberMethods::nb_true_divide);
 }
 
 PyObject *handle_INPLACE_TRUE_DIVIDE(PyObject *v, PyObject *w) {
-    return inplaceImpl(v, w, &PyNumberMethods::nb_inplace_true_divide, &PyNumberMethods::nb_true_divide);
+    return handleBinary(v, w, &PyNumberMethods::nb_inplace_true_divide, &PyNumberMethods::nb_true_divide);
 }
 
 PyObject *handle_BINARY_MODULO(PyObject *v, PyObject *w) {
@@ -645,41 +646,41 @@ PyObject *handle_BINARY_MODULO(PyObject *v, PyObject *w) {
         gotoErrorHandler(!res);
         return res;
     } else {
-        return binaryImpl(v, w, &PyNumberMethods::nb_remainder);
+        return handleBinary(v, w, &PyNumberMethods::nb_remainder);
     }
 }
 
 PyObject *handle_INPLACE_MODULO(PyObject *v, PyObject *w) {
-    return inplaceImpl(v, w, &PyNumberMethods::nb_inplace_remainder, &PyNumberMethods::nb_remainder);
+    return handleBinary(v, w, &PyNumberMethods::nb_inplace_remainder, &PyNumberMethods::nb_remainder);
 }
 
 PyObject *handle_BINARY_POWER(PyObject *v, PyObject *w) {
-    return binaryImpl(v, w, &PyNumberMethods::nb_power);
+    return handleBinary(v, w, &PyNumberMethods::nb_power);
 }
 
 PyObject *handle_INPLACE_POWER(PyObject *v, PyObject *w) {
-    return inplaceImpl(v, w, &PyNumberMethods::nb_inplace_power, &PyNumberMethods::nb_power);
+    return handleBinary(v, w, &PyNumberMethods::nb_inplace_power, &PyNumberMethods::nb_power);
 }
 
 PyObject *handle_BINARY_MATRIX_MULTIPLY(PyObject *v, PyObject *w) {
-    return binaryImpl(v, w, &PyNumberMethods::nb_matrix_multiply);
+    return handleBinary(v, w, &PyNumberMethods::nb_matrix_multiply);
 }
 
 PyObject *handle_INPLACE_MATRIX_MULTIPLY(PyObject *v, PyObject *w) {
-    return inplaceImpl(v, w, &PyNumberMethods::nb_inplace_matrix_multiply, &PyNumberMethods::nb_matrix_multiply);
+    return handleBinary(v, w, &PyNumberMethods::nb_inplace_matrix_multiply, &PyNumberMethods::nb_matrix_multiply);
 }
 
 PyObject *handle_BINARY_LSHIFT(PyObject *v, PyObject *w) {
-    return binaryImpl(v, w, &PyNumberMethods::nb_lshift);
+    return handleBinary(v, w, &PyNumberMethods::nb_lshift);
 }
 
 PyObject *handle_INPLACE_LSHIFT(PyObject *v, PyObject *w) {
-    return inplaceImpl(v, w, &PyNumberMethods::nb_inplace_lshift, &PyNumberMethods::nb_lshift);
+    return handleBinary(v, w, &PyNumberMethods::nb_inplace_lshift, &PyNumberMethods::nb_lshift);
 }
 
 PyObject *handle_BINARY_RSHIFT(PyObject *v, PyObject *w) {
     constexpr auto op_slot = &PyNumberMethods::nb_rshift;
-    auto result = binaryImpl<true>(v, w, op_slot);
+    auto result = handleBinary<true>(v, w, op_slot);
     if (result) {
         return result;
     }
@@ -698,31 +699,31 @@ PyObject *handle_BINARY_RSHIFT(PyObject *v, PyObject *w) {
 }
 
 PyObject *handle_INPLACE_RSHIFT(PyObject *v, PyObject *w) {
-    return inplaceImpl(v, w, &PyNumberMethods::nb_inplace_rshift, &PyNumberMethods::nb_rshift);
+    return handleBinary(v, w, &PyNumberMethods::nb_inplace_rshift, &PyNumberMethods::nb_rshift);
 }
 
 PyObject *handle_BINARY_AND(PyObject *v, PyObject *w) {
-    return binaryImpl(v, w, &PyNumberMethods::nb_and);
+    return handleBinary(v, w, &PyNumberMethods::nb_and);
 }
 
 PyObject *handle_INPLACE_AND(PyObject *v, PyObject *w) {
-    return inplaceImpl(v, w, &PyNumberMethods::nb_inplace_and, &PyNumberMethods::nb_and);
+    return handleBinary(v, w, &PyNumberMethods::nb_inplace_and, &PyNumberMethods::nb_and);
 }
 
 PyObject *handle_BINARY_OR(PyObject *v, PyObject *w) {
-    return binaryImpl(v, w, &PyNumberMethods::nb_or);
+    return handleBinary(v, w, &PyNumberMethods::nb_or);
 }
 
 PyObject *handle_INPLACE_OR(PyObject *v, PyObject *w) {
-    return inplaceImpl(v, w, &PyNumberMethods::nb_inplace_or, &PyNumberMethods::nb_or);
+    return handleBinary(v, w, &PyNumberMethods::nb_inplace_or, &PyNumberMethods::nb_or);
 }
 
 PyObject *handle_BINARY_XOR(PyObject *v, PyObject *w) {
-    return binaryImpl(v, w, &PyNumberMethods::nb_xor);
+    return handleBinary(v, w, &PyNumberMethods::nb_xor);
 }
 
 PyObject *handle_INPLACE_XOR(PyObject *v, PyObject *w) {
-    return inplaceImpl(v, w, &PyNumberMethods::nb_inplace_xor, &PyNumberMethods::nb_xor);
+    return handleBinary(v, w, &PyNumberMethods::nb_inplace_xor, &PyNumberMethods::nb_xor);
 }
 
 PyObject *unwindFrame(PyObject **stack, ptrdiff_t stack_height) {
