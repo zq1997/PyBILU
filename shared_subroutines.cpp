@@ -361,7 +361,8 @@ static const char *getSlotSign(T PyNumberMethods::* op_slot) {
     return getSlotSign(offset);
 }
 
-static int checkSlotResult(PyObject *obj, const char *slot_name, PyObject *result) {
+static void checkSlotResult(PyObject *obj, const char *slot_name, PyObject *result) {
+#ifndef NDEBUG
     PyThreadState *tstate = _PyThreadState_GET();
     if (result) {
         if (_PyErr_Occurred(tstate)) {
@@ -376,12 +377,12 @@ static int checkSlotResult(PyObject *obj, const char *slot_name, PyObject *resul
                     slot_name, Py_TYPE(obj)->tp_name);
         }
     }
-    return 1;
+#endif
 }
 
 template <typename T>
-static int checkSlotResult(PyObject *obj, T PyNumberMethods::* op_slot, PyObject *result) {
-    return checkSlotResult(obj, getSlotSign(op_slot), result);
+static void checkSlotResult(PyObject *obj, T PyNumberMethods::* op_slot, PyObject *result) {
+    checkSlotResult(obj, getSlotSign(op_slot), result);
 }
 
 PyObject *handle_UNARY_NOT(PyObject *value) {
@@ -401,7 +402,7 @@ PyObject *handle_UNARY(PyObject *value) {
     auto *m = type->tp_as_number;
     if (m && m->*P) [[likely]] {
         PyObject *res = (m->*P)(value);
-        assert(checkSlotResult(value, slot_name, res));
+        checkSlotResult(value, slot_name, res);
         return res;
     }
     PyErr_Format(PyExc_TypeError, "bad operand type for unary %c: '%.200s'", op_sign, type->tp_name);
@@ -424,96 +425,75 @@ PyObject *handle_UNARY_INVERT(PyObject *value) {
 }
 
 template <typename T>
-[[noreturn]] static void raiseBinOpTypeError(PyObject *v, PyObject *w, T op_slot) {
-    auto sign = getSlotSign(op_slot);
+[[noreturn]] static void raiseBinOpTypeError(PyObject *v, PyObject *w, T op_slot, const char *hint = "") {
     PyErr_Format(PyExc_TypeError,
-            "unsupported operand type(s) for %.100s: '%.100s' and '%.100s'",
-            sign,
+            "unsupported operand type(s) for %.100s: '%.100s' and '%.100s'%s",
+            getSlotSign(op_slot),
             Py_TYPE(v)->tp_name,
-            Py_TYPE(w)->tp_name);
+            Py_TYPE(w)->tp_name,
+            hint);
     gotoErrorHandler();
 }
 
-template <bool force_return = false, typename T, typename... IT>
-static PyObject *handleBinary(PyObject *v, PyObject *w, T op_slot, IT... more_op_slots) {
-    constexpr auto is_power = is_same_v<T, ternaryfunc PyNumberMethods::*>;
+template <bool is_ternary = false, typename T, typename U>
+static auto callSlotOfBinOp(PyObject *v, PyObject *w, T slot, U err_msg_slot) {
+    PyObject *result;
+    if constexpr (is_ternary) {
+        result = slot(v, w, Py_None);
+    } else {
+        result = slot(v, w);
+    }
+    checkSlotResult(v, err_msg_slot, result);
+    gotoErrorHandler(!result);
+    return result;
+}
+
+template <bool force_return = false, typename T, typename... Ts>
+static PyObject *handleBinary(PyObject *v, PyObject *w, T op_slot, Ts... more_op_slots) {
+    constexpr auto is_ternary = is_same_v<T, ternaryfunc PyNumberMethods::*>;
     auto type_v = Py_TYPE(v);
     auto type_w = Py_TYPE(w);
     auto slots_v = type_v->tp_as_number;
     auto slots_w = type_w->tp_as_number;
     auto err_msg_slot = op_slot;
 
-    if constexpr(sizeof...(IT)) {
-        static_assert(sizeof...(IT) == 1);
-        if constexpr (is_power) {
-            assert(op_slot == &PyNumberMethods::nb_inplace_power);
-        }
-        auto islot = slots_v ? slots_v->*op_slot : nullptr;
-        if (islot) {
-            PyObject *x;
-            if constexpr (is_power) {
-                x = islot(v, w, Py_None);
-            } else {
-                x = islot(v, w);
+    if constexpr(sizeof...(Ts)) {
+        static_assert(sizeof...(Ts) == 1);
+        if (auto slot = slots_v ? slots_v->*op_slot : nullptr) {
+            auto result = callSlotOfBinOp<is_ternary>(v, w, slot, err_msg_slot);
+            if (result != Py_NotImplemented) {
+                return result;
             }
-            assert(checkSlotResult(v, err_msg_slot, x));
-            if (x != Py_NotImplemented) {
-                gotoErrorHandler(!x);
-                return x;
-            }
-            Py_DECREF(x);
+            Py_DECREF(result);
         }
         op_slot = std::get<0>(std::tuple{more_op_slots...});
     }
 
-    if constexpr (is_power) {
-        assert(op_slot == &PyNumberMethods::nb_power);
-    }
     auto slot_v = slots_v ? slots_v->*op_slot : nullptr;
     auto slot_w = slots_w ? slots_w->*op_slot : nullptr;
     slot_w = slot_w == slot_v ? nullptr : slot_w;
 
     if (slot_v) {
-        PyObject *x;
         if (slot_w && PyType_IsSubtype(type_w, type_v)) {
-            if constexpr (is_power) {
-                x = slot_w(v, w, Py_None);
-            } else {
-                x = slot_w(v, w);
+            auto result = callSlotOfBinOp<is_ternary>(v, w, slot_w, err_msg_slot);
+            if (result != Py_NotImplemented) {
+                return result;
             }
-            assert(checkSlotResult(v, err_msg_slot, x));
-            if (x != Py_NotImplemented) {
-                gotoErrorHandler(!x);
-                return x;
-            }
-            Py_DECREF(x);
+            Py_DECREF(result);
             slot_w = nullptr;
         }
-        if constexpr (is_power) {
-            x = slot_v(v, w, Py_None);
-        } else {
-            x = slot_v(v, w);
+        auto result = callSlotOfBinOp<is_ternary>(v, w, slot_v, err_msg_slot);
+        if (result != Py_NotImplemented) {
+            return result;
         }
-        assert(checkSlotResult(v, err_msg_slot, x));
-        if (x != Py_NotImplemented) {
-            gotoErrorHandler(!x);
-            return x;
-        }
-        Py_DECREF(x);
+        Py_DECREF(result);
     }
     if (slot_w) {
-        PyObject *x;
-        if constexpr (is_power) {
-            x = slot_w(v, w, Py_None);
-        } else {
-            x = slot_w(v, w);
+        auto result = callSlotOfBinOp<is_ternary>(v, w, slot_w, err_msg_slot);
+        if (result != Py_NotImplemented) {
+            return result;
         }
-        assert(checkSlotResult(w, err_msg_slot, x));
-        if (x != Py_NotImplemented) {
-            gotoErrorHandler(!x);
-            return x;
-        }
-        Py_DECREF(x);
+        Py_DECREF(result);
     }
     if constexpr (force_return) {
         return nullptr;
@@ -528,15 +508,13 @@ PyObject *handle_BINARY_ADD(PyObject *v, PyObject *w) {
     if (result) {
         return result;
     }
-
     auto m = Py_TYPE(v)->tp_as_sequence;
-    if (m && m->sq_concat) {
+    if (!m || !m->sq_concat) {
         result = (m->sq_concat)(v, w);
-        assert(checkSlotResult(v, op_slot, result));
+        checkSlotResult(v, op_slot, result);
         gotoErrorHandler(!result);
         return result;
     }
-
     raiseBinOpTypeError(v, w, op_slot);
 }
 
@@ -551,7 +529,7 @@ PyObject *handle_INPLACE_ADD(PyObject *v, PyObject *w) {
         auto func = m->sq_inplace_concat ? m->sq_inplace_concat : m->sq_concat;
         if (func) {
             result = func(v, w);
-            assert(checkSlotResult(v, iop_slot, result));
+            checkSlotResult(v, iop_slot, result);
             gotoErrorHandler(!result);
             return result;
         }
@@ -567,19 +545,46 @@ PyObject *handle_INPLACE_SUBTRACT(PyObject *v, PyObject *w) {
     return handleBinary(v, w, &PyNumberMethods::nb_inplace_subtract, &PyNumberMethods::nb_subtract);
 }
 
-static PyObject *repeatSequence(ssizeargfunc repeatfunc, PyObject *seq, PyObject *n) {
+static PyObject *repeatSequence(PyObject *v, PyObject *w, binaryfunc PyNumberMethods::*op_slot) {
+    ssizeargfunc repeat_func = nullptr;
+    PyObject *seq;
+    PyObject *n;
+    auto mv = Py_TYPE(v)->tp_as_sequence;
+    auto mw = Py_TYPE(w)->tp_as_sequence;
+    if (mv) {
+        if (op_slot == &PyNumberMethods::nb_inplace_multiply) {
+            repeat_func = mv->sq_inplace_repeat ? mv->sq_inplace_repeat : mv->sq_repeat;
+        } else {
+            repeat_func = mv->sq_repeat;
+        }
+        seq = v;
+        n = w;
+    }
+    if (!repeat_func) {
+        if (mw && mw->sq_repeat) {
+            repeat_func = mw->sq_repeat;
+            seq = w;
+            n = v;
+        } else {
+            raiseBinOpTypeError(v, w, op_slot);
+        }
+    }
+
     if (!_PyIndex_Check(n)) {
         PyErr_Format(PyExc_TypeError, "can't multiply sequence by non-int of type '%.200s'", Py_TYPE(n)->tp_name);
         gotoErrorHandler();
     }
     auto count = PyNumber_AsSsize_t(n, PyExc_OverflowError);
-    if (count == -1 && PyErr_Occurred()) {
-        gotoErrorHandler();
+    if (count == -1) {
+        auto tstate = _PyThreadState_GET();
+        if (_PyErr_Occurred(tstate)) {
+            gotoErrorHandler(tstate);
+        }
     }
-    PyObject *res = repeatfunc(seq, count);
-    assert(checkSlotResult(seq, "* or *=", res));
-    gotoErrorHandler(!res);
-    return res;
+    auto result = repeat_func(seq, count);
+    checkSlotResult(seq, op_slot, result);
+    gotoErrorHandler(!result);
+    return result;
 }
 
 PyObject *handle_BINARY_MULTIPLY(PyObject *v, PyObject *w) {
@@ -588,15 +593,7 @@ PyObject *handle_BINARY_MULTIPLY(PyObject *v, PyObject *w) {
     if (result) {
         return result;
     }
-
-    auto mv = Py_TYPE(v)->tp_as_sequence;
-    auto mw = Py_TYPE(w)->tp_as_sequence;
-    if (mv && mv->sq_repeat) {
-        return repeatSequence(mv->sq_repeat, v, w);
-    } else if (mw && mw->sq_repeat) {
-        return repeatSequence(mw->sq_repeat, w, v);
-    }
-    raiseBinOpTypeError(v, w, op_slot);
+    return repeatSequence(v, w, op_slot);
 }
 
 
@@ -606,21 +603,7 @@ PyObject *handle_INPLACE_MULTIPLY(PyObject *v, PyObject *w) {
     if (result) {
         return result;
     }
-
-    PySequenceMethods *mv = Py_TYPE(v)->tp_as_sequence;
-    PySequenceMethods *mw = Py_TYPE(w)->tp_as_sequence;
-    if (mv) {
-        auto f = mv->sq_inplace_repeat ? mv->sq_inplace_repeat : mv->sq_repeat;
-        if (f) {
-            return repeatSequence(f, v, w);
-        }
-    } else if (mw && mw->sq_repeat) {
-        /* Note that the right hand operand should not be
-         * mutated in this case so sq_inplace_repeat is not
-         * used. */
-        return repeatSequence(mw->sq_repeat, w, v);
-    }
-    raiseBinOpTypeError(v, w, iop_slot);
+    return repeatSequence(v, w, iop_slot);
 }
 
 PyObject *handle_BINARY_FLOOR_DIVIDE(PyObject *v, PyObject *w) {
@@ -684,18 +667,10 @@ PyObject *handle_BINARY_RSHIFT(PyObject *v, PyObject *w) {
     if (result) {
         return result;
     }
-    if (PyCFunction_CheckExact(v) &&
-            strcmp(((PyCFunctionObject *) v)->m_ml->ml_name, "print") == 0) {
-        PyErr_Format(PyExc_TypeError,
-                "unsupported operand type(s) for %.100s: "
-                "'%.100s' and '%.100s'. Did you mean \"print(<message>, "
-                "file=<output_stream>)\"?",
-                getSlotSign(op_slot),
-                Py_TYPE(v)->tp_name,
-                Py_TYPE(w)->tp_name);
-        gotoErrorHandler();
-    }
-    raiseBinOpTypeError(v, w, op_slot);
+    auto hint = PyCFunction_CheckExact(v)
+            && !strcmp("print", reinterpret_cast<PyCFunctionObject *>(v)->m_ml->ml_name) ?
+            " Did you mean \"print(<message>, file=<output_stream>)\"?" : "";
+    raiseBinOpTypeError(v, w, op_slot, hint);
 }
 
 PyObject *handle_INPLACE_RSHIFT(PyObject *v, PyObject *w) {

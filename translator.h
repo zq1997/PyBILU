@@ -85,7 +85,6 @@ class Translator {
     DynamicArray<llvm::Value *> py_freevars;
     DynamicArray<llvm::Value *> py_stack;
     llvm::Value *py_symbols[external_symbol_count]{};
-    llvm::BasicBlock *unwind_block{};
 
     llvm::Constant *c_null{llvm::ConstantPointerNull::get(types.get<void *>())};
     llvm::Value *rt_lasti{};

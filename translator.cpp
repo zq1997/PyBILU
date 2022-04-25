@@ -121,7 +121,6 @@ void *Translator::operator()(Compiler &compiler, PyCodeObject *code) {
     rt_lasti = getPointer(simple_frame, &PyFrameObject::f_lasti, "$lasti");
 
     error_block = createBlock("$error_here", nullptr);
-    unwind_block = createBlock("$unwind_block", nullptr);
 
     for (auto &i : Range(block_num - 1, 1U)) {
         emitBlock(i);
@@ -131,10 +130,6 @@ void *Translator::operator()(Compiler &compiler, PyCodeObject *code) {
     builder.SetInsertPoint(error_block);
     do_CallSymbol<raiseException, &Translator::attr_noreturn>();
     builder.CreateUnreachable();
-
-    unwind_block->insertInto(func);
-    builder.SetInsertPoint(unwind_block);
-    builder.CreateRet(c_null);
 
     builder.SetInsertPoint(blocks[0].llvm_block);
     builder.CreateBr(blocks[1].llvm_block);

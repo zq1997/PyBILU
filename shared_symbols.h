@@ -65,7 +65,6 @@ PyObject *handle_INPLACE_OR(PyObject *v, PyObject *w);
 PyObject *handle_BINARY_XOR(PyObject *v, PyObject *w);
 PyObject *handle_INPLACE_XOR(PyObject *v, PyObject *w);
 
-PyObject *handle_INPLACE_POWER(PyObject *base, PyObject *exp);
 PyObject *unwindFrame(PyObject **stack, ptrdiff_t stack_height);
 
 #define ENTRY(X) std::pair{&(X), #X}
