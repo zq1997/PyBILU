@@ -756,6 +756,6 @@ const auto symbol_names{apply(
         external_symbols
 )};
 const auto symbol_addresses{apply(
-        [](auto &&... x) noexcept { return array{reinterpret_cast<FunctionPointer>(x.first) ...}; },
+        [](auto &&... x) noexcept { return array{reinterpret_cast<void *>(x.first) ...}; },
         external_symbols
 )};

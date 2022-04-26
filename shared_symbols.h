@@ -116,6 +116,8 @@ constexpr std::tuple external_symbols{
         ENTRY(handle_INPLACE_XOR),
         ENTRY(handle_COMPARE_OP),
 
+        std::pair{&_Py_FalseStruct, "Py_False"},
+        std::pair{&_Py_TrueStruct, "Py_True"},
         std::pair{&PyObject_GetIter, "PyObject_GetIter"},
         std::pair{&PyObject_IsTrue, "PyObject_IsTrue"},
 };
@@ -131,7 +133,7 @@ constexpr auto isSameTypeAndValue() {
     }
 }
 
-template <auto &V, size_t I = 0>
+template <auto V, size_t I = 0>
 constexpr auto searchSymbol() {
     static_assert(I < external_symbol_count, "invalid symbol");
     if constexpr (isSameTypeAndValue<std::get<I>(external_symbols).first, V>()) {
@@ -143,50 +145,44 @@ constexpr auto searchSymbol() {
 
 using FunctionPointer = void (*)();
 extern const std::array<const char *, external_symbol_count> symbol_names;
-extern const std::array<FunctionPointer, external_symbol_count> symbol_addresses;
-using TranslatedFunctionType = PyObject *(const FunctionPointer *, PyFrameObject *);
+extern const std::array<void *, external_symbol_count> symbol_addresses;
+using TranslatedFunctionType = PyObject *(void *const[], PyFrameObject *);
 
 template <typename T>
 struct TypeWrapper {
     using type = T;
 };
 
+template <typename T, typename = void>
+struct Normalizer;
+
 template <typename T>
-constexpr auto Normalizer();
+using NormalizedType = typename Normalizer<std::remove_cv_t<T>>::type;
+
 template <typename T>
-using NormalizedType = typename decltype(Normalizer<T>())::type;
+struct Normalizer<T, std::enable_if_t<std::is_integral_v<T>>> {
+    using type = std::make_signed_t<T>;
+};
+
+template <typename T>
+struct Normalizer<T, std::enable_if_t<!std::is_scalar_v<T> && !std::is_function_v<T>>> {
+    using type = void;
+};
+
+template <typename T>
+struct Normalizer<T *> {
+    using type = void *;
+};
 
 template <typename Ret, typename... Args>
-constexpr auto Normalizer(TypeWrapper<Ret(Args...)>) {
-    return TypeWrapper<NormalizedType<Ret>(NormalizedType<Args>...)>{};
-}
+struct Normalizer<Ret(Args...)> {
+    using type = NormalizedType<Ret>(NormalizedType<Args>...);
+};
 
 template <typename Ret, typename... Args>
-constexpr auto Normalizer(TypeWrapper<Ret(Args...) noexcept>) {
-    return TypeWrapper<NormalizedType<Ret>(NormalizedType<Args>...)>{};
-}
-
-template <typename T>
-constexpr auto Normalizer() {
-    if constexpr(std::is_const_v<T> || std::is_volatile_v<T>) {
-        return TypeWrapper<NormalizedType<std::remove_cv_t<T>>>{};
-    } else {
-        if constexpr(std::is_fundamental_v<T>) {
-            if constexpr(std::is_integral_v<T> && std::is_signed_v<T>) {
-                return TypeWrapper<std::make_unsigned_t<T>>{};
-            } else {
-                return TypeWrapper<T>{};
-            }
-        }
-        if constexpr(std::is_pointer_v<T>) {
-            return TypeWrapper<void *>{}; // opaque pointer
-        }
-        if constexpr(std::is_function_v<T>) {
-            return Normalizer(TypeWrapper<T>{});
-        }
-        // Return void here to raise a compile error for unsupported types
-    }
-}
+struct Normalizer<Ret(Args...) noexcept> {
+    using type = NormalizedType<Ret>(NormalizedType<Args>...);
+};
 
 template <typename...>
 struct TypeFilter;
@@ -221,21 +217,16 @@ static auto createType(llvm::LLVMContext &context) {
     }
 }
 
-template <typename Ret, typename... Args>
-static auto createType(llvm::LLVMContext &context, TypeWrapper<Ret(Args...)>) {
-    return llvm::FunctionType::get(
-            createType<Ret>(context),
-            {createType<Args>(context)...},
-            false
-    );
-}
-
 class RegisteredLLVMTypes {
     template <typename T, typename = void>
-    struct LLVMType;
+    struct LLVMType {
+        llvm::Type *type;
+
+        LLVMType(llvm::LLVMContext &context, const llvm::DataLayout &dl) : type{createType<T>(context)} {}
+    };
 
     template <typename T>
-    struct LLVMType<T, std::enable_if_t<!std::is_function_v<T>>> {
+    struct LLVMType<T, std::enable_if_t<std::is_scalar_v<T>>> {
         decltype(createType<T>(std::declval<llvm::LLVMContext &>())) type;
         llvm::Align align;
 
@@ -243,11 +234,17 @@ class RegisteredLLVMTypes {
                 type{createType<T>(context)}, align{dl.getABITypeAlign(type)} {}
     };
 
-    template <typename T>
-    struct LLVMType<T, std::enable_if_t<std::is_function_v<T>>> {
-        llvm::FunctionType *type{};
+    template <typename Ret, typename... Args>
+    struct LLVMType<Ret(Args...)> {
+        llvm::FunctionType *type;
 
-        LLVMType(llvm::LLVMContext &context, const llvm::DataLayout &dl) : type{createType(context, TypeWrapper<T>{})} {}
+        LLVMType(llvm::LLVMContext &context, const llvm::DataLayout &dl) : type{
+                llvm::FunctionType::get(
+                        createType<Ret>(context),
+                        {createType<Args>(context)...},
+                        false
+                )
+        } {}
     };
 
     template <typename T>

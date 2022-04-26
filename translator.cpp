@@ -834,8 +834,8 @@ llvm::Value *Translator::getSymbol(size_t offset) {
         }
         // TODO: 重命名或者两个tbaa
         // TODO: 合并为READ
-        auto ptr = getPointer<FunctionPointer>(func->getArg(0), offset, useName("$symbol.", offset));
-        symbol = loadValue<FunctionPointer>(ptr, tbaa_code_const, useName("$symbol.", name));
+        auto ptr = getPointer<void *>(func->getArg(0), offset, useName("$symbol.", offset));
+        symbol = loadValue<void *>(ptr, tbaa_code_const, useName("$symbol.", name));
         builder.SetInsertPoint(block);
     }
     return symbol;
