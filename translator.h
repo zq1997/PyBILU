@@ -50,6 +50,7 @@ auto useName(const T &arg, const Ts &... more) {
 struct PyBasicBlock {
     unsigned end;
     llvm::BasicBlock *llvm_block;
+    decltype(PyFrameObject::f_stackdepth) initial_stack_height;
 };
 
 class Translator {
@@ -198,11 +199,11 @@ class Translator {
     void do_PUSH(llvm::Value *value);
 
     auto do_PEAK(int i) {
-        return builder.CreateLoad(types.get<PyObject *>(), py_stack[stack_height - i]);
+        return loadValue<PyObject *>(py_stack[stack_height - i], tbaa_frame_cells);
     }
 
     auto do_SET_PEAK(int i, llvm::Value *value) {
-        return builder.CreateStore(value, py_stack[stack_height - i]);
+        return storeValue<PyObject *>(value, py_stack[stack_height - i], tbaa_frame_cells);
     }
 
     void do_Py_INCREF(llvm::Value *v);
@@ -246,7 +247,7 @@ class Translator {
         do_Py_DECREF(right);
     }
 
-    llvm::BasicBlock *findBlock(unsigned instr_offset);
+    PyBasicBlock &findPyBlock(unsigned instr_offset);
 
     // TODO：删除
     void createIf(llvm::Value *cond, const std::function<void()> &make_body, bool terminated = false) {

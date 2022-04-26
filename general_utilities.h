@@ -68,10 +68,6 @@ public:
 };
 
 class BitArray : public DynamicArray<unsigned long> {
-    void set_or_unset(size_t index, ValueType value) {
-        (*this)[index / BitsPerValue] |= value << index % BitsPerValue;
-    }
-
 public:
     static constexpr auto BitsPerValue = CHAR_BIT * sizeof(ValueType);
 
@@ -79,24 +75,14 @@ public:
 
     explicit BitArray(size_t size) : DynamicArray<ValueType>(chunkNumber(size), true) {}
 
-    void set(size_t index) {
-        set_or_unset(index, ValueType{1});
-    }
-
-    void unset(size_t index) {
-        set_or_unset(index, ValueType{0});
+    bool set(size_t index) {
+        auto old = get(index);
+        (*this)[index / BitsPerValue] |= ValueType{1} << index % BitsPerValue;
+        return !old;
     }
 
     bool get(size_t index) {
         return (*this)[index / BitsPerValue] & (ValueType{1} << index % BitsPerValue);
-    }
-
-    [[nodiscard]] auto count(size_t size) const {
-        size_t counted = 0;
-        for (auto i = chunkNumber(size); i--;) {
-            counted += std::bitset<BitsPerValue>((*this)[i]).count();
-        }
-        return counted;
     }
 };
 

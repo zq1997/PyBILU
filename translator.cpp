@@ -60,9 +60,11 @@ void *Translator::operator()(Compiler &compiler, PyCodeObject *code) {
     blocks[0].llvm_block = createBlock("$entry_block", func);
     auto start = blocks[0].end;
     for (auto &b : Range(block_num - 1, &blocks[1])) {
+        b.initial_stack_height = -1;
         b.llvm_block = createBlock(useName("$instr.", start), nullptr);
         start = b.end;
     }
+    blocks[1].initial_stack_height = 0;
 
     builder.SetInsertPoint(blocks[0].llvm_block);
 
@@ -148,49 +150,38 @@ void Translator::parseCFG() {
 
     BitArray is_boundary(size + 1);
     DynamicArray<int> instr_stack_height(size);
+    block_num = 0;
 
     for (QuickPyInstrIter instr(py_instructions, 0, size); instr.next();) {
         switch (instr.opcode) {
-        case RETURN_VALUE:
-            is_boundary.set(instr.offset);
-            break;
         case JUMP_FORWARD:
-            is_boundary.set(instr.offset);
-            is_boundary.set(instr.offset + instr.getOparg());
+        case FOR_ITER:
+            block_num += is_boundary.set(instr.offset + instr.getOparg());
             break;
         case JUMP_ABSOLUTE:
         case JUMP_IF_TRUE_OR_POP:
         case JUMP_IF_FALSE_OR_POP:
         case POP_JUMP_IF_TRUE:
         case POP_JUMP_IF_FALSE:
-            is_boundary.set(instr.offset);
-            is_boundary.set(instr.getOparg());
+            block_num += is_boundary.set(instr.getOparg());
             break;
-        case FOR_ITER:
-            is_boundary.set(instr.offset + instr.getOparg());
-            break;
-        case RAISE_VARARGS:
-        case RERAISE:
-            is_boundary.set(instr.offset);
         default:
             break;
         }
     }
 
-    is_boundary.set(0);
-    assert(is_boundary.get(size));
+    block_num += is_boundary.set(0);
+    block_num += is_boundary.set(size);
 
-    blocks.reserve(block_num = is_boundary.count(size));
-
+    blocks.reserve(block_num);
     unsigned current_num = 0;
     for (auto i : Range(BitArray::chunkNumber(size))) {
-        auto bits = is_boundary[i];
-        BitArray::ValueType tester{1};
-        for (unsigned j = 0; j < BitArray::BitsPerValue; j++) {
-            if (tester & bits) {
+        unsigned j = 0;
+        for (auto bits = is_boundary[i]; bits; bits >>= 1) {
+            if (bits & 1) {
                 blocks[current_num++].end = i * BitArray::BitsPerValue + j;
             }
-            tester <<= 1;
+            j++;
         }
     }
     assert(current_num == block_num);
@@ -251,6 +242,9 @@ void Translator::emitBlock(unsigned index) {
     blocks[index].llvm_block->insertInto(func);
     builder.SetInsertPoint(blocks[index].llvm_block);
     bool fall_through = true;
+    // TODO: 这种可能会有问题，会出现一个block没有被设置initial_stack_height但是被遍历，会assert失败
+    stack_height = blocks[index].initial_stack_height;
+    assert(stack_height >= 0);
 
     assert(index);
     auto first = blocks[index - 1].end;
@@ -635,14 +629,16 @@ void Translator::emitBlock(unsigned index) {
             unimplemented();
 
         case JUMP_FORWARD: {
-            auto jmp_target = findBlock(instr.oparg + instr.oparg);
-            builder.CreateBr(jmp_target);
-            fall_through = false;
+            auto &jmp_block = findPyBlock(instr.offset + instr.oparg);
+            jmp_block.initial_stack_height = stack_height;
+            builder.CreateBr(jmp_block.llvm_block);
             break;
         }
         case JUMP_ABSOLUTE: {
-            auto jmp_target = findBlock(instr.oparg);
-            builder.CreateBr(jmp_target);
+            auto &jmp_block = findPyBlock(instr.oparg);
+            // TODO: 如果有，则不要设置，要校验
+            jmp_block.initial_stack_height = stack_height;
+            builder.CreateBr(jmp_block.llvm_block);
             fall_through = false;
             break;
         }
@@ -655,17 +651,11 @@ void Translator::emitBlock(unsigned index) {
             auto err = do_CallSymbol<PyObject_IsTrue>(cond);
             do_Py_DECREF(cond);
             auto cmp = builder.CreateICmpEQ(err, asValue(0));
-            auto jmp_target = findBlock(instr.oparg);
-            builder.CreateCondBr(cmp, jmp_target, blocks[index + 1].llvm_block);
-            fall_through = false;
-            // auto cond = do_POP();
-            // auto err = WrappedValue{do_CallSymbol<PyObject_IsTrue>(cond), *this};
-            // do_Py_DECREF(cond);
-            // auto zero = WrappedValue{asValue(0), *this};
-            // auto cmp = err == zero;
-            // auto jmp_target = findBlock(instr.oparg);
-            // builder.CreateCondBr(cmp.value, jmp_target, blocks[index + 1].llvm_block);
-            // fall_through = false;
+            auto fall_block = createBlock("POP_JUMP_IF_FALSE.fall");
+            auto &jmp_block = findPyBlock(instr.oparg);
+            jmp_block.initial_stack_height = stack_height;
+            builder.CreateCondBr(cmp, jmp_block.llvm_block, fall_block);
+            builder.SetInsertPoint(fall_block);
             break;
         }
         case POP_JUMP_IF_TRUE: {
@@ -673,9 +663,11 @@ void Translator::emitBlock(unsigned index) {
             auto err = do_CallSymbol<PyObject_IsTrue>(cond);
             do_Py_DECREF(cond);
             auto cmp = builder.CreateICmpNE(err, asValue(0));
-            auto jmp_target = findBlock(instr.oparg);
-            builder.CreateCondBr(cmp, jmp_target, blocks[index + 1].llvm_block);
-            fall_through = false;
+            auto fall_block = createBlock("POP_JUMP_IF_FALSE.fall");
+            auto &jmp_block = findPyBlock(instr.oparg);
+            jmp_block.initial_stack_height = stack_height;
+            builder.CreateCondBr(cmp, jmp_block.llvm_block, fall_block);
+            builder.SetInsertPoint(fall_block);
             break;
         }
 
@@ -687,20 +679,21 @@ void Translator::emitBlock(unsigned index) {
             break;
         }
         case FOR_ITER: {
-            auto iter = do_POP();
+            auto sp = stack_height;
+            auto iter = do_PEAK(1);
             auto the_type = readData(iter, &PyObject::ob_type);
             auto next = do_CallSlot(the_type, &PyTypeObject::tp_iternext, iter);
-            auto cmp = builder.CreateICmpEQ(next, c_null);
             auto b_continue = createBlock("FOR_ITER.continue");
             auto b_break = createBlock("FOR_ITER.break");
-            builder.CreateCondBr(cmp, b_break, b_continue);
+            builder.CreateCondBr(builder.CreateICmpEQ(next, c_null), b_break, b_continue);
             builder.SetInsertPoint(b_break);
             do_Py_DECREF(iter);
-            builder.CreateBr(findBlock(instr.offset + instr.oparg));
+            auto &break_block = findPyBlock(instr.offset + instr.oparg);
+            break_block.initial_stack_height = stack_height - 1;
+            builder.CreateBr(break_block.llvm_block);
             builder.SetInsertPoint(b_continue);
-            do_PUSH(iter);
+            stack_height = sp;
             do_PUSH(next);
-            fall_through = false;
             break;
         }
 
@@ -807,10 +800,11 @@ void Translator::emitBlock(unsigned index) {
     if (fall_through) {
         assert(index < block_num - 1);
         builder.CreateBr(blocks[index + 1].llvm_block);
+        blocks[index + 1].initial_stack_height = stack_height;
     }
 }
 
-BasicBlock *Translator::findBlock(unsigned offset) {
+PyBasicBlock &Translator::findPyBlock(unsigned offset) {
     assert(block_num > 1);
     decltype(block_num) left = 0;
     auto right = block_num - 1;
@@ -822,11 +816,11 @@ BasicBlock *Translator::findBlock(unsigned offset) {
         } else if (v > offset) {
             right = mid - 1;
         } else {
-            return blocks[mid + 1].llvm_block;
+            return blocks[mid + 1];
         }
     }
     assert(false);
-    return nullptr;
+    return blocks[0];
 }
 
 llvm::Value *Translator::getSymbol(size_t i) {

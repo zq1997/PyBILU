@@ -39,8 +39,9 @@ PyObject *eval_func(PyThreadState *tstate, PyFrameObject *frame, int throwflag) 
     cframe.previous = prev_cframe;
     tstate->cframe = &cframe;
     tstate->frame = frame;
+    PyObject *result;
     if (!setjmp(cframe.frame_jmp_buf)) {
-        return jit_callee(&symbol_addresses[0], frame);
+        result = jit_callee(&symbol_addresses[0], frame);
     } else {
         assert(_PyErr_Occurred(tstate));
         PyTraceBack_Here(frame);
@@ -53,6 +54,9 @@ PyObject *eval_func(PyThreadState *tstate, PyFrameObject *frame, int throwflag) 
         }
         return nullptr;
     }
+    tstate->cframe = prev_cframe;
+    tstate->frame = frame->f_back;
+    return result;
 }
 
 void freeExtra(void *extra) {

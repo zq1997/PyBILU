@@ -10,7 +10,7 @@ def stat(name, func, repeat, get_args):
     for i in range(repeat):
         func(*get_args())
     t1 = time.time()
-    print('%s: %.3fs' % (name, t1 - t0))
+    print('%s: %.3fs' % (name, t1 - t0), flush=True)
 
 
 # def foo(L):
@@ -31,21 +31,7 @@ def stat(name, func, repeat, get_args):
 # stat('无优化', foo, 1, lambda : [range(5000000)])
 # stat('有优化', bar, 1, lambda : [range(5000000)])
 
-def foo(n):
-    if n < 2:
-        return n
-    x = 0
-    y = 1
-    i = 1
-    while i < n:
-        f = x + y
-        x = y
-        y = f
-        i = i + 1
-    return y
 
-
-@pynic.apply
 def bar(n):
     if n < 2:
         return n
@@ -53,12 +39,24 @@ def bar(n):
     y = 1
     i = 1
     while i < n:
-        f = x + y
+        f = x + 0 # x + y
         x = y
         y = f
         i = i + 1
     return y
 
 
-stat('无优化', foo, 1, lambda: [123456])
-stat('有优化', bar, 1, lambda: [123456])
+stat('无优化', bar, 3, lambda: [123456])
+stat('有优化', pynic.apply(bar), 3, lambda: [123456])
+
+# l = [1, 2]
+#
+#
+# @pynic.apply
+# def foo():
+#     global l
+#     return l
+
+#
+# print(foo())
+# print(l)
