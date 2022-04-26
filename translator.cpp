@@ -588,10 +588,10 @@ void Translator::emitBlock(unsigned index) {
         case COMPARE_OP: {
             auto right = do_POP();
             auto left = do_POP();
-            auto res = do_CallSymbol<PyObject_RichCompare>(left, right, asValue(instr.oparg));
+            auto res = do_CallSymbol<handle_COMPARE_OP>(left, right, asValue(instr.oparg));
+            do_PUSH(res);
             do_Py_DECREF(left);
             do_Py_DECREF(right);
-            do_PUSH(res);
             break;
         }
         case IS_OP:
@@ -823,18 +823,18 @@ PyBasicBlock &Translator::findPyBlock(unsigned offset) {
     return blocks[0];
 }
 
-llvm::Value *Translator::getSymbol(size_t i) {
-    auto &symbol = py_symbols[i];
+llvm::Value *Translator::getSymbol(size_t offset) {
+    auto &symbol = py_symbols[offset];
     if (!symbol) {
         auto block = builder.GetInsertBlock();
         builder.SetInsertPoint(blocks[0].llvm_block);
         const char *name = nullptr;
         if constexpr (debug_build) {
-            name = symbol_names[i];
+            name = symbol_names[offset];
         }
-        //TODO: 重命名或者两个tbaa
+        // TODO: 重命名或者两个tbaa
         // TODO: 合并为READ
-        auto ptr = getPointer<FunctionPointer>(func->getArg(0), i, useName("$symbol.", i));
+        auto ptr = getPointer<FunctionPointer>(func->getArg(0), offset, useName("$symbol.", offset));
         symbol = loadValue<FunctionPointer>(ptr, tbaa_code_const, useName("$symbol.", name));
         builder.SetInsertPoint(block);
     }

@@ -10,6 +10,8 @@
 
 using namespace std;
 
+static PyObject *const python_bool_values[]{Py_False, Py_True};
+
 // TODO: 在想，能不能设计俩版本，decref在这里实现
 // TODO: 很多函数是否应该展开，把Python的实现复制过来，降低调用层数
 // TODO: 能否设置hot inline等确保展开
@@ -390,8 +392,7 @@ PyObject *handle_UNARY_NOT(PyObject *value) {
     if (res < 0) [[unlikely]] {
         gotoErrorHandler();
     }
-    static const array bool_values{Py_False, Py_True};
-    auto not_value = bool_values[res == 0];
+    auto not_value = python_bool_values[res == 0];
     Py_INCREF(not_value);
     return not_value;
 }
@@ -701,11 +702,53 @@ PyObject *handle_INPLACE_XOR(PyObject *v, PyObject *w) {
     return handleBinary(v, w, &PyNumberMethods::nb_inplace_xor, &PyNumberMethods::nb_xor);
 }
 
-PyObject *unwindFrame(PyObject **stack, ptrdiff_t stack_height) {
-    while (stack_height--) {
-        Py_DECREF(stack[stack_height]);
+PyObject *handle_COMPARE_OP(PyObject *v, PyObject *w, int op) {
+    auto type_v = Py_TYPE(v);
+    auto type_w = Py_TYPE(w);
+    auto slot_v = type_v->tp_richcompare;
+    auto slot_w = type_w->tp_richcompare;
+
+    // TODO: gotoErrorHandler和Py_NotImplemented先后考虑考虑
+    if (slot_w && type_v != type_w && PyType_IsSubtype(type_w, type_v)) {
+        auto res = slot_w(w, v, _Py_SwappedOp[op]);
+        gotoErrorHandler(!res);
+        if (res != Py_NotImplemented) {
+            return res;
+        }
+        Py_DECREF(res);
+        slot_w = nullptr;
     }
-    return nullptr;
+    if (slot_v) {
+        auto res = slot_v(v, w, op);
+        gotoErrorHandler(!res);
+        if (res != Py_NotImplemented) {
+            return res;
+        }
+        Py_DECREF(res);
+    }
+    if (slot_w) {
+        auto res = slot_w(w, v, _Py_SwappedOp[op]);
+        gotoErrorHandler(!res);
+        if (res != Py_NotImplemented) {
+            return res;
+        }
+        Py_DECREF(res);
+    }
+    if (op == Py_EQ || op == Py_NE) {
+        auto res = python_bool_values[(v == w) ^ (op == Py_NE)];
+        Py_INCREF(res);
+        return res;
+    }
+
+    static const char *const op_signs[] = {"<", "<=", "==", "!=", ">", ">="};
+    auto tstate = _PyThreadState_GET();
+    // TODO: 异常抛出给统一化
+    _PyErr_Format(tstate, PyExc_TypeError,
+            "'%s' not supported between instances of '%.100s' and '%.100s'",
+            op_signs[op],
+            type_v->tp_name,
+            type_w->tp_name);
+    gotoErrorHandler(tstate);
 }
 
 const auto symbol_names{apply(

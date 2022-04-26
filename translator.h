@@ -112,20 +112,19 @@ class Translator {
         return llvm::BasicBlock::Create(context, useName("$instr.", lasti, ".", extra), func);
     }
 
-    template <typename T=char>
+    template <typename T>
     auto getPointer(llvm::Value *base, size_t index, const llvm::Twine &name = "") {
         if (!index && name.isTriviallyEmpty()) {
             return base;
         }
-        auto offset_value = asValue(sizeof(T) * index);
-        return builder.CreateInBoundsGEP(types.get<char>(), base, offset_value, name);
+        return builder.CreateInBoundsGEP(types.get<T>(), base, asValue(index), name);
     }
 
     template <typename T, typename M>
     auto getPointer(llvm::Value *instance, M T::* member, const llvm::Twine &name = "") {
         T dummy;
         auto offset = reinterpret_cast<const char *>(&(dummy.*member)) - reinterpret_cast<const char *>(&dummy);
-        return getPointer(instance, offset, name);
+        return getPointer<char>(instance, offset, name);
     }
 
     template <typename T>
@@ -189,7 +188,7 @@ class Translator {
         return builder.CreateStore(value, getPointer(instance, member));
     }
 
-    llvm::Value *getSymbol(size_t i);
+    llvm::Value *getSymbol(size_t offset);
 
     void parseCFG();
     void emitBlock(unsigned index);
@@ -228,20 +227,20 @@ class Translator {
         return do_Call<Attr>(types.get<std::remove_reference_t<decltype(S)>>(), getSymbol(searchSymbol<S>()), args...);
     }
 
-    void handle_UNARY_OP(size_t i) {
+    void handle_UNARY_OP(size_t offset) {
         auto value = do_POP();
         using UnaryFunction = PyObject *(PyObject *);
-        auto res = do_Call(types.get<UnaryFunction>(), getSymbol(i), value);
+        auto res = do_Call(types.get<UnaryFunction>(), getSymbol(offset), value);
         do_PUSH(res);
         do_Py_DECREF(value);
     }
 
     // TODO:泛型化
-    void handle_BINARY_OP(size_t i) {
+    void handle_BINARY_OP(size_t offset) {
         auto right = do_POP();
         auto left = do_POP();
         using BinaryFunction = PyObject *(PyObject *, PyObject *);
-        auto res = do_Call(types.get<BinaryFunction>(), getSymbol(i), left, right);
+        auto res = do_Call(types.get<BinaryFunction>(), getSymbol(offset), left, right);
         do_PUSH(res);
         do_Py_DECREF(left);
         do_Py_DECREF(right);

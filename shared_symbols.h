@@ -64,8 +64,7 @@ PyObject *handle_BINARY_OR(PyObject *v, PyObject *w);
 PyObject *handle_INPLACE_OR(PyObject *v, PyObject *w);
 PyObject *handle_BINARY_XOR(PyObject *v, PyObject *w);
 PyObject *handle_INPLACE_XOR(PyObject *v, PyObject *w);
-
-PyObject *unwindFrame(PyObject **stack, ptrdiff_t stack_height);
+PyObject *handle_COMPARE_OP(PyObject *v, PyObject *w, int op);
 
 #define ENTRY(X) std::pair{&(X), #X}
 
@@ -115,12 +114,10 @@ constexpr std::tuple external_symbols{
         ENTRY(handle_INPLACE_OR),
         ENTRY(handle_BINARY_XOR),
         ENTRY(handle_INPLACE_XOR),
+        ENTRY(handle_COMPARE_OP),
 
         std::pair{&PyObject_GetIter, "PyObject_GetIter"},
         std::pair{&PyObject_IsTrue, "PyObject_IsTrue"},
-        std::pair{&PyObject_RichCompare, "PyObject_RichCompare"},
-
-        std::pair{&unwindFrame, "unwindFrame"},
 };
 
 constexpr auto external_symbol_count = std::tuple_size_v<decltype(external_symbols)>;
