@@ -20,17 +20,8 @@ def stat(name, func, repeat, get_args):
 #     return s
 #
 #
-# @pynic.apply
-# def bar(L):
-#     s = 0
-#     for i in L:
-#         s = s + i
-#     return s
-#
-#
-# stat('无优化', foo, 1, lambda : [range(5000000)])
-# stat('有优化', bar, 1, lambda : [range(5000000)])
-
+# stat('无优化', foo, 1, lambda: [range(5000000)])
+# stat('有优化', pynic.apply(foo), 1, lambda: [range(5000000)])
 
 def bar(n):
     if n < 2:
@@ -39,15 +30,15 @@ def bar(n):
     y = 1
     i = 1
     while i < n:
-        f = x + 0 # x + y
+        f = x + y
         x = y
         y = f
         i = i + 1
     return y
 
 
-stat('无优化', bar, 3, lambda: [123456])
-stat('有优化', pynic.apply(bar), 3, lambda: [123456])
+stat('无优化', bar, 1111, lambda: [1234])
+stat('有优化', pynic.apply(bar), 1111, lambda: [1234])
 
 # l = [1, 2]
 #

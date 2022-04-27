@@ -7,10 +7,23 @@
 #include <internal/pycore_code.h>
 #include <internal/pycore_pyerrors.h>
 #include <internal/pycore_abstract.h>
+#include <iostream>
 
 using namespace std;
 
 static PyObject *const python_bool_values[]{Py_False, Py_True};
+
+void handle_DECREF(PyObject *obj) {
+    if (!--obj->ob_refcnt) {
+        Py_TYPE(obj)->tp_dealloc(obj);
+    }
+}
+
+void handle_XDECREF(PyObject *obj) {
+    if (obj && !--obj->ob_refcnt) {
+        Py_TYPE(obj)->tp_dealloc(obj);
+    }
+}
 
 // TODO: 在想，能不能设计俩版本，decref在这里实现
 // TODO: 很多函数是否应该展开，把Python的实现复制过来，降低调用层数

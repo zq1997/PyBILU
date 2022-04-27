@@ -29,10 +29,16 @@ Translator::Translator(const DataLayout &dl) : data_layout{dl} {
     tbaa_frame_cells = createTBAANode(md_builder, tbaa_root, "frame cells");
     tbaa_code_const = createTBAANode(md_builder, tbaa_root, "code const", true);
     tbaa_frame_status = createTBAANode(md_builder, tbaa_root, "stack pointer");
+    tbaa_symbols = createTBAANode(md_builder, tbaa_root, "symbols", true);
 
     auto attr_builder = AttrBuilder(context);
     attr_builder.addAttribute(Attribute::NoReturn);
     attr_noreturn = AttributeList::get(context, AttributeList::FunctionIndex, attr_builder);
+    attr_builder.clear();
+    attr_builder
+            .addAttribute(Attribute::WillReturn)
+            .addAttribute(Attribute::ArgMemOnly);
+    attr_return = AttributeList::get(context, AttributeList::FunctionIndex, attr_builder);
     attr_builder.clear();
     attr_builder
             .addAttribute(Attribute::NoUnwind)
@@ -197,22 +203,31 @@ void Translator::do_Py_INCREF(Value *py_obj) {
 }
 
 void Translator::do_Py_DECREF(Value *py_obj) {
-    auto ref = getPointer(py_obj, &PyObject::ob_refcnt);
-    auto old_value = loadValue<decltype(PyObject::ob_refcnt)>(ref, tbaa_refcnt);
-    auto *delta_1 = asValue(decltype(PyObject::ob_refcnt){1});
-    auto new_value = builder.CreateSub(old_value, delta_1);
-    storeValue<decltype(PyObject::ob_refcnt)>(new_value, ref, tbaa_refcnt);
+    do_CallSymbol<handle_DECREF, &Translator::attr_return>(py_obj);
+    // auto ref = getPointer(py_obj, &PyObject::ob_refcnt);
+    // auto old_value = loadValue<decltype(PyObject::ob_refcnt)>(ref, tbaa_refcnt);
+    // auto *delta_1 = asValue(decltype(PyObject::ob_refcnt){1});
+    // auto *zero = asValue(decltype(PyObject::ob_refcnt){0});
+    // auto new_value = builder.CreateSub(old_value, delta_1);
+    // storeValue<decltype(PyObject::ob_refcnt)>(new_value, ref, tbaa_refcnt);
+    // auto b_dealloc = createBlock("dealloc");
+    // auto b_end = createBlock("dealloc.end");
+    // builder.CreateCondBr(builder.CreateICmpEQ(new_value, zero), b_dealloc, b_end);
+    // builder.SetInsertPoint(b_dealloc);
+    // do_CallSymbol<deallocObject>(py_obj);
+    // builder.CreateBr(b_end);
+    // builder.SetInsertPoint(b_end);
 }
 
 void Translator::do_Py_XDECREF(Value *py_obj) {
-    auto is_null = builder.CreateICmpEQ(py_obj, c_null);
-    auto b_decref = createBlock("decref");
-    auto b_end = createBlock("decref.end");
-    builder.CreateCondBr(is_null, b_decref, b_end);
-    builder.SetInsertPoint(b_decref);
-    do_Py_DECREF(py_obj);
-    builder.CreateBr(b_end);
-    builder.SetInsertPoint(b_end);
+    do_CallSymbol<handle_XDECREF, &Translator::attr_return>(py_obj);
+    // auto b_decref = createBlock("decref");
+    // auto b_end = createBlock("decref.end");
+    // builder.CreateCondBr(builder.CreateICmpNE(py_obj, c_null), b_decref, b_end);
+    // builder.SetInsertPoint(b_decref);
+    // do_Py_DECREF(py_obj);
+    // builder.CreateBr(b_end);
+    // builder.SetInsertPoint(b_end);
 }
 
 Value *Translator::do_GETLOCAL(PyOparg oparg) {
@@ -674,6 +689,7 @@ void Translator::emitBlock(unsigned index) {
         case GET_ITER: {
             auto iterable = do_POP();
             auto iter = do_CallSymbol<PyObject_GetIter>(iterable);
+            iter->setCallingConv(llvm::CallingConv::X86_64_SysV);
             do_Py_DECREF(iterable);
             do_PUSH(iter);
             break;

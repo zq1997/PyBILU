@@ -19,7 +19,10 @@ using PyOpcode = decltype(_Py_OPCODE(PyInstr{}));
 using PyOparg = decltype(_Py_OPCODE(PyInstr{}));
 constexpr auto EXTENDED_ARG_BITS = 8;
 
+void handle_DECREF(PyObject *obj);
+void handle_XDECREF(PyObject *obj);
 void raiseException();
+
 PyObject *handle_LOAD_CLASSDEREF(PyFrameObject *f, PyOparg oparg);
 PyObject *handle_LOAD_GLOBAL(PyFrameObject *f, PyObject *name);
 void handle_STORE_GLOBAL(PyFrameObject *f, PyObject *name, PyObject *value);
@@ -69,6 +72,8 @@ PyObject *handle_COMPARE_OP(PyObject *v, PyObject *w, int op);
 #define ENTRY(X) std::pair{&(X), #X}
 
 constexpr std::tuple external_symbols{
+        ENTRY(handle_DECREF),
+        ENTRY(handle_XDECREF),
         ENTRY(raiseException),
         ENTRY(memmove),
         ENTRY(handle_LOAD_CLASSDEREF),
@@ -116,8 +121,8 @@ constexpr std::tuple external_symbols{
         ENTRY(handle_INPLACE_XOR),
         ENTRY(handle_COMPARE_OP),
 
-        std::pair{&_Py_FalseStruct, "Py_False"},
-        std::pair{&_Py_TrueStruct, "Py_True"},
+        // std::pair{&_Py_FalseStruct, "Py_False"},
+        // std::pair{&_Py_TrueStruct, "Py_True"},
         std::pair{&PyObject_GetIter, "PyObject_GetIter"},
         std::pair{&PyObject_IsTrue, "PyObject_IsTrue"},
 };
@@ -181,6 +186,11 @@ struct Normalizer<Ret(Args...)> {
 
 template <typename Ret, typename... Args>
 struct Normalizer<Ret(Args...) noexcept> {
+    using type = NormalizedType<Ret>(NormalizedType<Args>...);
+};
+
+template <typename Ret, typename... Args>
+struct Normalizer< __attribute__((preserve_most)) Ret(Args...)> {
     using type = NormalizedType<Ret>(NormalizedType<Args>...);
 };
 
