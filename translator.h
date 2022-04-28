@@ -115,7 +115,7 @@ class Translator {
     }
 
     template <typename T>
-    auto getPointer(llvm::Value *base, size_t index, const llvm::Twine &name = "") {
+    auto getPointer(llvm::Value *base, ptrdiff_t index, const llvm::Twine &name = "") {
         if (!index && name.isTriviallyEmpty()) {
             return base;
         }
@@ -139,7 +139,7 @@ class Translator {
     }
 
     template <typename T>
-    auto loadElementValue(llvm::Value *base, size_t index, llvm::MDNode *tbaa_node, const llvm::Twine &name = "") {
+    auto loadElementValue(llvm::Value *base, ptrdiff_t index, llvm::MDNode *tbaa_node, const llvm::Twine &name = "") {
         auto ptr = getPointer<T>(base, index);
         return loadValue<T>(ptr, tbaa_node, name);
     }
@@ -159,7 +159,7 @@ class Translator {
     }
 
     template <typename T>
-    auto storeElementValue(llvm::Value *value, llvm::Value *base, size_t index, llvm::MDNode *tbaa_node) {
+    auto storeElementValue(llvm::Value *value, llvm::Value *base, ptrdiff_t index, llvm::MDNode *tbaa_node) {
         auto ptr = getPointer<T>(base, index);
         return storeValue<T>(value, ptr, tbaa_node);
     }
@@ -171,7 +171,7 @@ class Translator {
     }
 
     template <typename T>
-    auto readData(llvm::Value *base, size_t index, const llvm::Twine &name = "") {
+    auto readData(llvm::Value *base, ptrdiff_t index, const llvm::Twine &name = "") {
         return builder.CreateLoad(types.get<T>(), getPointer<T>(base, index), name);
     }
 
@@ -181,7 +181,7 @@ class Translator {
     }
 
     template <typename T>
-    auto writeData(llvm::Value *base, size_t index, llvm::Value *value) {
+    auto writeData(llvm::Value *base, ptrdiff_t index, llvm::Value *value) {
         return builder.CreateStore(value, getPointer<T>(base, index));
     }
 
@@ -228,6 +228,8 @@ class Translator {
     llvm::CallInst *do_CallSymbol(Args... args) {
         return do_Call<Attr>(types.get<std::remove_reference_t<decltype(S)>>(), getSymbol(searchSymbol<S>()), args...);
     }
+
+    void pyJumpIF(llvm::Value *obj, unsigned offset, bool reverse = false);
 
     void handle_UNARY_OP(size_t offset) {
         auto value = do_POP();

@@ -69,13 +69,15 @@ PyObject *handle_BINARY_XOR(PyObject *v, PyObject *w);
 PyObject *handle_INPLACE_XOR(PyObject *v, PyObject *w);
 PyObject *handle_COMPARE_OP(PyObject *v, PyObject *w, int op);
 
+bool castPyObjectToBool(PyObject *o);
+PyObject *handle_GET_ITER(PyObject *o);
+
 #define ENTRY(X) std::pair{&(X), #X}
 
 constexpr std::tuple external_symbols{
         ENTRY(handle_DECREF),
         ENTRY(handle_XDECREF),
         ENTRY(raiseException),
-        ENTRY(memmove),
         ENTRY(handle_LOAD_CLASSDEREF),
         ENTRY(handle_LOAD_GLOBAL),
         ENTRY(handle_STORE_GLOBAL),
@@ -121,10 +123,12 @@ constexpr std::tuple external_symbols{
         ENTRY(handle_INPLACE_XOR),
         ENTRY(handle_COMPARE_OP),
 
-        // std::pair{&_Py_FalseStruct, "Py_False"},
-        // std::pair{&_Py_TrueStruct, "Py_True"},
-        std::pair{&PyObject_GetIter, "PyObject_GetIter"},
-        std::pair{&PyObject_IsTrue, "PyObject_IsTrue"},
+        ENTRY(castPyObjectToBool),
+
+        ENTRY(handle_GET_ITER),
+
+        std::pair{&_Py_FalseStruct, "Py_False"},
+        std::pair{&_Py_TrueStruct, "Py_True"}
 };
 
 constexpr auto external_symbol_count = std::tuple_size_v<decltype(external_symbols)>;
@@ -148,15 +152,9 @@ constexpr auto searchSymbol() {
     }
 }
 
-using FunctionPointer = void (*)();
 extern const std::array<const char *, external_symbol_count> symbol_names;
 extern const std::array<void *, external_symbol_count> symbol_addresses;
 using TranslatedFunctionType = PyObject *(void *const[], PyFrameObject *);
-
-template <typename T>
-struct TypeWrapper {
-    using type = T;
-};
 
 template <typename T, typename = void>
 struct Normalizer;
@@ -165,7 +163,12 @@ template <typename T>
 using NormalizedType = typename Normalizer<std::remove_cv_t<T>>::type;
 
 template <typename T>
-struct Normalizer<T, std::enable_if_t<std::is_integral_v<T>>> {
+struct Normalizer<T, std::enable_if_t<std::is_same_v<T, bool>>> {
+    using type = bool;
+};
+
+template <typename T>
+struct Normalizer<T, std::enable_if_t<!std::is_same_v<T, bool> && std::is_integral_v<T>>> {
     using type = std::make_signed_t<T>;
 };
 
@@ -181,16 +184,6 @@ struct Normalizer<T *> {
 
 template <typename Ret, typename... Args>
 struct Normalizer<Ret(Args...)> {
-    using type = NormalizedType<Ret>(NormalizedType<Args>...);
-};
-
-template <typename Ret, typename... Args>
-struct Normalizer<Ret(Args...) noexcept> {
-    using type = NormalizedType<Ret>(NormalizedType<Args>...);
-};
-
-template <typename Ret, typename... Args>
-struct Normalizer< __attribute__((preserve_most)) Ret(Args...)> {
     using type = NormalizedType<Ret>(NormalizedType<Args>...);
 };
 
@@ -220,7 +213,11 @@ static auto createType(llvm::LLVMContext &context) {
         return llvm::Type::getVoidTy(context);
     }
     if constexpr(std::is_integral_v<T>) {
-        return llvm::Type::getIntNTy(context, CHAR_BIT * sizeof(T));
+        if (std::is_same_v<T, bool>) {
+            return llvm::Type::getInt1Ty(context);
+        } else {
+            return llvm::Type::getIntNTy(context, CHAR_BIT * sizeof(T));
+        }
     }
     if constexpr(std::is_pointer_v<T>) {
         return llvm::PointerType::getUnqual(context);
@@ -271,7 +268,7 @@ class RegisteredLLVMTypes {
             NormalizedLLVMType<TranslatedFunctionType>> {
     };
     using FilteredTypes = TypeFilterHelper<
-            std::tuple<void *, char, short, int, long, long long>,
+            std::tuple<void *, bool, char, short, int, long, long long>,
             decltype(external_symbols),
             decltype(PyTypeObject::tp_iternext)
     >;

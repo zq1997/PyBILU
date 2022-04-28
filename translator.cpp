@@ -308,12 +308,28 @@ void Translator::emitBlock(unsigned index) {
             break;
         }
         case ROT_N: {
-            auto top = do_PEAK(1);
-            auto dest = py_stack[stack_height - instr.oparg - 1];
-            auto src = py_stack[stack_height - instr.oparg];
-            // TODO: 添加属性，willreturn argonly
-            do_CallSymbol<memmove>(dest, src, asValue((instr.oparg - 1) * sizeof(PyObject *)));
-            do_SET_PEAK(instr.oparg, top);
+            auto dest_start = py_stack[stack_height - 1];
+            auto src_start = py_stack[stack_height - 2];
+            auto top = loadValue<PyObject *>(dest_start, tbaa_frame_cells);
+            auto last_cell = py_stack[stack_height - instr.oparg];
+            auto entry_block = builder.GetInsertBlock();
+            auto loop_block = createBlock("ROT_N.loop");
+            auto end_block = createBlock("ROT_N.end");
+            builder.CreateBr(loop_block);
+            builder.SetInsertPoint(loop_block);
+            auto dest = builder.CreatePHI(types.get<PyObject *>(), 2);
+            auto src = builder.CreatePHI(types.get<PyObject *>(), 2);
+            auto value = loadValue<PyObject *>(src, tbaa_frame_cells);
+            storeValue<PyObject *>(value, dest, tbaa_frame_cells);
+            auto src_update = getPointer<PyObject *>(src, -1);
+            auto should_break = builder.CreateICmpEQ(dest, last_cell);
+            builder.CreateCondBr(should_break, end_block, loop_block);
+            dest->addIncoming(dest_start, entry_block);
+            dest->addIncoming(src, loop_block);
+            src->addIncoming(src_start, entry_block);
+            src->addIncoming(src_update, loop_block);
+            builder.SetInsertPoint(entry_block);
+            storeValue<PyObject *>(top, last_cell, tbaa_frame_cells);
         }
         case DUP_TOP: {
             auto top = do_PEAK(1);
@@ -657,39 +673,23 @@ void Translator::emitBlock(unsigned index) {
             fall_through = false;
             break;
         }
-        case JUMP_IF_FALSE_OR_POP:
-            unimplemented();
         case JUMP_IF_TRUE_OR_POP:
             unimplemented();
-        case POP_JUMP_IF_FALSE: {
-            auto cond = do_POP();
-            auto err = do_CallSymbol<PyObject_IsTrue>(cond);
-            do_Py_DECREF(cond);
-            auto cmp = builder.CreateICmpEQ(err, asValue(0));
-            auto fall_block = createBlock("POP_JUMP_IF_FALSE.fall");
-            auto &jmp_block = findPyBlock(instr.oparg);
-            jmp_block.initial_stack_height = stack_height;
-            builder.CreateCondBr(cmp, jmp_block.llvm_block, fall_block);
-            builder.SetInsertPoint(fall_block);
-            break;
-        }
+        case JUMP_IF_FALSE_OR_POP:
+            unimplemented();
         case POP_JUMP_IF_TRUE: {
             auto cond = do_POP();
-            auto err = do_CallSymbol<PyObject_IsTrue>(cond);
-            do_Py_DECREF(cond);
-            auto cmp = builder.CreateICmpNE(err, asValue(0));
-            auto fall_block = createBlock("POP_JUMP_IF_FALSE.fall");
-            auto &jmp_block = findPyBlock(instr.oparg);
-            jmp_block.initial_stack_height = stack_height;
-            builder.CreateCondBr(cmp, jmp_block.llvm_block, fall_block);
-            builder.SetInsertPoint(fall_block);
+            pyJumpIF(cond, instr.oparg);
             break;
         }
-
+        case POP_JUMP_IF_FALSE: {
+            auto cond = do_POP();
+            pyJumpIF(cond, instr.oparg, true);
+            break;
+        }
         case GET_ITER: {
             auto iterable = do_POP();
-            auto iter = do_CallSymbol<PyObject_GetIter>(iterable);
-            iter->setCallingConv(llvm::CallingConv::X86_64_SysV);
+            auto iter = do_CallSymbol<handle_GET_ITER>(iterable);
             do_Py_DECREF(iterable);
             do_PUSH(iter);
             break;
@@ -855,4 +855,29 @@ llvm::Value *Translator::getSymbol(size_t offset) {
         builder.SetInsertPoint(block);
     }
     return symbol;
+}
+
+void Translator::pyJumpIF(Value *obj, unsigned offset, bool reverse) {
+    auto py_true = getSymbol(searchSymbol<&_Py_TrueStruct>());
+    auto py_false = getSymbol(searchSymbol<&_Py_FalseStruct>());
+    auto is_true = builder.CreateICmpEQ(obj, py_true);
+    auto is_false = builder.CreateICmpEQ(obj, py_false);
+
+    auto fast_cmp_block = createBlock("");
+    auto slow_cmp_block = createBlock("");
+    auto fall_block = createBlock("");
+    auto &jmp_block = findPyBlock(offset);
+    jmp_block.initial_stack_height = stack_height;
+    auto true_block = reverse ? fall_block : jmp_block.llvm_block;
+    auto false_block = reverse ? jmp_block.llvm_block : fall_block;
+
+    builder.CreateCondBr(builder.CreateOr(is_true, is_false), fast_cmp_block, slow_cmp_block, likely_true);
+    builder.SetInsertPoint(fast_cmp_block);
+    do_Py_DECREF(obj);
+    builder.CreateCondBr(is_true, true_block, false_block);
+    builder.SetInsertPoint(slow_cmp_block);
+    auto is_true_slow = do_CallSymbol<castPyObjectToBool>(obj);
+    do_Py_DECREF(obj);
+    builder.CreateCondBr(is_true_slow, true_block, false_block);
+    builder.SetInsertPoint(fall_block);
 }

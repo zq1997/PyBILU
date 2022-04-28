@@ -37,8 +37,8 @@ def bar(n):
     return y
 
 
-stat('无优化', bar, 1111, lambda: [1234])
-stat('有优化', pynic.apply(bar), 1111, lambda: [1234])
+stat('无优化', bar, 111, lambda: [12345])
+stat('有优化', pynic.apply(bar), 111, lambda: [12345])
 
 # l = [1, 2]
 #

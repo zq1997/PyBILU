@@ -764,6 +764,49 @@ PyObject *handle_COMPARE_OP(PyObject *v, PyObject *w, int op) {
     gotoErrorHandler(tstate);
 }
 
+bool castPyObjectToBool(PyObject *o) {
+    if (o == Py_None) {
+        return false;
+    }
+    auto type = Py_TYPE(o);
+    int res;
+    if (type->tp_as_number && type->tp_as_number->nb_bool) {
+        res = type->tp_as_number->nb_bool(o);
+    } else if (type->tp_as_mapping && type->tp_as_mapping->mp_length) {
+        res = type->tp_as_mapping->mp_length(o);
+    } else if (type->tp_as_sequence && type->tp_as_sequence->sq_length) {
+        res = type->tp_as_sequence->sq_length(o);
+    } else {
+        return true;
+    }
+    gotoErrorHandler(res < 0);
+    return res > 0;
+}
+
+PyObject *handle_GET_ITER(PyObject *o) {
+    auto type = Py_TYPE(o);
+    if (type->tp_iter) {
+        auto *res = type->tp_iter(o);
+        gotoErrorHandler(!res);
+        auto res_type = Py_TYPE(res);
+        if (res_type->tp_iternext && res_type->tp_iternext != &_PyObject_NextNotImplemented) {
+            return res;
+        } else {
+            PyErr_Format(PyExc_TypeError, "iter() returned non-iterator of type '%.100s'", res_type->tp_name);
+            Py_DECREF(res);
+            gotoErrorHandler();
+        }
+    } else {
+        if (!PyDict_Check(o) && type->tp_as_sequence && type->tp_as_sequence->sq_item) {
+            auto res = PySeqIter_New(o);
+            gotoErrorHandler(!res);
+            return res;
+        }
+        PyErr_Format(PyExc_TypeError, "'%.200s' object is not iterable", type->tp_name);
+        gotoErrorHandler();
+    }
+}
+
 const auto symbol_names{apply(
         [](auto &&... x) noexcept { return array{x.second ...}; },
         external_symbols
