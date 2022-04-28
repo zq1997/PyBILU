@@ -68,6 +68,7 @@ PyObject *handle_INPLACE_OR(PyObject *v, PyObject *w);
 PyObject *handle_BINARY_XOR(PyObject *v, PyObject *w);
 PyObject *handle_INPLACE_XOR(PyObject *v, PyObject *w);
 PyObject *handle_COMPARE_OP(PyObject *v, PyObject *w, int op);
+bool handle_CONTAINS_OP(PyObject *container, PyObject *value);
 
 bool castPyObjectToBool(PyObject *o);
 PyObject *handle_GET_ITER(PyObject *o);
@@ -122,6 +123,7 @@ constexpr std::tuple external_symbols{
         ENTRY(handle_BINARY_XOR),
         ENTRY(handle_INPLACE_XOR),
         ENTRY(handle_COMPARE_OP),
+        ENTRY(handle_CONTAINS_OP),
 
         ENTRY(castPyObjectToBool),
 

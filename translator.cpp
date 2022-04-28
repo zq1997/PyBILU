@@ -619,16 +619,37 @@ void Translator::emitBlock(unsigned index) {
         case COMPARE_OP: {
             auto right = do_POP();
             auto left = do_POP();
-            auto res = do_CallSymbol<handle_COMPARE_OP>(left, right, asValue(instr.oparg));
+            // TODO: asValue应该是形参类型
+            auto res = do_CallSymbol<handle_COMPARE_OP>(left, right, asValue<int>(instr.oparg));
             do_PUSH(res);
             do_Py_DECREF(left);
             do_Py_DECREF(right);
             break;
         }
-        case IS_OP:
-            unimplemented();
-        case CONTAINS_OP:
-            unimplemented();
+        case IS_OP: {
+            auto right = do_POP();
+            auto left = do_POP();
+            auto py_true = getSymbol(searchSymbol<&_Py_TrueStruct>());
+            auto py_false = getSymbol(searchSymbol<&_Py_FalseStruct>());
+            auto value_for_true = !instr.oparg ? py_true : py_false;
+            auto value_for_false = !instr.oparg ? py_false : py_true;
+            builder.CreateSelect(builder.CreateICmpEQ(left, right), value_for_true, value_for_false);
+            break;
+        }
+        case CONTAINS_OP: {
+            auto right = do_POP();
+            auto left = do_POP();
+            auto res = do_CallSymbol<handle_CONTAINS_OP>(left, right, asValue<bool>(instr.oparg));
+            auto py_true = getSymbol(searchSymbol<&_Py_TrueStruct>());
+            auto py_false = getSymbol(searchSymbol<&_Py_FalseStruct>());
+            auto value_for_true = !instr.oparg ? py_true : py_false;
+            auto value_for_false = !instr.oparg ? py_false : py_true;
+            auto value = builder.CreateSelect(res, value_for_true, value_for_false);
+            do_PUSH(value);
+            do_Py_DECREF(left);
+            do_Py_DECREF(right);
+            break;
+        }
         case RETURN_VALUE: {
             auto retval = do_POP();
             // 或者INCREF，防止DECREF两次
@@ -666,25 +687,27 @@ void Translator::emitBlock(unsigned index) {
             break;
         }
         case JUMP_ABSOLUTE: {
-            auto &jmp_block = findPyBlock(instr.oparg);
             // TODO: 如果有，则不要设置，要校验
+            auto &jmp_block = findPyBlock(instr.oparg);
             jmp_block.initial_stack_height = stack_height;
             builder.CreateBr(jmp_block.llvm_block);
             fall_through = false;
             break;
         }
-        case JUMP_IF_TRUE_OR_POP:
-            unimplemented();
-        case JUMP_IF_FALSE_OR_POP:
-            unimplemented();
         case POP_JUMP_IF_TRUE: {
-            auto cond = do_POP();
-            pyJumpIF(cond, instr.oparg);
+            pyJumpIF(instr.oparg, true, true);
             break;
         }
         case POP_JUMP_IF_FALSE: {
-            auto cond = do_POP();
-            pyJumpIF(cond, instr.oparg, true);
+            pyJumpIF(instr.oparg, true, false);
+            break;
+        }
+        case JUMP_IF_TRUE_OR_POP: {
+            pyJumpIF(instr.oparg, false, true);
+            break;
+        }
+        case JUMP_IF_FALSE_OR_POP: {
+            pyJumpIF(instr.oparg, false, false);
             break;
         }
         case GET_ITER: {
@@ -857,27 +880,30 @@ llvm::Value *Translator::getSymbol(size_t offset) {
     return symbol;
 }
 
-void Translator::pyJumpIF(Value *obj, unsigned offset, bool reverse) {
-    auto py_true = getSymbol(searchSymbol<&_Py_TrueStruct>());
-    auto py_false = getSymbol(searchSymbol<&_Py_FalseStruct>());
-    auto is_true = builder.CreateICmpEQ(obj, py_true);
-    auto is_false = builder.CreateICmpEQ(obj, py_false);
-
-    auto fast_cmp_block = createBlock("");
+void Translator::pyJumpIF(unsigned offset, bool pop_if_jump, bool jump_cond) {
+    auto &jump_target = findPyBlock(offset);
+    jump_target.initial_stack_height = stack_height - pop_if_jump;
+    auto false_cmp_block = createBlock("");
     auto slow_cmp_block = createBlock("");
     auto fall_block = createBlock("");
-    auto &jmp_block = findPyBlock(offset);
-    jmp_block.initial_stack_height = stack_height;
-    auto true_block = reverse ? fall_block : jmp_block.llvm_block;
-    auto false_block = reverse ? jmp_block.llvm_block : fall_block;
+    auto jump_block = pop_if_jump ? createBlock("") : jump_target.llvm_block;
+    auto true_block = jump_cond ? jump_block : fall_block;
+    auto false_block = jump_cond ? fall_block : jump_block;
 
-    builder.CreateCondBr(builder.CreateOr(is_true, is_false), fast_cmp_block, slow_cmp_block, likely_true);
-    builder.SetInsertPoint(fast_cmp_block);
-    do_Py_DECREF(obj);
-    builder.CreateCondBr(is_true, true_block, false_block);
+    auto obj = do_PEAK(1);
+    auto py_true = getSymbol(searchSymbol<&_Py_TrueStruct>());
+    builder.CreateCondBr(builder.CreateICmpEQ(obj, py_true), true_block, false_cmp_block);
+    builder.SetInsertPoint(false_cmp_block);
+    auto py_false = getSymbol(searchSymbol<&_Py_FalseStruct>());
+    builder.CreateCondBr(builder.CreateICmpEQ(obj, py_false), false_block, slow_cmp_block);
     builder.SetInsertPoint(slow_cmp_block);
-    auto is_true_slow = do_CallSymbol<castPyObjectToBool>(obj);
-    do_Py_DECREF(obj);
-    builder.CreateCondBr(is_true_slow, true_block, false_block);
+    builder.CreateCondBr(do_CallSymbol<castPyObjectToBool>(obj), true_block, false_block);
+    if (pop_if_jump) {
+        builder.SetInsertPoint(jump_block);
+        do_Py_DECREF(obj);
+        builder.CreateBr(jump_target.llvm_block);
+    }
     builder.SetInsertPoint(fall_block);
+    do_Py_DECREF(obj);
+    stack_height--;
 }

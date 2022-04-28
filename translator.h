@@ -229,7 +229,7 @@ class Translator {
         return do_Call<Attr>(types.get<std::remove_reference_t<decltype(S)>>(), getSymbol(searchSymbol<S>()), args...);
     }
 
-    void pyJumpIF(llvm::Value *obj, unsigned offset, bool reverse = false);
+    void pyJumpIF(unsigned offset, bool pop_if_jump, bool jump_cond);
 
     void handle_UNARY_OP(size_t offset) {
         auto value = do_POP();

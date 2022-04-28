@@ -376,7 +376,8 @@ static const char *getSlotSign(T PyNumberMethods::* op_slot) {
     return getSlotSign(offset);
 }
 
-static void checkSlotResult(PyObject *obj, const char *slot_name, PyObject *result) {
+// TODO: 删了
+static void checkSlotResult(PyObject *obj, const char *slot_name, bool result) {
 #ifndef NDEBUG
     PyThreadState *tstate = _PyThreadState_GET();
     if (result) {
@@ -396,7 +397,7 @@ static void checkSlotResult(PyObject *obj, const char *slot_name, PyObject *resu
 }
 
 template <typename T>
-static void checkSlotResult(PyObject *obj, T PyNumberMethods::* op_slot, PyObject *result) {
+static void checkSlotResult(PyObject *obj, T PyNumberMethods::* op_slot, bool result) {
     checkSlotResult(obj, getSlotSign(op_slot), result);
 }
 
@@ -764,12 +765,25 @@ PyObject *handle_COMPARE_OP(PyObject *v, PyObject *w, int op) {
     gotoErrorHandler(tstate);
 }
 
+
+bool handle_CONTAINS_OP(PyObject *container, PyObject *value) {
+    auto sqm = Py_TYPE(container)->tp_as_sequence;
+    Py_ssize_t res;
+    if (sqm && sqm->sq_contains) {
+        res = sqm->sq_contains(container, value);
+    } else {
+        res = _PySequence_IterSearch(container, value, PY_ITERSEARCH_CONTAINS);
+    }
+    gotoErrorHandler(res < 0);
+    return res > 0;
+}
+
 bool castPyObjectToBool(PyObject *o) {
     if (o == Py_None) {
         return false;
     }
     auto type = Py_TYPE(o);
-    int res;
+    Py_ssize_t res;
     if (type->tp_as_number && type->tp_as_number->nb_bool) {
         res = type->tp_as_number->nb_bool(o);
     } else if (type->tp_as_mapping && type->tp_as_mapping->mp_length) {
