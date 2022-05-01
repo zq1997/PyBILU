@@ -42,6 +42,7 @@ PyObject *eval_func(PyThreadState *tstate, PyFrameObject *frame, int throwflag) 
     PyObject *result;
     if (!setjmp(cframe.frame_jmp_buf)) {
         result = jit_callee(&symbol_addresses[0], frame);
+        // TODO: 为啥return的时候不要清理stack
     } else {
         assert(_PyErr_Occurred(tstate));
         PyTraceBack_Here(frame);
@@ -49,9 +50,10 @@ PyObject *eval_func(PyThreadState *tstate, PyFrameObject *frame, int throwflag) 
         auto ncells = PyTuple_GET_SIZE(frame->f_code->co_cellvars);
         auto nfrees = PyTuple_GET_SIZE(frame->f_code->co_freevars);
         auto stack = &frame->f_localsplus[nlocals + ncells + nfrees];
-        for (auto i : Range(frame->f_stackdepth)) {
-            Py_XDECREF(stack[i]);
+        while (frame->f_stackdepth) {
+            Py_XDECREF(stack[--frame->f_stackdepth]);
         }
+        frame->f_state = FRAME_RAISED;
         return nullptr;
     }
     tstate->cframe = prev_cframe;

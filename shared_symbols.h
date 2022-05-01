@@ -19,6 +19,7 @@ using PyOpcode = decltype(_Py_OPCODE(PyInstr{}));
 using PyOparg = decltype(_Py_OPCODE(PyInstr{}));
 constexpr auto EXTENDED_ARG_BITS = 8;
 
+void handle_INCREF(PyObject *obj);
 void handle_DECREF(PyObject *obj);
 void handle_XDECREF(PyObject *obj);
 void raiseException();
@@ -31,7 +32,7 @@ PyObject *handle_LOAD_NAME(PyFrameObject *f, PyObject *name);
 void handle_STORE_NAME(PyFrameObject *f, PyObject *name, PyObject *value);
 void handle_DELETE_NAME(PyFrameObject *f, PyObject *name);
 PyObject *handle_LOAD_ATTR(PyObject *owner, PyObject *name);
-PyObject *handle_LOAD_METHOD(PyObject *obj, PyObject *name, PyObject **sp);
+void handle_LOAD_METHOD(PyObject *obj, PyObject *name, PyObject **sp);
 void handle_STORE_ATTR(PyObject *owner, PyObject *name, PyObject *value);
 PyObject *handle_BINARY_SUBSCR(PyObject *container, PyObject *sub);
 void handle_STORE_SUBSCR(PyObject *container, PyObject *sub, PyObject *value);
@@ -70,12 +71,20 @@ PyObject *handle_INPLACE_XOR(PyObject *v, PyObject *w);
 PyObject *handle_COMPARE_OP(PyObject *v, PyObject *w, int op);
 bool handle_CONTAINS_OP(PyObject *container, PyObject *value);
 
+PyObject *handle_CALL_FUNCTION(PyObject **func_args, Py_ssize_t nargs);
+PyObject *handle_CALL_FUNCTION_KW(PyObject **func_args, Py_ssize_t nargs);
+PyObject *handle_CALL_FUNCTION_EX(PyObject *func, PyObject *args, PyObject *kwargs);
+
+PyObject *handle_BUILD_MAP(PyObject **arr, Py_ssize_t num);
+void handle_DICT_MERGE(PyObject *func, PyObject *dict, PyObject *update);
+
 bool castPyObjectToBool(PyObject *o);
 PyObject *handle_GET_ITER(PyObject *o);
 
 #define ENTRY(X) std::pair{&(X), #X}
 
 constexpr std::tuple external_symbols{
+        ENTRY(handle_INCREF),
         ENTRY(handle_DECREF),
         ENTRY(handle_XDECREF),
         ENTRY(raiseException),
@@ -124,6 +133,13 @@ constexpr std::tuple external_symbols{
         ENTRY(handle_INPLACE_XOR),
         ENTRY(handle_COMPARE_OP),
         ENTRY(handle_CONTAINS_OP),
+
+        ENTRY(handle_CALL_FUNCTION),
+        ENTRY(handle_CALL_FUNCTION_KW),
+        ENTRY(handle_CALL_FUNCTION_EX),
+
+        ENTRY(handle_BUILD_MAP),
+        ENTRY(handle_DICT_MERGE),
 
         ENTRY(castPyObjectToBool),
 

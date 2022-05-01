@@ -26,14 +26,16 @@ set_target_properties(pynic PROPERTIES
         CXX_VISIBILITY_PRESET hidden
 )
 
-add_library(pynic_bundle SHARED $<TARGET_OBJECTS:pynic>)
-llvm_map_components_to_libnames(llvm_libs core native passes)
-target_link_libraries(pynic_bundle ${llvm_libs})
-set_target_properties(pynic_bundle PROPERTIES
-        PREFIX ""
-        SUFFIX ".so"
-        CXX_VISIBILITY_PRESET hidden
-)
+IF(NOT CMAKE_BUILD_TYPE MATCHES Debug)
+    add_library(pynic_bundle SHARED $<TARGET_OBJECTS:pynic>)
+    llvm_map_components_to_libnames(llvm_libs core native passes)
+    target_link_libraries(pynic_bundle ${llvm_libs})
+    set_target_properties(pynic_bundle PROPERTIES
+            PREFIX ""
+            SUFFIX ".so"
+            CXX_VISIBILITY_PRESET hidden
+    )
+ENDIF()
 
 add_subdirectory(test)
 add_subdirectory(/opt/cpython cpython EXCLUDE_FROM_ALL)

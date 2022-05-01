@@ -114,7 +114,7 @@ void *Translator::operator()(Compiler &compiler, PyCodeObject *code) {
     py_freevars.reserve(ncells + nfrees);
     for (auto i : Range(ncells)) {
         auto name = PyTuple_GET_ITEM(code->co_cellvars, i);
-        // TODO: 直接read出来
+        // TODO: 直接read出来，反正tbaa是const
         py_freevars[i] = getPointer<PyObject *>(localsplus, start_cells + i, useName("$cell.", name));
     }
     for (auto i : Range(nfrees)) {
@@ -195,11 +195,12 @@ void Translator::parseCFG() {
 
 
 void Translator::do_Py_INCREF(Value *py_obj) {
-    auto ref = getPointer(py_obj, &PyObject::ob_refcnt);
-    auto old_value = loadValue<decltype(PyObject::ob_refcnt)>(ref, tbaa_refcnt);
-    auto *delta_1 = asValue(decltype(PyObject::ob_refcnt){1});
-    auto new_value = builder.CreateAdd(old_value, delta_1);
-    storeValue<decltype(PyObject::ob_refcnt)>(new_value, ref, tbaa_refcnt);
+    do_CallSymbol<handle_INCREF, &Translator::attr_return>(py_obj);
+    // auto ref = getPointer(py_obj, &PyObject::ob_refcnt);
+    // auto old_value = loadValue<decltype(PyObject::ob_refcnt)>(ref, tbaa_refcnt);
+    // auto *delta_1 = asValue(decltype(PyObject::ob_refcnt){1});
+    // auto new_value = builder.CreateAdd(old_value, delta_1);
+    // storeValue<decltype(PyObject::ob_refcnt)>(new_value, ref, tbaa_refcnt);
 }
 
 void Translator::do_Py_DECREF(Value *py_obj) {
@@ -455,9 +456,8 @@ void Translator::emitBlock(unsigned index) {
         }
         case LOAD_METHOD: {
             auto obj = do_POP();
-            auto attr = do_CallSymbol<handle_LOAD_METHOD>(obj, py_names[instr.oparg], py_stack[stack_height]);
-            do_PUSH(attr);
-            do_Py_DECREF(obj);
+            do_CallSymbol<handle_LOAD_METHOD>(obj, py_names[instr.oparg], py_stack[stack_height]);
+            stack_height += 2;
             break;
         }
         case STORE_ATTR: {
@@ -658,16 +658,52 @@ void Translator::emitBlock(unsigned index) {
             fall_through = false;
             break;
         }
-        case CALL_FUNCTION:
-            unimplemented();
-        case CALL_FUNCTION_KW:
-            unimplemented();
-        case CALL_FUNCTION_EX:
-            unimplemented();
-        case CALL_METHOD:
-            unimplemented();
-        case LOAD_CLOSURE:
-            unimplemented();
+        case CALL_FUNCTION: {
+            // func_args重命名
+            auto func_args = py_stack[stack_height -= instr.oparg + 1];
+            auto ret = do_CallSymbol<handle_CALL_FUNCTION>(func_args, asValue<Py_ssize_t>(instr.oparg));
+            do_PUSH(ret);
+            break;
+        }
+        case CALL_FUNCTION_KW: {
+            auto func_args = py_stack[stack_height -= instr.oparg + 2];
+            auto ret = do_CallSymbol<handle_CALL_FUNCTION_KW>(func_args, asValue<Py_ssize_t>(instr.oparg));
+            do_PUSH(ret);
+            break;
+        }
+        case CALL_FUNCTION_EX: {
+            llvm::Value *kwargs = c_null;
+            if (instr.oparg) {
+                kwargs = do_POP();
+            }
+            auto args = do_POP();
+            auto callable = do_POP();
+            auto ret = do_CallSymbol<handle_CALL_FUNCTION_EX>(callable, args, kwargs);
+            do_PUSH(ret);
+            if (instr.oparg) {
+                do_Py_DECREF(kwargs);
+            }
+            do_Py_DECREF(args);
+            do_Py_DECREF(callable);
+            break;
+        }
+        case CALL_METHOD: {
+            auto maybe_meth = do_PEAK(instr.oparg + 2);
+            stack_height -= instr.oparg + 2;
+            auto is_meth = builder.CreateICmpNE(maybe_meth, c_null);
+            auto func_args = builder.CreateSelect(is_meth, py_stack[stack_height], py_stack[stack_height + 1]);
+            auto nargs = builder.CreateSelect(is_meth,
+                    asValue<Py_ssize_t>(instr.oparg + 1), asValue<Py_ssize_t>(instr.oparg));
+            auto ret = do_CallSymbol<handle_CALL_FUNCTION>(func_args, nargs);
+            do_PUSH(ret);
+            break;
+        }
+        case LOAD_CLOSURE:{
+            auto cell = loadValue<PyObject *>(py_freevars[instr.oparg], tbaa_code_const);
+            do_Py_INCREF(cell);
+            do_PUSH(cell);
+            break;
+        }
         case MAKE_FUNCTION:
             unimplemented();
         case LOAD_BUILD_CLASS:
@@ -742,8 +778,12 @@ void Translator::emitBlock(unsigned index) {
             unimplemented();
         case BUILD_SET:
             unimplemented();
-        case BUILD_MAP:
-            unimplemented();
+        case BUILD_MAP: {
+            auto values = py_stack[stack_height -= 2 * instr.oparg];
+            auto map = do_CallSymbol<handle_BUILD_MAP>(values, asValue<Py_ssize_t>(instr.oparg));
+            do_PUSH(map);
+            break;
+        }
         case BUILD_CONST_KEY_MAP:
             unimplemented();
         case LIST_APPEND:
@@ -756,8 +796,13 @@ void Translator::emitBlock(unsigned index) {
             unimplemented();
         case SET_UPDATE:
             unimplemented();
-        case DICT_MERGE:
-            unimplemented();
+        case DICT_MERGE: {
+            auto update = do_POP();
+            auto dict = do_PEAK(instr.oparg);
+            auto callee = do_PEAK(instr.oparg + 2);
+            do_CallSymbol<handle_DICT_MERGE>(callee, dict, update);
+            break;
+        }
         case DICT_UPDATE:
             unimplemented();
         case LIST_TO_TUPLE:

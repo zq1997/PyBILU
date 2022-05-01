@@ -13,16 +13,16 @@ using namespace std;
 
 static PyObject *const python_bool_values[]{Py_False, Py_True};
 
+void handle_INCREF(PyObject *obj) {
+    Py_INCREF(obj);
+}
+
 void handle_DECREF(PyObject *obj) {
-    if (!--obj->ob_refcnt) {
-        Py_TYPE(obj)->tp_dealloc(obj);
-    }
+    Py_DECREF(obj);
 }
 
 void handle_XDECREF(PyObject *obj) {
-    if (obj && !--obj->ob_refcnt) {
-        Py_TYPE(obj)->tp_dealloc(obj);
-    }
+    Py_XDECREF(obj);
 }
 
 // TODO: 在想，能不能设计俩版本，decref在这里实现
@@ -276,20 +276,18 @@ PyObject *handle_LOAD_ATTR(PyObject *owner, PyObject *name) {
     return value;
 }
 
-PyObject *handle_LOAD_METHOD(PyObject *obj, PyObject *name, PyObject **sp) {
+void handle_LOAD_METHOD(PyObject *obj, PyObject *name, PyObject **sp) {
     PyObject *meth = nullptr;
     int meth_found = _PyObject_GetMethod(obj, name, &meth);
     gotoErrorHandler(!meth);
-
     if (meth_found) {
         sp[0] = meth;
-        Py_INCREF(obj);
         sp[1] = obj;
     } else {
         sp[0] = nullptr;
         sp[1] = meth;
+        Py_DECREF(obj);
     }
-    return meth;
 }
 
 void handle_STORE_ATTR(PyObject *owner, PyObject *name, PyObject *value) {
@@ -819,6 +817,99 @@ PyObject *handle_GET_ITER(PyObject *o) {
         PyErr_Format(PyExc_TypeError, "'%.200s' object is not iterable", type->tp_name);
         gotoErrorHandler();
     }
+}
+
+PyObject *handle_CALL_FUNCTION(PyObject **func_args, Py_ssize_t nargs) {
+    auto ret = PyObject_Vectorcall(*func_args, func_args + 1, nargs | PY_VECTORCALL_ARGUMENTS_OFFSET, nullptr);
+    gotoErrorHandler(!ret);
+    do {
+        Py_DECREF(func_args[nargs]);
+    } while (nargs--);
+    return ret;
+}
+
+PyObject *handle_CALL_FUNCTION_KW(PyObject **func_args, Py_ssize_t nargs) {
+    auto i = nargs + 1;
+    auto kwargs = func_args[i];
+    nargs -= PyTuple_GET_SIZE(kwargs);
+    auto ret = PyObject_Vectorcall(*func_args, func_args + 1, nargs | PY_VECTORCALL_ARGUMENTS_OFFSET, kwargs);
+    gotoErrorHandler(!ret);
+    do {
+        Py_DECREF(func_args[i]);
+    } while (i--);
+    return ret;
+}
+
+template <typename... Args>
+static void formatFunctionCallError(PyThreadState *tstate, PyObject *func, const char *error, Args... args) {
+    PyObject *funcstr = _PyObject_FunctionStr(func);
+    if (funcstr) {
+        _PyErr_Format(tstate, PyExc_TypeError, error, funcstr, args...);
+        Py_DECREF(funcstr);
+    }
+}
+
+PyObject *handle_CALL_FUNCTION_EX(PyObject *func, PyObject *args, PyObject *kwargs) {
+    assert(!kwargs || PyDict_CheckExact(kwargs));
+    PyObject *ret = nullptr;
+    if (PyTuple_CheckExact(args)) {
+        ret = PyObject_Call(func, kwargs, kwargs);
+    } else {
+        auto t = PySequence_Tuple(args);
+        if (!t) {
+            auto tstate = _PyThreadState_GET();
+            if (_PyErr_ExceptionMatches(tstate, PyExc_TypeError)) {
+                _PyErr_Clear(tstate);
+                formatFunctionCallError(tstate, func,
+                        "%U argument after ** must be a mapping, not %.200s", Py_TYPE(kwargs)->tp_name);
+            }
+            gotoErrorHandler(tstate);
+        }
+        ret = PyObject_Call(func, t, kwargs);
+        Py_DECREF(t);
+    }
+    gotoErrorHandler(!ret);
+    return ret;
+}
+
+PyObject *handle_BUILD_MAP(PyObject **arr, Py_ssize_t num) {
+    PyObject *map = _PyDict_NewPresized(num);
+    gotoErrorHandler(!map);
+    for (auto i = 0; i < num; i++) {
+        if (PyDict_SetItem(map, arr[2 * i], arr[2 * i + 1])) {
+            Py_DECREF(map);
+            gotoErrorHandler();
+        }
+    }
+    for (auto i = 0; i < num; i++) {
+        Py_DECREF(arr[2 * i]);
+        Py_DECREF(arr[2 * i + 1]);
+    }
+    return map;
+}
+
+void handle_DICT_MERGE(PyObject *func, PyObject *dict, PyObject *update) {
+    if (_PyDict_MergeEx(dict, update, 2) == 0) {
+        Py_DECREF(update);
+        return;
+    }
+    auto tstate = _PyThreadState_GET();
+    if (_PyErr_ExceptionMatches(tstate, PyExc_AttributeError)) {
+        _PyErr_Clear(tstate);
+        formatFunctionCallError(tstate, func,
+                "%U argument after ** must be a mapping, not %.200s", Py_TYPE(update)->tp_name);
+    } else if (_PyErr_ExceptionMatches(tstate, PyExc_KeyError)) {
+        auto val = tstate->curexc_value;
+        if (val && PyTuple_Check(val) && PyTuple_GET_SIZE(val) == 1) {
+            PyObject *key = PyTuple_GET_ITEM(val, 0);
+            Py_INCREF(key);
+            _PyErr_Clear(tstate);
+            formatFunctionCallError(tstate, func, "%U got multiple values for keyword argument '%S'", key);
+            Py_DECREF(key);
+        }
+    }
+    Py_DECREF(update);
+    gotoErrorHandler(tstate);
 }
 
 const auto symbol_names{apply(
