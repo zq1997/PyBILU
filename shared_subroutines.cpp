@@ -7,11 +7,13 @@
 #include <internal/pycore_code.h>
 #include <internal/pycore_pyerrors.h>
 #include <internal/pycore_abstract.h>
+#include <internal/pycore_interp.h>
 #include <iostream>
 
 using namespace std;
 
 static PyObject *const python_bool_values[]{Py_False, Py_True};
+static _Py_Identifier PyId___name__{"__name__", -1};
 
 void handle_INCREF(PyObject *obj) {
     Py_INCREF(obj);
@@ -58,7 +60,8 @@ static void raiseUndefinedName(PyThreadState *tstate, PyObject *name,
     PyErr_Fetch(&type, &value, &traceback);
     PyErr_NormalizeException(&type, &value, &traceback);
     if (PyErr_GivenExceptionMatches(value, PyExc_NameError)) {
-        PyObject_SetAttrString(value, "name", name);
+        static _Py_Identifier PyId_name{"name", -1};
+        _PyObject_SetAttrId(value, &PyId_name, name);
     }
     PyErr_Restore(type, value, traceback);
 }
@@ -103,7 +106,8 @@ void raiseException() {
             raiseUndefinedFree(tstate, name);
         }
     } else {
-        _PyErr_Format(tstate, PyExc_SystemError, "error block遇到了未知opcode");
+        assert(opcode == MAKE_FUNCTION);
+        // _PyErr_Format(tstate, PyExc_SystemError, "error block遇到了未知opcode");
     }
     gotoErrorHandler(tstate);
 }
@@ -146,7 +150,7 @@ PyObject *handle_LOAD_CLASSDEREF(PyFrameObject *f, PyOparg oparg) {
 
 static Py_hash_t getHash(PyObject *name) {
     assert(PyUnicode_CheckExact(name));
-    auto hash = ((PyASCIIObject *) name)->hash;
+    auto hash = reinterpret_cast<PyASCIIObject *>(name)->hash;
     if (hash == -1) {
         hash = PyObject_Hash(name);
     }
@@ -910,6 +914,223 @@ void handle_DICT_MERGE(PyObject *func, PyObject *dict, PyObject *update) {
     }
     Py_DECREF(update);
     gotoErrorHandler(tstate);
+}
+
+PyObject *handle_LOAD_BUILD_CLASS(PyObject *builtins) {
+    static _Py_Identifier PyId___build_class__{"__build_class__", -1};
+    PyObject *build_class_str = _PyUnicode_FromId(&PyId___build_class__);
+    gotoErrorHandler(!build_class_str);
+
+    PyThreadState *tstate;
+    bool format_error;
+    if (PyDict_CheckExact(builtins)) {
+        auto hash = reinterpret_cast<PyASCIIObject *>(build_class_str)->hash;
+        auto bc = _PyDict_GetItem_KnownHash(builtins, build_class_str, hash);
+        if (bc) {
+            Py_INCREF(bc);
+            return bc;
+        }
+        format_error = !_PyErr_Occurred(tstate = _PyThreadState_GET());
+
+    } else {
+        auto bc = PyObject_GetItem(builtins, build_class_str);
+        if (bc) {
+            return bc;
+        }
+        format_error = _PyErr_ExceptionMatches(tstate = _PyThreadState_GET(), PyExc_KeyError);
+    }
+    if (format_error) {
+        _PyErr_SetString(tstate, PyExc_NameError, "__build_class__ not found");
+    }
+    gotoErrorHandler(tstate);
+}
+
+// TODO: tstate直接传进来么
+PyObject *handle_IMPORT_NAME(PyFrameObject *f, PyObject *name, PyObject *fromlist, PyObject *level) {
+    auto tstate = _PyThreadState_GET();
+
+    static _Py_Identifier PyId___import__{"__import__", -1};
+    PyObject *import_str = _PyUnicode_FromId(&PyId___import__);
+    gotoErrorHandler(!import_str, tstate);
+
+    auto hash = reinterpret_cast<PyASCIIObject *>(import_str)->hash;
+    auto import_func = _PyDict_GetItem_KnownHash(f->f_builtins, import_str, hash);
+    if (!import_func) {
+        if (!_PyErr_Occurred(tstate)) {
+            _PyErr_SetString(tstate, PyExc_ImportError, "__import__ not found");
+        }
+        gotoErrorHandler(tstate);
+    }
+
+    if (import_func == tstate->interp->import_func) {
+        auto ilevel = _PyLong_AsInt(level);
+        gotoErrorHandler(ilevel == -1 && _PyErr_Occurred(tstate), tstate);
+        auto res = PyImport_ImportModuleLevelObject(
+                name, f->f_globals, f->f_locals ? f->f_locals : Py_None, fromlist, ilevel);
+        gotoErrorHandler(!res, tstate);
+        return res;
+    }
+
+    Py_INCREF(import_func);
+    PyObject *stack[]{name, f->f_globals, f->f_locals ? f->f_locals : Py_None, fromlist, level};
+    auto res = _PyObject_FastCall(import_func, stack, 5);
+    Py_DECREF(import_func);
+    gotoErrorHandler(!res, tstate);
+    return res;
+}
+
+PyObject *handle_IMPORT_FROM(PyObject *from, PyObject *name) {
+    PyObject *attr;
+    auto err = _PyObject_LookupAttr(from, name, &attr);
+    if (err > 0) {
+        assert(attr);
+        return attr;
+    } else {
+        gotoErrorHandler(err < 0);
+    }
+
+    auto pkgname = _PyObject_GetAttrId(from, &PyId___name__);
+    PyObject *pkgname_or_unknown;
+    PyThreadState *tstate;
+    if (pkgname && PyUnicode_Check(pkgname)) {
+        auto fullmodname = PyUnicode_FromFormat("%U.%U", pkgname, name);
+        if (!fullmodname) {
+            Py_DECREF(pkgname);
+            gotoErrorHandler();
+        }
+        auto mod = PyImport_GetModule(fullmodname);
+        Py_DECREF(fullmodname);
+        if (mod) {
+            Py_DECREF(pkgname);
+            return mod;
+        }
+        tstate = _PyThreadState_GET();
+        gotoErrorHandler(_PyErr_Occurred(tstate), tstate);
+        pkgname_or_unknown = pkgname;
+    } else {
+        tstate = _PyThreadState_GET();
+        if (pkgname) {
+            Py_DECREF(pkgname);
+            pkgname = nullptr;
+        }
+        pkgname_or_unknown = PyUnicode_FromString("<unknown module name>");
+        gotoErrorHandler(!pkgname_or_unknown, tstate);
+    }
+
+    auto pkgpath = PyModule_GetFilenameObject(from);
+    PyObject *errmsg;
+    if (pkgpath) {
+        static _Py_Identifier PyId___spec__{"__spec__", -1};
+        PyObject *spec = _PyObject_GetAttrId(from, &PyId___spec__);
+        errmsg = PyUnicode_FromFormat(_PyModuleSpec_IsInitializing(spec) ?
+                        "cannot import name %R from partially initialized module %R "
+                        "(most likely due to a circular import) (%S)" :
+                        "cannot import name %R from %R (%S)",
+                name, pkgname_or_unknown, pkgpath);
+        Py_XDECREF(spec);
+    } else {
+        _PyErr_Clear(tstate);
+        errmsg = PyUnicode_FromFormat("cannot import name %R from %R (unknown location)",
+                name, pkgname_or_unknown);
+    }
+
+    PyErr_SetImportError(errmsg, pkgname, pkgpath);
+    Py_XDECREF(pkgpath);
+    Py_XDECREF(errmsg);
+    Py_DECREF(pkgname_or_unknown);
+    gotoErrorHandler(tstate);
+}
+
+void handle_IMPORT_STAR(PyFrameObject *f, PyObject *from) {
+    gotoErrorHandler(PyFrame_FastToLocalsWithError(f) < 0);
+    auto locals = f->f_locals;
+    if (!locals) {
+        auto tstate = _PyThreadState_GET();
+        _PyErr_SetString(tstate, PyExc_SystemError, "no locals found during 'import *'");
+        gotoErrorHandler(tstate);
+    }
+
+
+    bool skip_leading_underscores = false;
+    PyObject *all;
+    static _Py_Identifier PyId___all__{"__all__", -1};
+    gotoErrorHandler(_PyObject_LookupAttrId(from, &PyId___all__, &all) < 0);
+    if (!all) {
+        PyObject *dict;
+        static _Py_Identifier PyId___dict__{"__dict__", -1};
+        if (_PyObject_LookupAttrId(from, &PyId___dict__, &dict) < 0) {
+            gotoErrorHandler();
+        }
+        if (!dict) {
+            auto tstate = _PyThreadState_GET();
+            _PyErr_SetString(tstate, PyExc_ImportError, "from-import-* object has no __dict__ and no __all__");
+            gotoErrorHandler(tstate);
+        }
+        all = PyMapping_Keys(dict);
+        Py_DECREF(dict);
+        if (!all) {
+            gotoErrorHandler();
+        }
+        skip_leading_underscores = true;
+    }
+
+    PyObject *name;
+    bool err = true;
+    auto setter = PyDict_CheckExact(locals) ? PyDict_SetItem : PyObject_SetItem;
+    for (Py_ssize_t pos = 0;; pos++) {
+        name = PySequence_GetItem(all, pos);
+        if (!name) {
+            auto tstate = _PyThreadState_GET();
+            if (_PyErr_ExceptionMatches(tstate, PyExc_IndexError)) {
+                err = false;
+                _PyErr_Clear(tstate);
+            }
+            break;
+        }
+        if (!PyUnicode_Check(name)) {
+            PyObject *modname = _PyObject_GetAttrId(from, &PyId___name__);
+            if (!modname) {
+                break;
+            }
+            auto tstate = _PyThreadState_GET();
+            if (!PyUnicode_Check(modname)) {
+                _PyErr_Format(tstate, PyExc_TypeError,
+                        "module __name__ must be a string, not %.100s", Py_TYPE(modname)->tp_name);
+            } else {
+                _PyErr_Format(tstate, PyExc_TypeError,
+                        "%s in %U.%s must be str, not %.100s",
+                        skip_leading_underscores ? "Key" : "Item",
+                        modname,
+                        skip_leading_underscores ? "__dict__" : "__all__",
+                        Py_TYPE(name)->tp_name);
+            }
+            Py_DECREF(modname);
+            break;
+        }
+        if (skip_leading_underscores) {
+            if (PyUnicode_READY(name) == -1) {
+                break;
+            }
+            if (PyUnicode_READ_CHAR(name, 0) == '_') {
+                Py_DECREF(name);
+                continue;
+            }
+        }
+        if (auto value = PyObject_GetAttr(from, name)) {
+            auto error_while_set = setter(locals, name, value);
+            Py_DECREF(value);
+            if (error_while_set) {
+                break;
+            }
+            Py_DECREF(name);
+        } else {
+            break;
+        }
+    }
+    Py_XDECREF(name);
+    Py_DECREF(all);
+    PyFrame_LocalsToFast(f, 0);
+    gotoErrorHandler(err);
 }
 
 const auto symbol_names{apply(

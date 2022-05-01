@@ -63,7 +63,7 @@ class Translator {
             types.get<TranslatedFunctionType>(),
             llvm::Function::ExternalLinkage, "singleton_function", &mod
     )};
-    llvm::Argument *simple_frame{func->getArg(1)};
+    llvm::Argument *frame_obj{func->getArg(1)};
     llvm::MDNode *likely_true{};
     llvm::MDNode *tbaa_refcnt{};
     llvm::MDNode *tbaa_frame_slot{};

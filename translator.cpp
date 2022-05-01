@@ -51,7 +51,7 @@ Translator::Translator(const DataLayout &dl) : data_layout{dl} {
             .addAttribute("tune-cpu", sys::getHostCPUName());
     func->setAttributes(AttributeList::get(context, AttributeList::FunctionIndex, attr_builder));
     func->getArg(0)->setName(useName("$symbols"));
-    simple_frame->setName(useName("$frame"));
+    frame_obj->setName(useName("$frame"));
     // TODO: 下面的，不知是否有必要
     for (auto &arg : func->args()) {
         arg.addAttr(Attribute::NoAlias);
@@ -74,7 +74,7 @@ void *Translator::operator()(Compiler &compiler, PyCodeObject *code) {
 
     builder.SetInsertPoint(blocks[0].llvm_block);
 
-    auto code_obj = readData(simple_frame, &PyFrameObject::f_code, useName("$code"));
+    auto code_obj = readData(frame_obj, &PyFrameObject::f_code, useName("$code"));
 
     auto names_tuple = loadFieldValue(code_obj, &PyCodeObject::co_names, tbaa_code_const);
     auto names_array = getPointer(names_tuple, &PyTupleObject::ob_item, "$names");
@@ -98,7 +98,7 @@ void *Translator::operator()(Compiler &compiler, PyCodeObject *code) {
         py_consts[i] = loadElementValue<PyObject *>(consts_array, i, tbaa_code_const, useName(repr));
     }
 
-    auto localsplus = getPointer(simple_frame, &PyFrameObject::f_localsplus, useName("$localsplus"));
+    auto localsplus = getPointer(frame_obj, &PyFrameObject::f_localsplus, useName("$localsplus"));
     auto nlocals = code->co_nlocals;
     auto start_cells = nlocals;
     auto ncells = PyTuple_GET_SIZE(code->co_cellvars);
@@ -125,8 +125,8 @@ void *Translator::operator()(Compiler &compiler, PyCodeObject *code) {
     for (auto i : Range(nstack)) {
         py_stack[i] = getPointer<PyObject *>(localsplus, start_stack + i, useName("$stack.", i));
     }
-    rt_stack_height_pointer = getPointer(simple_frame, &PyFrameObject::f_stackdepth, "$stack_height");
-    rt_lasti = getPointer(simple_frame, &PyFrameObject::f_lasti, "$lasti");
+    rt_stack_height_pointer = getPointer(frame_obj, &PyFrameObject::f_stackdepth, "$stack_height");
+    rt_lasti = getPointer(frame_obj, &PyFrameObject::f_lasti, "$lasti");
 
     error_block = createBlock("$error_here", nullptr);
 
@@ -393,7 +393,7 @@ void Translator::emitBlock(unsigned index) {
             break;
         }
         case LOAD_CLASSDEREF: {
-            auto value = do_CallSymbol<handle_LOAD_CLASSDEREF>(simple_frame, asValue(instr.oparg));
+            auto value = do_CallSymbol<handle_LOAD_CLASSDEREF>(frame_obj, asValue(instr.oparg));
             do_PUSH(value);
             break;
         }
@@ -418,33 +418,33 @@ void Translator::emitBlock(unsigned index) {
             break;
         }
         case LOAD_GLOBAL: {
-            auto value = do_CallSymbol<handle_LOAD_GLOBAL>(simple_frame, py_names[instr.oparg]);
+            auto value = do_CallSymbol<handle_LOAD_GLOBAL>(frame_obj, py_names[instr.oparg]);
             do_PUSH(value);
             break;
         }
         case STORE_GLOBAL: {
             auto value = do_POP();
-            do_CallSymbol<handle_STORE_GLOBAL>(simple_frame, py_names[instr.oparg], value);
+            do_CallSymbol<handle_STORE_GLOBAL>(frame_obj, py_names[instr.oparg], value);
             do_Py_DECREF(value);
             break;
         }
         case DELETE_GLOBAL: {
-            do_CallSymbol<handle_DELETE_GLOBAL>(simple_frame, py_names[instr.oparg]);
+            do_CallSymbol<handle_DELETE_GLOBAL>(frame_obj, py_names[instr.oparg]);
             break;
         }
         case LOAD_NAME: {
-            auto value = do_CallSymbol<handle_LOAD_NAME>(simple_frame, py_names[instr.oparg]);
+            auto value = do_CallSymbol<handle_LOAD_NAME>(frame_obj, py_names[instr.oparg]);
             do_PUSH(value);
             break;
         }
         case STORE_NAME: {
             auto value = do_POP();
-            do_CallSymbol<handle_STORE_NAME>(simple_frame, py_names[instr.oparg], value);
+            do_CallSymbol<handle_STORE_NAME>(frame_obj, py_names[instr.oparg], value);
             do_Py_DECREF(value);
             break;
         }
         case DELETE_NAME: {
-            do_CallSymbol<handle_DELETE_NAME>(simple_frame, py_names[instr.oparg]);
+            do_CallSymbol<handle_DELETE_NAME>(frame_obj, py_names[instr.oparg]);
             break;
         }
         case LOAD_ATTR: {
@@ -704,17 +704,61 @@ void Translator::emitBlock(unsigned index) {
             do_PUSH(cell);
             break;
         }
-        case MAKE_FUNCTION:
-            unimplemented();
-        case LOAD_BUILD_CLASS:
-            unimplemented();
+        case MAKE_FUNCTION: {
+            auto qualname = do_POP();
+            auto codeobj = do_POP();
+            auto globals = loadFieldValue(frame_obj, &PyFrameObject::f_globals, tbaa_code_const);
+            auto py_func = do_CallSymbol<PyFunction_NewWithQualName>(codeobj, globals, qualname);
+            auto ok_block = createBlock("MAKE_FUNCTION.OK");
+            builder.CreateCondBr(builder.CreateICmpNE(py_func, c_null), ok_block, error_block, likely_true);
+            builder.SetInsertPoint(ok_block);
+            // TODO: 一个新的tbaa
+            if (instr.oparg & 0x08) {
+                storeFiledValue(do_POP(), py_func, &PyFunctionObject::func_closure, tbaa_refcnt);
+            }
+            if (instr.oparg & 0x04) {
+                storeFiledValue(do_POP(), py_func, &PyFunctionObject::func_annotations, tbaa_refcnt);
+            }
+            if (instr.oparg & 0x02) {
+                storeFiledValue(do_POP(), py_func, &PyFunctionObject::func_kwdefaults, tbaa_refcnt);
+            }
+            if (instr.oparg & 0x01) {
+                storeFiledValue(do_POP(), py_func, &PyFunctionObject::func_defaults, tbaa_refcnt);
+            }
+            do_PUSH(py_func);
+            do_Py_DECREF(codeobj);
+            do_Py_DECREF(qualname);
+            break;
+        }
+        case LOAD_BUILD_CLASS: {
+            auto builtins = loadFieldValue(frame_obj, &PyFrameObject::f_builtins, tbaa_code_const);
+            auto bc = do_CallSymbol<handle_LOAD_BUILD_CLASS>(builtins);
+            do_PUSH(bc);
+            break;
+        }
 
-        case IMPORT_NAME:
-            unimplemented();
-        case IMPORT_FROM:
-            unimplemented();
-        case IMPORT_STAR:
-            unimplemented();
+        case IMPORT_NAME:{
+            auto name = py_names[instr.oparg];
+            auto fromlist = do_POP();
+            auto level = do_POP();
+            auto res = do_CallSymbol<handle_IMPORT_NAME>(frame_obj, name, fromlist, level);
+            do_PUSH(res);
+            Py_DECREF(level);
+            Py_DECREF(fromlist);
+            break;
+        }
+        case IMPORT_FROM: {
+            auto from = do_PEAK(1);
+            auto res = do_CallSymbol<handle_IMPORT_FROM>(from, py_names[instr.oparg]);
+            do_PUSH(res);
+            break;
+        }
+        case IMPORT_STAR: {
+            auto from = do_POP();
+            do_CallSymbol<handle_IMPORT_STAR>(frame_obj, from);
+            do_Py_DECREF(from);
+            break;
+        }
 
         case JUMP_FORWARD: {
             auto &jmp_block = findPyBlock(instr.offset + instr.oparg);

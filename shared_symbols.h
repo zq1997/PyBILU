@@ -74,6 +74,11 @@ bool handle_CONTAINS_OP(PyObject *container, PyObject *value);
 PyObject *handle_CALL_FUNCTION(PyObject **func_args, Py_ssize_t nargs);
 PyObject *handle_CALL_FUNCTION_KW(PyObject **func_args, Py_ssize_t nargs);
 PyObject *handle_CALL_FUNCTION_EX(PyObject *func, PyObject *args, PyObject *kwargs);
+PyObject *handle_LOAD_BUILD_CLASS(PyObject *f);
+
+PyObject *handle_IMPORT_NAME(PyFrameObject *f, PyObject *name, PyObject *fromlist, PyObject *level);
+PyObject *handle_IMPORT_FROM(PyObject *from, PyObject *name);
+void handle_IMPORT_STAR(PyFrameObject *f, PyObject *from);
 
 PyObject *handle_BUILD_MAP(PyObject **arr, Py_ssize_t num);
 void handle_DICT_MERGE(PyObject *func, PyObject *dict, PyObject *update);
@@ -137,6 +142,12 @@ constexpr std::tuple external_symbols{
         ENTRY(handle_CALL_FUNCTION),
         ENTRY(handle_CALL_FUNCTION_KW),
         ENTRY(handle_CALL_FUNCTION_EX),
+        ENTRY(PyFunction_NewWithQualName),
+        ENTRY(handle_LOAD_BUILD_CLASS),
+
+        ENTRY(handle_IMPORT_NAME),
+        ENTRY(handle_IMPORT_FROM),
+        ENTRY(handle_IMPORT_STAR),
 
         ENTRY(handle_BUILD_MAP),
         ENTRY(handle_DICT_MERGE),

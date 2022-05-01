@@ -47,7 +47,10 @@ class A:
 
 @pynic.apply
 def test(d):
-    return d.func(1, 2)
+    def f(d):
+        print('ok', d)
+    f(d)
+    # return d.func(1, 2)
 
 
 print(test(A()))
