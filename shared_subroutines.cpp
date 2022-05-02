@@ -860,7 +860,7 @@ PyObject *handle_CALL_FUNCTION_EX(PyObject *func, PyObject *args, PyObject *kwar
         ret = PyObject_Call(func, kwargs, kwargs);
     } else {
         auto t = PySequence_Tuple(args);
-        if (!t) {
+        if (!t) [[unlikely]] {
             auto tstate = _PyThreadState_GET();
             if (_PyErr_ExceptionMatches(tstate, PyExc_TypeError)) {
                 _PyErr_Clear(tstate);
@@ -876,11 +876,44 @@ PyObject *handle_CALL_FUNCTION_EX(PyObject *func, PyObject *args, PyObject *kwar
     return ret;
 }
 
+PyObject *handle_BUILD_TUPLE(PyObject **arr, Py_ssize_t num) {
+    auto tup = PyTuple_New(num);
+    gotoErrorHandler(!tup);
+    while (--num >= 0) {
+        PyTuple_SET_ITEM(tup, num, arr[num]);
+    }
+    return tup;
+}
+
+PyObject *handle_BUILD_LIST(PyObject **arr, Py_ssize_t num) {
+    auto list = PyList_New(num);
+    gotoErrorHandler(!list);
+    while (--num >= 0) {
+        PyList_SET_ITEM(list, num, arr[num]);
+    }
+    return list;
+}
+
+PyObject *handle_BUILD_SET(PyObject **arr, Py_ssize_t num) {
+    auto *set = PySet_New(nullptr);
+    gotoErrorHandler(!set);
+    for (auto i = 0; i < num; i++) {
+        if (PySet_Add(set, arr[i])) [[unlikely]] {
+            Py_DECREF(set);
+            gotoErrorHandler();
+        }
+    }
+    for (auto i = 0; i < num; i++) {
+        Py_DECREF(arr[i]);
+    }
+    return set;
+}
+
 PyObject *handle_BUILD_MAP(PyObject **arr, Py_ssize_t num) {
-    PyObject *map = _PyDict_NewPresized(num);
+    auto map = _PyDict_NewPresized(num);
     gotoErrorHandler(!map);
     for (auto i = 0; i < num; i++) {
-        if (PyDict_SetItem(map, arr[2 * i], arr[2 * i + 1])) {
+        if (PyDict_SetItem(map, arr[2 * i], arr[2 * i + 1])) [[unlikely]] {
             Py_DECREF(map);
             gotoErrorHandler();
         }
@@ -892,9 +925,80 @@ PyObject *handle_BUILD_MAP(PyObject **arr, Py_ssize_t num) {
     return map;
 }
 
+PyObject *handle_BUILD_CONST_KEY_MAP(PyObject **arr, Py_ssize_t num) {
+    auto keys = arr[num];
+    if (!PyTuple_CheckExact(keys) || PyTuple_GET_SIZE(keys) != num) {
+        auto tstate = _PyThreadState_GET();
+        _PyErr_SetString(tstate, PyExc_SystemError, "bad BUILD_CONST_KEY_MAP keys argument");
+        gotoErrorHandler(tstate);
+    }
+    auto map = _PyDict_NewPresized(num);
+    gotoErrorHandler(!map);
+    for (auto i = 0; i < num; i++) {
+        if (PyDict_SetItem(map, PyTuple_GET_ITEM(keys, i), arr[i])) [[unlikely]] {
+            Py_DECREF(map);
+            gotoErrorHandler();
+        }
+    }
+    Py_DECREF(keys);
+    for (auto i = 0; i < num; i++) {
+        Py_DECREF(arr[i]);
+    }
+    return map;
+}
+
+void handle_LIST_APPEND(PyObject *list, PyObject *value) {
+    gotoErrorHandler(PyList_Append(list, value));
+}
+
+void handle_SET_ADD(PyObject *set, PyObject *value) {
+    gotoErrorHandler(PySet_Add(set, value));
+}
+
+void handle_MAP_ADD(PyObject *map, PyObject *key, PyObject *value) {
+    gotoErrorHandler(PyDict_SetItem(map, key, value));
+}
+
+void handle_LIST_EXTEND(PyObject *list, PyObject *iterable) {
+    PyObject *none_val = _PyList_Extend((PyListObject *) list, iterable);
+    if (none_val) [[likely]] {
+        Py_DECREF(none_val);
+        return;
+    }
+    auto tstate = _PyThreadState_GET();
+    if (_PyErr_ExceptionMatches(tstate, PyExc_TypeError)
+            && !Py_TYPE(iterable)->tp_iter && !PySequence_Check(iterable)) {
+        _PyErr_Clear(tstate);
+        _PyErr_Format(tstate, PyExc_TypeError,
+                "Value after * must be an iterable, not %.200s",
+                Py_TYPE(iterable)->tp_name);
+    }
+    gotoErrorHandler(tstate);
+}
+
+void handle_SET_UPDATE(PyObject *set, PyObject *iterable) {
+    gotoErrorHandler(_PySet_Update(set, iterable) < 0);
+}
+
+void handle_DICT_UPDATE(PyObject *dict, PyObject *update) {
+    if (PyDict_Update(dict, update) >= 0) [[likely]] {
+        return;
+    }
+    auto tstate = _PyThreadState_GET();
+    if (_PyErr_ExceptionMatches(tstate, PyExc_AttributeError)) {
+        _PyErr_Format(tstate, PyExc_TypeError, "'%.200s' object is not a mapping", Py_TYPE(update)->tp_name);
+    }
+    gotoErrorHandler(tstate);
+}
+
+PyObject *handle_LIST_TO_TUPLE(PyObject *list) {
+    auto tuple = PyList_AsTuple(list);
+    gotoErrorHandler(!tuple);
+    return tuple;
+}
+
 void handle_DICT_MERGE(PyObject *func, PyObject *dict, PyObject *update) {
-    if (_PyDict_MergeEx(dict, update, 2) == 0) {
-        Py_DECREF(update);
+    if (_PyDict_MergeEx(dict, update, 2) == 0) [[likely]] {
         return;
     }
     auto tstate = _PyThreadState_GET();
@@ -912,8 +1016,48 @@ void handle_DICT_MERGE(PyObject *func, PyObject *dict, PyObject *update) {
             Py_DECREF(key);
         }
     }
-    Py_DECREF(update);
     gotoErrorHandler(tstate);
+}
+
+PyObject *handle_FORMAT_VALUE(PyObject *value, PyObject *fmt_spec, int which_conversion) {
+    switch (which_conversion) {
+    case FVC_NONE:
+        Py_INCREF(value);
+        break;
+    case FVC_STR:
+        gotoErrorHandler(!(value = PyObject_Str(value)));
+        break;
+    case FVC_REPR:
+        gotoErrorHandler(!(value = PyObject_Repr(value)));
+        break;
+    case FVC_ASCII:
+        gotoErrorHandler(!(value = PyObject_ASCII(value)));
+        break;
+    default: {
+        auto tstate = _PyThreadState_GET();
+        _PyErr_Format(tstate, PyExc_SystemError, "unexpected conversion flag %d", which_conversion);
+        gotoErrorHandler(tstate);
+    }
+    }
+
+    if (!fmt_spec && PyUnicode_CheckExact(value)) {
+        return value;
+    }
+    auto fmt_value = PyObject_Format(value, fmt_spec);
+    Py_DECREF(value);
+    gotoErrorHandler(!fmt_value);
+    return fmt_value;
+}
+
+PyObject *handle_BUILD_STRING(PyObject **arr, Py_ssize_t num) {
+    auto str = PyUnicode_New(0, 0);
+    gotoErrorHandler(!str);
+    str = _PyUnicode_JoinArray(str, arr, num);
+    gotoErrorHandler(!str);
+    while (--num >= 0) {
+        Py_DECREF(arr[num]);
+    }
+    return str;
 }
 
 PyObject *handle_LOAD_BUILD_CLASS(PyObject *builtins) {

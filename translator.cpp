@@ -698,7 +698,7 @@ void Translator::emitBlock(unsigned index) {
             do_PUSH(ret);
             break;
         }
-        case LOAD_CLOSURE:{
+        case LOAD_CLOSURE: {
             auto cell = loadValue<PyObject *>(py_freevars[instr.oparg], tbaa_code_const);
             do_Py_INCREF(cell);
             do_PUSH(cell);
@@ -737,7 +737,7 @@ void Translator::emitBlock(unsigned index) {
             break;
         }
 
-        case IMPORT_NAME:{
+        case IMPORT_NAME: {
             auto name = py_names[instr.oparg];
             auto fromlist = do_POP();
             auto level = do_POP();
@@ -816,46 +816,110 @@ void Translator::emitBlock(unsigned index) {
             break;
         }
 
-        case BUILD_TUPLE:
-            unimplemented();
-        case BUILD_LIST:
-            unimplemented();
-        case BUILD_SET:
-            unimplemented();
+        case BUILD_TUPLE: {
+            auto values = py_stack[stack_height -= instr.oparg];
+            auto map = do_CallSymbol<handle_BUILD_TUPLE>(values, asValue<Py_ssize_t>(instr.oparg));
+            do_PUSH(map);
+            break;
+        }
+        case BUILD_LIST: {
+            auto values = py_stack[stack_height -= instr.oparg];
+            auto map = do_CallSymbol<handle_BUILD_LIST>(values, asValue<Py_ssize_t>(instr.oparg));
+            do_PUSH(map);
+            break;
+        }
+        case BUILD_SET: {
+            auto values = py_stack[stack_height -= instr.oparg];
+            auto map = do_CallSymbol<handle_BUILD_SET>(values, asValue<Py_ssize_t>(instr.oparg));
+            do_PUSH(map);
+            break;
+        }
         case BUILD_MAP: {
             auto values = py_stack[stack_height -= 2 * instr.oparg];
             auto map = do_CallSymbol<handle_BUILD_MAP>(values, asValue<Py_ssize_t>(instr.oparg));
             do_PUSH(map);
             break;
         }
-        case BUILD_CONST_KEY_MAP:
-            unimplemented();
-        case LIST_APPEND:
-            unimplemented();
-        case SET_ADD:
-            unimplemented();
-        case MAP_ADD:
-            unimplemented();
-        case LIST_EXTEND:
-            unimplemented();
-        case SET_UPDATE:
-            unimplemented();
+        case BUILD_CONST_KEY_MAP: {
+            auto values = py_stack[stack_height -= instr.oparg + 1];
+            auto map = do_CallSymbol<handle_BUILD_CONST_KEY_MAP>(values, asValue<Py_ssize_t>(instr.oparg));
+            do_PUSH(map);
+            break;
+        }
+        case LIST_APPEND: {
+            auto value = do_POP();
+            auto list = do_PEAK(instr.oparg);
+            do_CallSymbol<handle_LIST_APPEND>(list, value);
+            do_Py_DECREF(value);
+            break;
+        }
+        case SET_ADD: {
+            auto value = do_POP();
+            auto set = do_PEAK(instr.oparg);
+            do_CallSymbol<handle_SET_ADD>(set, value);
+            do_Py_DECREF(value);
+            break;
+        }
+        case MAP_ADD: {
+            auto value = do_POP();
+            auto key = do_POP();
+            auto map = do_PEAK(instr.oparg);
+            do_CallSymbol<handle_MAP_ADD>(map, key, value);
+            do_Py_DECREF(key);
+            do_Py_DECREF(value);
+            break;
+        }
+        case LIST_EXTEND: {
+            auto iterable = do_POP();
+            auto list = do_PEAK(instr.oparg);
+            do_CallSymbol<handle_LIST_EXTEND>(list, iterable);
+            do_Py_DECREF(iterable);
+            break;
+        }
+        case SET_UPDATE: {
+            auto iterable = do_POP();
+            auto set = do_PEAK(instr.oparg);
+            do_CallSymbol<handle_SET_UPDATE>(set, iterable);
+            do_Py_DECREF(iterable);
+            break;
+        }
+        case DICT_UPDATE: {
+            auto update = do_POP();
+            auto dict = do_PEAK(instr.oparg);
+            do_CallSymbol<handle_DICT_UPDATE>(dict, update);
+            do_Py_DECREF(update);
+            break;
+        }
         case DICT_MERGE: {
             auto update = do_POP();
             auto dict = do_PEAK(instr.oparg);
             auto callee = do_PEAK(instr.oparg + 2);
             do_CallSymbol<handle_DICT_MERGE>(callee, dict, update);
+            do_Py_DECREF(update);
             break;
         }
-        case DICT_UPDATE:
-            unimplemented();
-        case LIST_TO_TUPLE:
-            unimplemented();
+        case LIST_TO_TUPLE: {
+            auto list = do_POP();
+            auto tuple = do_CallSymbol<handle_LIST_TO_TUPLE>(list);
+            do_PUSH(tuple);
+            do_Py_DECREF(list);
+            break;
+        }
 
-        case FORMAT_VALUE:
-            unimplemented();
-        case BUILD_STRING:
-            unimplemented();
+        case FORMAT_VALUE: {
+            auto fmt_spec = (instr.oparg & FVS_MASK) == FVS_HAVE_SPEC ? do_POP() : c_null;
+            auto value = do_POP();
+            int which_conversion = instr.oparg & FVC_MASK;
+            auto result = do_CallSymbol<handle_FORMAT_VALUE>(value, fmt_spec, asValue(which_conversion));
+            do_PUSH(result);
+            do_Py_DECREF(value);
+        }
+        case BUILD_STRING: {
+            auto values = py_stack[stack_height -= instr.oparg];
+            auto str = do_CallSymbol<handle_BUILD_STRING>(values, asValue<Py_ssize_t>(instr.oparg));
+            do_PUSH(str);
+            break;
+        }
 
         case UNPACK_SEQUENCE:
             unimplemented();
