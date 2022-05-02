@@ -51,6 +51,9 @@ struct PyBasicBlock {
     unsigned end;
     llvm::BasicBlock *llvm_block;
     decltype(PyFrameObject::f_stackdepth) initial_stack_height;
+
+    PyBasicBlock() = default;
+    PyBasicBlock(const PyBasicBlock &) = delete;
 };
 
 class Translator {

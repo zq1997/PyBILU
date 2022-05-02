@@ -19,14 +19,14 @@ static Py_ssize_t code_extra_index;
 //     // auto nargs = PyVectorcall_NARGS(nargsf);
 // }
 
-PyObject *eval_func(PyThreadState *tstate, PyFrameObject *frame, int throwflag) {
+PyObject *eval_func(PyThreadState *tstate, PyFrameObject *f, int throwflag) {
     // TODO: manually implement set/get extra
     void *compiled_code;
-    if (_PyCode_GetExtra(reinterpret_cast<PyObject *>(frame->f_code), code_extra_index, &compiled_code) == -1) {
+    if (_PyCode_GetExtra(reinterpret_cast<PyObject *>(f->f_code), code_extra_index, &compiled_code) == -1) {
         return nullptr;
     }
     if (!compiled_code) {
-        return _PyEval_EvalFrameDefault(tstate, frame, throwflag);
+        return _PyEval_EvalFrameDefault(tstate, f, throwflag);
     }
     // Strictly speaking, converting void* to a function pointer is undefined behavior in C++
     auto jit_callee = reinterpret_cast<TranslatedFunctionType *>(compiled_code);
@@ -38,26 +38,97 @@ PyObject *eval_func(PyThreadState *tstate, PyFrameObject *frame, int throwflag) 
     cframe.use_tracing = prev_cframe->use_tracing;
     cframe.previous = prev_cframe;
     tstate->cframe = &cframe;
-    tstate->frame = frame;
+    tstate->frame = f;
     PyObject *result;
     if (!setjmp(cframe.frame_jmp_buf)) {
-        result = jit_callee(&symbol_addresses[0], frame);
+        result = jit_callee(&symbol_addresses[0], f, 0);
         // TODO: 为啥return的时候不要清理stack
     } else {
         assert(_PyErr_Occurred(tstate));
-        PyTraceBack_Here(frame);
-        auto nlocals = frame->f_code->co_nlocals;
-        auto ncells = PyTuple_GET_SIZE(frame->f_code->co_cellvars);
-        auto nfrees = PyTuple_GET_SIZE(frame->f_code->co_freevars);
-        auto stack = &frame->f_localsplus[nlocals + ncells + nfrees];
-        while (frame->f_stackdepth) {
-            Py_XDECREF(stack[--frame->f_stackdepth]);
+        PyTraceBack_Here(f);
+        assert(!tstate->c_tracefunc); // 暂时的
+        f->f_state = FRAME_UNWINDING;
+
+        while (f->f_iblock > 0) {
+            /* Pop the current block. */
+            PyTryBlock *b = &f->f_blockstack[--f->f_iblock];
+
+            if (b->b_type == EXCEPT_HANDLER) {
+                PyObject *type, *value, *traceback;
+                _PyErr_StackItem *exc_info;
+                while (f->f_stackdepth > b->b_level + 3) {
+                    Py_XDECREF(f->f_valuestack[--f->f_stackdepth]);
+                }
+                exc_info = tstate->exc_info;
+                type = exc_info->exc_type;
+                value = exc_info->exc_value;
+                traceback = exc_info->exc_traceback;
+                exc_info->exc_type = f->f_valuestack[--f->f_stackdepth];
+                exc_info->exc_value = f->f_valuestack[--f->f_stackdepth];
+                exc_info->exc_traceback = f->f_valuestack[--f->f_stackdepth];
+                Py_XDECREF(type);
+                Py_XDECREF(value);
+                Py_XDECREF(traceback);
+                continue;
+            }
+            while (f->f_stackdepth > b->b_level) {
+                PyObject *v = f->f_valuestack[--f->f_stackdepth];
+                Py_XDECREF(v);
+            }
+            assert(b->b_type == SETUP_FINALLY);
+            if (b->b_type == SETUP_FINALLY) {
+                PyObject *exc, *val, *tb;
+                int handler = b->b_handler;
+                _PyErr_StackItem *exc_info = tstate->exc_info;
+                /* Beware, this invalidates all b->b_* fields */
+                PyFrame_BlockSetup(f, EXCEPT_HANDLER, f->f_lasti, f->f_stackdepth);
+                f->f_valuestack[f->f_stackdepth++] = exc_info->exc_traceback;
+                f->f_valuestack[f->f_stackdepth++] = exc_info->exc_value;
+                if (exc_info->exc_type) {
+                    f->f_valuestack[f->f_stackdepth++] =  exc_info->exc_type;
+                } else {
+                    Py_INCREF(Py_None);
+                    f->f_valuestack[f->f_stackdepth++] = Py_None;
+                }
+                _PyErr_Fetch(tstate, &exc, &val, &tb);
+                /* Make the raw exception data
+                   available to the handler,
+                   so a program can emulate the
+                   Python main loop. */
+                _PyErr_NormalizeException(tstate, &exc, &val, &tb);
+                if (tb) {
+                    PyException_SetTraceback(val, tb);
+                } else {
+                    PyException_SetTraceback(val, Py_None);
+                }
+                Py_INCREF(exc);
+                exc_info->exc_type = exc;
+                Py_INCREF(val);
+                exc_info->exc_value = val;
+                exc_info->exc_traceback = tb;
+                if (!tb) {
+                    tb = Py_None;
+                }
+                Py_INCREF(tb);
+                f->f_valuestack[f->f_stackdepth++] = tb;
+                f->f_valuestack[f->f_stackdepth++] = val;
+                f->f_valuestack[f->f_stackdepth++] = exc;
+                /* Resume normal execution */
+                f->f_state = FRAME_EXECUTING;
+                result = jit_callee(&symbol_addresses[0], f, handler);
+            }
         }
-        frame->f_state = FRAME_RAISED;
+
+        while (f->f_stackdepth) {
+            PyObject *v = f->f_valuestack[--f->f_stackdepth];
+            Py_XDECREF(v);
+        }
+        f->f_stackdepth = 0;
+        f->f_state = FRAME_RAISED;
         return nullptr;
     }
     tstate->cframe = prev_cframe;
-    tstate->frame = frame->f_back;
+    tstate->frame = f->f_back;
     return result;
 }
 

@@ -53,9 +53,8 @@ Translator::Translator(const DataLayout &dl) : data_layout{dl} {
     func->getArg(0)->setName(useName("$symbols"));
     frame_obj->setName(useName("$frame"));
     // TODO: 下面的，不知是否有必要
-    for (auto &arg : func->args()) {
-        arg.addAttr(Attribute::NoAlias);
-    }
+    func->getArg(0)->addAttr(Attribute::NoAlias);
+    func->getArg(1)->addAttr(Attribute::NoAlias);
 }
 
 void *Translator::operator()(Compiler &compiler, PyCodeObject *code) {
@@ -140,7 +139,8 @@ void *Translator::operator()(Compiler &compiler, PyCodeObject *code) {
     builder.CreateUnreachable();
 
     builder.SetInsertPoint(blocks[0].llvm_block);
-    builder.CreateBr(blocks[1].llvm_block);
+    builder.CreateIndirectBr(
+            builder.CreateInBoundsGEP(types.get<char>(), BlockAddress::get(blocks[1].llvm_block), func->getArg(2)));
 
     auto result = compiler(mod);
 
@@ -162,6 +162,7 @@ void Translator::parseCFG() {
         switch (instr.opcode) {
         case JUMP_FORWARD:
         case FOR_ITER:
+        case SETUP_FINALLY:
             block_num += is_boundary.set(instr.offset + instr.getOparg());
             break;
         case JUMP_ABSOLUTE:
@@ -950,15 +951,33 @@ void Translator::emitBlock(unsigned index) {
         case PRINT_EXPR:
             unimplemented();
 
-        case SETUP_FINALLY:
-            unimplemented();
-        case POP_BLOCK:
-            unimplemented();
+        case SETUP_FINALLY: {
+            auto &py_finally_block = findPyBlock(instr.offset + instr.oparg);
+            py_finally_block.initial_stack_height = stack_height;
+            auto block_addr_diff = builder.CreateSub(
+                    builder.CreatePtrToInt(BlockAddress::get(func, py_finally_block.llvm_block), types.get<int>()),
+                    builder.CreatePtrToInt(BlockAddress::get(func, blocks[1].llvm_block), types.get<int>())
+            );
+            do_CallSymbol<PyFrame_BlockSetup>(frame_obj,
+                    asValue<int>(SETUP_FINALLY),
+                    block_addr_diff,
+                    asValue<int>(stack_height));
+            break;
+        }
+        case POP_BLOCK: {
+            do_CallSymbol<PyFrame_BlockPop>(frame_obj);
+            break;
+        }
         case JUMP_IF_NOT_EXC_MATCH:
             unimplemented();
         case POP_EXCEPT:
             unimplemented();
-        case RERAISE:
+        case RERAISE: {
+            do_CallSymbol<handle_RERAISE, &Translator::attr_noreturn>(frame_obj, asValue<bool>(instr.oparg));
+            builder.CreateUnreachable();
+            fall_through = false;
+            break;
+        }
         case SETUP_WITH:
             unimplemented();
         case WITH_EXCEPT_START:

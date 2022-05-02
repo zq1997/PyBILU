@@ -47,10 +47,12 @@ class A:
 
 @pynic.apply
 def test(d):
-    def f(d):
-        print('ok', d)
-    f(d)
+    try:
+        del d
+        del d
+    finally:
+        print('finally')
     # return d.func(1, 2)
 
 
-print(test(A()))
+test(A())

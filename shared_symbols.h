@@ -4,6 +4,7 @@
 #include <csetjmp>
 
 #include <Python.h>
+#include <frameobject.h>
 
 #include <llvm/IR/Constants.h>
 #include <llvm/IR/Function.h>
@@ -97,6 +98,8 @@ PyObject *handle_LIST_TO_TUPLE(PyObject *list);
 PyObject *handle_FORMAT_VALUE(PyObject *value, PyObject *fmt_spec, int which_conversion);
 PyObject *handle_BUILD_STRING(PyObject **arr, Py_ssize_t num);
 
+void handle_RERAISE(PyFrameObject *f, bool restore_lasti);
+
 bool castPyObjectToBool(PyObject *o);
 PyObject *handle_GET_ITER(PyObject *o);
 
@@ -180,6 +183,10 @@ constexpr std::tuple external_symbols{
         ENTRY(handle_FORMAT_VALUE),
         ENTRY(handle_BUILD_STRING),
 
+        ENTRY(PyFrame_BlockSetup),
+        ENTRY(PyFrame_BlockPop),
+        ENTRY(handle_RERAISE),
+
         ENTRY(castPyObjectToBool),
 
         ENTRY(handle_GET_ITER),
@@ -211,7 +218,7 @@ constexpr auto searchSymbol() {
 
 extern const std::array<const char *, external_symbol_count> symbol_names;
 extern const std::array<void *, external_symbol_count> symbol_addresses;
-using TranslatedFunctionType = PyObject *(void *const[], PyFrameObject *);
+using TranslatedFunctionType = PyObject *(void *const[], PyFrameObject *, int);
 
 template <typename T, typename = void>
 struct Normalizer;

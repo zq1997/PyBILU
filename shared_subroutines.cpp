@@ -84,7 +84,7 @@ void raiseException() {
     auto tstate = _PyThreadState_GET();
     auto frame = tstate->frame;
     auto code = frame->f_code;
-    auto instr_array = reinterpret_cast<PyInstr *>(&PyTuple_GET_ITEM(code->co_code, 0));
+    auto instr_array = reinterpret_cast<PyInstr *>(&PyBytes_AS_STRING(code->co_code));
     auto i = frame->f_lasti;
     auto opcode = _Py_OPCODE(instr_array[i]);
     auto oparg = _Py_OPARG(instr_array[i]);
@@ -93,7 +93,6 @@ void raiseException() {
         shift += EXTENDED_ARG_BITS;
         oparg |= _Py_OPARG(instr_array[i]) << shift;
     }
-    assert(opcode == LOAD_FAST);
     if (opcode == LOAD_FAST || opcode == DELETE_FAST) {
         auto name = PyTuple_GET_ITEM(code->co_varnames, oparg);
         raiseUndefinedLocal(tstate, name);
@@ -1275,6 +1274,24 @@ void handle_IMPORT_STAR(PyFrameObject *f, PyObject *from) {
     Py_DECREF(all);
     PyFrame_LocalsToFast(f, 0);
     gotoErrorHandler(err);
+}
+
+void handle_RERAISE(PyFrameObject *f, bool restore_lasti) {
+    assert(f->f_iblock > 0);
+    const auto &try_block = f->f_blockstack[f->f_iblock - 1];
+    if (restore_lasti) {
+        f->f_lasti = try_block.b_handler;
+    }
+    auto stack_height = try_block.b_level;
+    assert(f->f_stackdepth == stack_height + 3);
+    f->f_stackdepth -= 3;
+    PyObject *exc = f->f_valuestack[stack_height + 2];
+    PyObject *val = f->f_valuestack[stack_height + 1];
+    PyObject *tb = f->f_valuestack[stack_height + 0];
+    assert(PyExceptionClass_Check(exc));
+    auto tstate = _PyThreadState_GET();
+    _PyErr_Restore(tstate, exc, val, tb);
+    gotoErrorHandler();
 }
 
 const auto symbol_names{apply(
