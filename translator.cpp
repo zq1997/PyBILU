@@ -62,16 +62,16 @@ void *Translator::operator()(Compiler &compiler, PyCodeObject *code) {
     // TODO: 重复了
     parseCFG();
 
-    blocks[0].llvm_block = createBlock("$entry_block", func);
+    blocks[0].block = createBlock("$entry_block", func);
     auto start = blocks[0].end;
     for (auto &b : Range(block_num - 1, &blocks[1])) {
         b.initial_stack_height = -1;
-        b.llvm_block = createBlock(useName("$instr.", start), nullptr);
+        b.block = createBlock(useName("$instr.", start), nullptr);
         start = b.end;
     }
     blocks[1].initial_stack_height = 0;
 
-    builder.SetInsertPoint(blocks[0].llvm_block);
+    builder.SetInsertPoint(blocks[0].block);
 
     auto code_obj = readData(frame_obj, &PyFrameObject::f_code, useName("$code"));
 
@@ -138,9 +138,9 @@ void *Translator::operator()(Compiler &compiler, PyCodeObject *code) {
     do_CallSymbol<raiseException, &Translator::attr_noreturn>();
     builder.CreateUnreachable();
 
-    builder.SetInsertPoint(blocks[0].llvm_block);
+    builder.SetInsertPoint(blocks[0].block);
     builder.CreateIndirectBr(
-            builder.CreateInBoundsGEP(types.get<char>(), BlockAddress::get(blocks[1].llvm_block), func->getArg(2)));
+            builder.CreateInBoundsGEP(types.get<char>(), BlockAddress::get(blocks[1].block), func->getArg(2)));
 
     auto result = compiler(mod);
 
@@ -163,6 +163,8 @@ void Translator::parseCFG() {
         case JUMP_FORWARD:
         case FOR_ITER:
         case SETUP_FINALLY:
+        case SETUP_WITH:
+        case SETUP_ASYNC_WITH:
             block_num += is_boundary.set(instr.offset + instr.getOparg());
             break;
         case JUMP_ABSOLUTE:
@@ -170,6 +172,7 @@ void Translator::parseCFG() {
         case JUMP_IF_FALSE_OR_POP:
         case POP_JUMP_IF_TRUE:
         case POP_JUMP_IF_FALSE:
+        case JUMP_IF_NOT_EXC_MATCH:
             block_num += is_boundary.set(instr.getOparg());
             break;
         default:
@@ -244,6 +247,7 @@ void Translator::do_SETLOCAL(PyOparg oparg, llvm::Value *value) {
 }
 
 llvm::Value *Translator::do_POP() {
+    assert(stack_height > 0);
     return loadValue<PyObject *>(py_stack[--stack_height], tbaa_frame_slot);
 }
 
@@ -256,8 +260,8 @@ void Translator::do_PUSH(llvm::Value *value) {
 }
 
 void Translator::emitBlock(unsigned index) {
-    blocks[index].llvm_block->insertInto(func);
-    builder.SetInsertPoint(blocks[index].llvm_block);
+    blocks[index].block->insertInto(func);
+    builder.SetInsertPoint(blocks[index].block);
     bool fall_through = true;
     // TODO: 这种可能会有问题，会出现一个block没有被设置initial_stack_height但是被遍历，会assert失败
     stack_height = blocks[index].initial_stack_height;
@@ -764,14 +768,15 @@ void Translator::emitBlock(unsigned index) {
         case JUMP_FORWARD: {
             auto &jmp_block = findPyBlock(instr.offset + instr.oparg);
             jmp_block.initial_stack_height = stack_height;
-            builder.CreateBr(jmp_block.llvm_block);
+            builder.CreateBr(jmp_block.block);
+            fall_through = false;
             break;
         }
         case JUMP_ABSOLUTE: {
             // TODO: 如果有，则不要设置，要校验
             auto &jmp_block = findPyBlock(instr.oparg);
             jmp_block.initial_stack_height = stack_height;
-            builder.CreateBr(jmp_block.llvm_block);
+            builder.CreateBr(jmp_block.block);
             fall_through = false;
             break;
         }
@@ -810,7 +815,7 @@ void Translator::emitBlock(unsigned index) {
             do_Py_DECREF(iter);
             auto &break_block = findPyBlock(instr.offset + instr.oparg);
             break_block.initial_stack_height = stack_height - 1;
-            builder.CreateBr(break_block.llvm_block);
+            builder.CreateBr(break_block.block);
             builder.SetInsertPoint(b_continue);
             stack_height = sp;
             do_PUSH(next);
@@ -922,45 +927,71 @@ void Translator::emitBlock(unsigned index) {
             break;
         }
 
-        case UNPACK_SEQUENCE:
+        case UNPACK_SEQUENCE: {
             unimplemented();
-        case UNPACK_EX:
+            break;
+        }
+        case UNPACK_EX: {
             unimplemented();
+            break;
+        }
 
-        case GET_LEN:
+        case GET_LEN: {
             unimplemented();
-        case MATCH_MAPPING:
+            break;
+        }
+        case MATCH_MAPPING: {
             unimplemented();
-        case MATCH_SEQUENCE:
+            break;
+        }
+        case MATCH_SEQUENCE: {
             unimplemented();
-        case MATCH_KEYS:
+            break;
+        }
+        case MATCH_KEYS: {
             unimplemented();
-        case MATCH_CLASS:
+            break;
+        }
+        case MATCH_CLASS: {
             unimplemented();
-        case COPY_DICT_WITHOUT_KEYS:
+            break;
+        }
+        case COPY_DICT_WITHOUT_KEYS: {
             unimplemented();
+            break;
+        }
 
-        case BUILD_SLICE:
+        case BUILD_SLICE: {
             unimplemented();
-        case LOAD_ASSERTION_ERROR:
+            break;
+        }
+        case LOAD_ASSERTION_ERROR: {
             unimplemented();
-        case RAISE_VARARGS:
+            break;
+        }
+        case RAISE_VARARGS: {
             unimplemented();
-        case SETUP_ANNOTATIONS:
+            break;
+        }
+        case SETUP_ANNOTATIONS: {
             unimplemented();
-        case PRINT_EXPR:
+            break;
+        }
+        case PRINT_EXPR: {
             unimplemented();
+            break;
+        }
 
         case SETUP_FINALLY: {
             auto &py_finally_block = findPyBlock(instr.offset + instr.oparg);
-            py_finally_block.initial_stack_height = stack_height;
+            py_finally_block.initial_stack_height = stack_height + 6;
             auto block_addr_diff = builder.CreateSub(
-                    builder.CreatePtrToInt(BlockAddress::get(func, py_finally_block.llvm_block), types.get<int>()),
-                    builder.CreatePtrToInt(BlockAddress::get(func, blocks[1].llvm_block), types.get<int>())
+                    builder.CreatePtrToInt(BlockAddress::get(func, py_finally_block.block), types.get<uintptr_t>()),
+                    builder.CreatePtrToInt(BlockAddress::get(func, blocks[1].block), types.get<uintptr_t>())
             );
             do_CallSymbol<PyFrame_BlockSetup>(frame_obj,
                     asValue<int>(SETUP_FINALLY),
-                    block_addr_diff,
+                    builder.CreateIntCast(block_addr_diff, types.get<int>(), true),
                     asValue<int>(stack_height));
             break;
         }
@@ -968,49 +999,98 @@ void Translator::emitBlock(unsigned index) {
             do_CallSymbol<PyFrame_BlockPop>(frame_obj);
             break;
         }
-        case JUMP_IF_NOT_EXC_MATCH:
-            unimplemented();
-        case POP_EXCEPT:
-            unimplemented();
+        case POP_EXCEPT: {
+            do_CallSymbol<handle_POP_EXCEPT>(frame_obj);
+            break;
+        }
+        case JUMP_IF_NOT_EXC_MATCH: {
+            auto right = do_POP();
+            auto left = do_POP();
+            auto match = do_CallSymbol<handle_JUMP_IF_NOT_EXC_MATCH>(left, right);
+            do_Py_DECREF(left);
+            do_Py_DECREF(right);
+            auto &jump_target = findPyBlock(instr.oparg);
+            jump_target.initial_stack_height = stack_height;
+            auto fall_block = createBlock("");
+            builder.CreateCondBr(match, fall_block, jump_target.block);
+            builder.SetInsertPoint(fall_block);
+            break;
+        }
         case RERAISE: {
             do_CallSymbol<handle_RERAISE, &Translator::attr_noreturn>(frame_obj, asValue<bool>(instr.oparg));
             builder.CreateUnreachable();
             fall_through = false;
             break;
         }
-        case SETUP_WITH:
-            unimplemented();
-        case WITH_EXCEPT_START:
-            unimplemented();
+        case SETUP_WITH: {
+            auto &py_finally_block = findPyBlock(instr.offset + instr.oparg);
+            py_finally_block.initial_stack_height = stack_height - 1 + 7;
+            auto block_addr_diff = builder.CreateSub(
+                    builder.CreatePtrToInt(BlockAddress::get(func, py_finally_block.block), types.get<uintptr_t>()),
+                    builder.CreatePtrToInt(BlockAddress::get(func, blocks[1].block), types.get<uintptr_t>())
+            );
+            do_CallSymbol<handle_SETUP_WITH>(frame_obj, py_stack[stack_height],
+                    builder.CreateIntCast(block_addr_diff, types.get<int>(), true));
+            stack_height += 1;
+            break;
+        }
+        case WITH_EXCEPT_START: {
+            auto exc = do_PEAK(1);
+            auto val = do_PEAK(2);
+            auto tb = do_PEAK(3);
+            auto exit_func = do_PEAK(7);
+            auto res = do_CallSymbol<handle_WITH_EXCEPT_START>(exc, val, tb, exit_func);
+            do_PUSH(res);
+            break;
+        }
 
-        case GEN_START:
+        case GEN_START: {
             unimplemented();
-        case YIELD_VALUE:
+            break;
+        }
+        case YIELD_VALUE: {
             unimplemented();
-        case GET_YIELD_FROM_ITER:
+            break;
+        }
+        case GET_YIELD_FROM_ITER: {
             unimplemented();
-        case YIELD_FROM:
+            break;
+        }
+        case YIELD_FROM: {
             unimplemented();
-        case GET_AWAITABLE:
+            break;
+        }
+        case GET_AWAITABLE: {
             unimplemented();
-        case GET_AITER:
+            break;
+        }
+        case GET_AITER: {
             unimplemented();
-        case GET_ANEXT:
+            break;
+        }
+        case GET_ANEXT: {
             unimplemented();
-        case END_ASYNC_FOR:
+            break;
+        }
+        case END_ASYNC_FOR: {
             unimplemented();
-        case SETUP_ASYNC_WITH:
+            break;
+        }
+        case SETUP_ASYNC_WITH: {
             unimplemented();
-        case BEFORE_ASYNC_WITH:
+            break;
+        }
+        case BEFORE_ASYNC_WITH: {
             unimplemented();
+            break;
+        }
         default:
             throw runtime_error("illegal opcode");
         }
-        // instr.fetch_next();
     }
     if (fall_through) {
         assert(index < block_num - 1);
-        builder.CreateBr(blocks[index + 1].llvm_block);
+        builder.CreateBr(blocks[index + 1].block);
         blocks[index + 1].initial_stack_height = stack_height;
     }
 }
@@ -1038,7 +1118,7 @@ llvm::Value *Translator::getSymbol(size_t offset) {
     auto &symbol = py_symbols[offset];
     if (!symbol) {
         auto block = builder.GetInsertBlock();
-        builder.SetInsertPoint(blocks[0].llvm_block);
+        builder.SetInsertPoint(blocks[0].block);
         const char *name = nullptr;
         if constexpr (debug_build) {
             name = symbol_names[offset];
@@ -1058,7 +1138,7 @@ void Translator::pyJumpIF(unsigned offset, bool pop_if_jump, bool jump_cond) {
     auto false_cmp_block = createBlock("");
     auto slow_cmp_block = createBlock("");
     auto fall_block = createBlock("");
-    auto jump_block = pop_if_jump ? createBlock("") : jump_target.llvm_block;
+    auto jump_block = pop_if_jump ? createBlock("") : jump_target.block;
     auto true_block = jump_cond ? jump_block : fall_block;
     auto false_block = jump_cond ? fall_block : jump_block;
 
@@ -1073,7 +1153,7 @@ void Translator::pyJumpIF(unsigned offset, bool pop_if_jump, bool jump_cond) {
     if (pop_if_jump) {
         builder.SetInsertPoint(jump_block);
         do_Py_DECREF(obj);
-        builder.CreateBr(jump_target.llvm_block);
+        builder.CreateBr(jump_target.block);
     }
     builder.SetInsertPoint(fall_block);
     do_Py_DECREF(obj);

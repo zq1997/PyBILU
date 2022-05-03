@@ -41,17 +41,20 @@ def bar(n):
 # stat('有优化', pynic.apply(bar), 111, lambda: [12345])
 
 class A:
-    def func(self, a, b):
-        print('调用方法', a, b)
+    def __enter__(self):
+        print('进入')
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        print("退出")
+        return True
 
 
 @pynic.apply
-def test(d):
-    try:
-        del d
-        del d
-    finally:
-        print('finally')
+def test(a):
+    with a as none:
+        print(none)
+        none.call()
+        # raise Exception('抛出')
     # return d.func(1, 2)
 
 

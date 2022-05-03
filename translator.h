@@ -49,7 +49,7 @@ auto useName(const T &arg, const Ts &... more) {
 
 struct PyBasicBlock {
     unsigned end;
-    llvm::BasicBlock *llvm_block;
+    llvm::BasicBlock *block;
     decltype(PyFrameObject::f_stackdepth) initial_stack_height;
 
     PyBasicBlock() = default;
@@ -203,10 +203,12 @@ class Translator {
     void do_PUSH(llvm::Value *value);
 
     auto do_PEAK(int i) {
+        assert(stack_height >= i);
         return loadValue<PyObject *>(py_stack[stack_height - i], tbaa_frame_cells);
     }
 
     auto do_SET_PEAK(int i, llvm::Value *value) {
+        assert(stack_height >= i);
         return storeValue<PyObject *>(value, py_stack[stack_height - i], tbaa_frame_cells);
     }
 

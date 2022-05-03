@@ -98,7 +98,11 @@ PyObject *handle_LIST_TO_TUPLE(PyObject *list);
 PyObject *handle_FORMAT_VALUE(PyObject *value, PyObject *fmt_spec, int which_conversion);
 PyObject *handle_BUILD_STRING(PyObject **arr, Py_ssize_t num);
 
+void handle_POP_EXCEPT(PyFrameObject *f);
+bool handle_JUMP_IF_NOT_EXC_MATCH(PyObject *left, PyObject *right);
 void handle_RERAISE(PyFrameObject *f, bool restore_lasti);
+void handle_SETUP_WITH(PyFrameObject *f, PyObject **sp, int handler);
+PyObject *handle_WITH_EXCEPT_START(PyObject *exc, PyObject *val, PyObject *tb, PyObject *exit_func);
 
 bool castPyObjectToBool(PyObject *o);
 PyObject *handle_GET_ITER(PyObject *o);
@@ -185,7 +189,11 @@ constexpr std::tuple external_symbols{
 
         ENTRY(PyFrame_BlockSetup),
         ENTRY(PyFrame_BlockPop),
+        ENTRY(handle_POP_EXCEPT),
+        ENTRY(handle_JUMP_IF_NOT_EXC_MATCH),
         ENTRY(handle_RERAISE),
+        ENTRY(handle_SETUP_WITH),
+        ENTRY(handle_WITH_EXCEPT_START),
 
         ENTRY(castPyObjectToBool),
 

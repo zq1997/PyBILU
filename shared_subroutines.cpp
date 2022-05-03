@@ -1276,6 +1276,49 @@ void handle_IMPORT_STAR(PyFrameObject *f, PyObject *from) {
     gotoErrorHandler(err);
 }
 
+void handle_POP_EXCEPT(PyFrameObject *f) {
+    auto b = PyFrame_BlockPop(f);
+    auto tstate = _PyThreadState_GET();
+    if (b->b_type != EXCEPT_HANDLER) {
+        _PyErr_SetString(tstate, PyExc_SystemError, "popped block is not an except handler");
+        gotoErrorHandler(tstate);
+    }
+    assert(f->f_stackdepth >= (b)->b_level + 3 && f->f_stackdepth <= (b)->b_level + 4);
+    auto exc_info = tstate->exc_info;
+    auto type = exc_info->exc_type;
+    auto value = exc_info->exc_value;
+    auto traceback = exc_info->exc_traceback;
+    exc_info->exc_type = f->f_valuestack[--f->f_stackdepth];
+    exc_info->exc_value = f->f_valuestack[--f->f_stackdepth];
+    exc_info->exc_traceback = f->f_valuestack[--f->f_stackdepth];
+    Py_XDECREF(type);
+    Py_XDECREF(value);
+    Py_XDECREF(traceback);
+}
+
+bool handle_JUMP_IF_NOT_EXC_MATCH(PyObject *left, PyObject *right) {
+    static char CANNOT_CATCH_MSG[]{"catching classes that do not inherit from BaseException is not allowed"};
+    if (PyTuple_Check(right)) {
+        for (auto i = PyTuple_GET_SIZE(right); i--;) {
+            auto exc = PyTuple_GET_ITEM(right, i);
+            if (!PyExceptionClass_Check(exc)) {
+                auto tstate = _PyThreadState_GET();
+                _PyErr_SetString(tstate, PyExc_TypeError, CANNOT_CATCH_MSG);
+                gotoErrorHandler(tstate);
+            }
+        }
+    } else {
+        if (!PyExceptionClass_Check(right)) {
+            auto tstate = _PyThreadState_GET();
+            _PyErr_SetString(tstate, PyExc_TypeError, CANNOT_CATCH_MSG);
+            gotoErrorHandler(tstate);
+        }
+    }
+    auto res = PyErr_GivenExceptionMatches(left, right);
+    gotoErrorHandler(res < 0);
+    return res > 0;
+}
+
 void handle_RERAISE(PyFrameObject *f, bool restore_lasti) {
     assert(f->f_iblock > 0);
     const auto &try_block = f->f_blockstack[f->f_iblock - 1];
@@ -1285,6 +1328,7 @@ void handle_RERAISE(PyFrameObject *f, bool restore_lasti) {
     auto stack_height = try_block.b_level;
     assert(f->f_stackdepth == stack_height + 3);
     f->f_stackdepth -= 3;
+    // TODO: 直接传arr[3]进来如何
     PyObject *exc = f->f_valuestack[stack_height + 2];
     PyObject *val = f->f_valuestack[stack_height + 1];
     PyObject *tb = f->f_valuestack[stack_height + 0];
@@ -1292,6 +1336,46 @@ void handle_RERAISE(PyFrameObject *f, bool restore_lasti) {
     auto tstate = _PyThreadState_GET();
     _PyErr_Restore(tstate, exc, val, tb);
     gotoErrorHandler();
+}
+
+void handle_SETUP_WITH(PyFrameObject *f, PyObject **sp, int handler) {
+    static _Py_Identifier PyId___enter__{"__enter__", -1};
+    static _Py_Identifier PyId___exit__{"__exit__", -1};
+
+    auto mgr = *--sp;
+    auto enter = _PyObject_LookupSpecial(mgr, &PyId___enter__);
+    if (!enter) {
+        auto tstate = _PyThreadState_GET();
+        if (!_PyErr_Occurred(tstate)) {
+            _PyErr_SetObject(tstate, PyExc_AttributeError, _PyUnicode_FromId(&PyId___enter__));
+        }
+        gotoErrorHandler(tstate);
+    }
+
+    auto exit = _PyObject_LookupSpecial(mgr, &PyId___exit__);
+    if (!exit) {
+        auto tstate = _PyThreadState_GET();
+        if (!_PyErr_Occurred(tstate)) {
+            _PyErr_SetObject(tstate, PyExc_AttributeError, _PyUnicode_FromId(&PyId___exit__));
+        }
+        Py_DECREF(enter);
+        gotoErrorHandler(tstate);
+    }
+    *sp++ = exit;
+    Py_DECREF(mgr);
+    auto res = _PyObject_CallNoArg(enter);
+    Py_DECREF(enter);
+    gotoErrorHandler(!res);
+    *sp++ = res;
+    PyFrame_BlockSetup(f, SETUP_FINALLY, handler, sp - f->f_valuestack);
+}
+
+
+PyObject *handle_WITH_EXCEPT_START(PyObject *exc, PyObject *val, PyObject *tb, PyObject *exit_func) {
+    PyObject *stack[4] = {NULL, exc, val, tb};
+    auto res = PyObject_Vectorcall(exit_func, stack + 1, 3 | PY_VECTORCALL_ARGUMENTS_OFFSET, NULL);
+    gotoErrorHandler(!res);
+    return res;
 }
 
 const auto symbol_names{apply(
