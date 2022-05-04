@@ -1,6 +1,7 @@
 #include "shared_symbols.h"
 
 #include <Python.h>
+#undef HAVE_STD_ATOMIC
 #include <opcode.h>
 #include <frameobject.h>
 #include <internal/pycore_pystate.h>
@@ -11,6 +12,13 @@
 #include <iostream>
 
 using namespace std;
+
+#ifdef __has_cpp_attribute
+#if __has_cpp_attribute(likely) && __has_cpp_attribute(unlikely)
+#define LIKLEY [[likely]]
+#define UNLIKLEY [[unlikely]]
+#endif
+#endif
 
 static PyObject *const python_bool_values[]{Py_False, Py_True};
 static _Py_Identifier PyId___name__{"__name__", -1};
@@ -1372,17 +1380,17 @@ void handle_SETUP_WITH(PyFrameObject *f, PyObject **sp, int handler) {
 
 
 PyObject *handle_WITH_EXCEPT_START(PyObject *exc, PyObject *val, PyObject *tb, PyObject *exit_func) {
-    PyObject *stack[4] = {NULL, exc, val, tb};
-    auto res = PyObject_Vectorcall(exit_func, stack + 1, 3 | PY_VECTORCALL_ARGUMENTS_OFFSET, NULL);
+    PyObject *stack[4] = {nullptr, exc, val, tb};
+    auto res = PyObject_Vectorcall(exit_func, stack + 1, 3 | PY_VECTORCALL_ARGUMENTS_OFFSET, nullptr);
     gotoErrorHandler(!res);
     return res;
 }
 
-const auto symbol_names{apply(
+const array<const char *, external_symbol_count> symbol_names{apply(
         [](auto &&... x) noexcept { return array{x.second ...}; },
         external_symbols
 )};
-const auto symbol_addresses{apply(
+const array<void *, external_symbol_count> symbol_addresses{apply(
         [](auto &&... x) noexcept { return array{reinterpret_cast<void *>(x.first) ...}; },
         external_symbols
 )};

@@ -199,28 +199,30 @@ constexpr std::tuple external_symbols{
 
         ENTRY(handle_GET_ITER),
 
-        std::pair{&_Py_FalseStruct, "Py_False"},
-        std::pair{&_Py_TrueStruct, "Py_True"}
+        ENTRY(_Py_FalseStruct),
+        ENTRY(_Py_TrueStruct)
 };
 
 constexpr auto external_symbol_count = std::tuple_size_v<decltype(external_symbols)>;
 
-template <auto A, auto B>
-constexpr auto isSameTypeAndValue() {
-    if constexpr (std::is_same_v<decltype(A), decltype(B)>) {
-        return A == B;
-    } else {
-        return false;
-    }
-}
+template <auto &A, auto &B>
+struct IsSameSymbol {
+    static constexpr bool value = false;
+};
 
-template <auto V, size_t I = 0>
+template <auto &A>
+struct IsSameSymbol<A, A> {
+    static constexpr bool value = true;
+};
+
+template <auto &V, size_t I = 0>
 constexpr auto searchSymbol() {
-    static_assert(I < external_symbol_count, "invalid symbol");
-    if constexpr (isSameTypeAndValue<std::get<I>(external_symbols).first, V>()) {
-        return I;
-    } else {
-        return searchSymbol<V, I + 1>();
+    if constexpr (I < external_symbol_count) {
+        if constexpr (IsSameSymbol<*std::get<I>(external_symbols).first, V>::value) {
+            return I;
+        } else {
+            return searchSymbol<V, I + 1>();
+        }
     }
 }
 
