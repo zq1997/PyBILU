@@ -48,6 +48,7 @@ PyObject *eval_func(PyThreadState *tstate, PyFrameObject *f, int throwflag) {
         PyTraceBack_Here(f);
         assert(!tstate->c_tracefunc); // 暂时的
         f->f_state = FRAME_UNWINDING;
+        int handler = -1;
 
         while (f->f_iblock > 0) {
             /* Pop the current block. */
@@ -78,7 +79,7 @@ PyObject *eval_func(PyThreadState *tstate, PyFrameObject *f, int throwflag) {
             assert(b->b_type == SETUP_FINALLY);
             if (b->b_type == SETUP_FINALLY) {
                 PyObject *exc, *val, *tb;
-                int handler = b->b_handler;
+                handler = b->b_handler;
                 _PyErr_StackItem *exc_info = tstate->exc_info;
                 /* Beware, this invalidates all b->b_* fields */
                 PyFrame_BlockSetup(f, EXCEPT_HANDLER, f->f_lasti, f->f_stackdepth);
@@ -115,17 +116,20 @@ PyObject *eval_func(PyThreadState *tstate, PyFrameObject *f, int throwflag) {
                 f->f_valuestack[f->f_stackdepth++] = exc;
                 /* Resume normal execution */
                 f->f_state = FRAME_EXECUTING;
-                result = jit_callee(&symbol_addresses[0], f, handler);
+                break;
             }
         }
 
-        while (f->f_stackdepth) {
-            PyObject *v = f->f_valuestack[--f->f_stackdepth];
-            Py_XDECREF(v);
+        if (handler > 0) {
+            result = jit_callee(&symbol_addresses[0], f, handler);
+        } else {
+            while (f->f_stackdepth) {
+                PyObject *v = f->f_valuestack[--f->f_stackdepth];
+                Py_XDECREF(v);
+            }
+            f->f_state = FRAME_RAISED;
+            return nullptr;
         }
-        f->f_stackdepth = 0;
-        f->f_state = FRAME_RAISED;
-        return nullptr;
     }
     tstate->cframe = prev_cframe;
     tstate->frame = f->f_back;

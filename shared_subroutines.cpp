@@ -1330,16 +1330,13 @@ bool handle_JUMP_IF_NOT_EXC_MATCH(PyObject *left, PyObject *right) {
 void handle_RERAISE(PyFrameObject *f, bool restore_lasti) {
     assert(f->f_iblock > 0);
     const auto &try_block = f->f_blockstack[f->f_iblock - 1];
-    if (restore_lasti) {
-        f->f_lasti = try_block.b_handler;
-    }
+    f->f_lasti = restore_lasti ? try_block.b_handler : f->f_lasti;
     auto stack_height = try_block.b_level;
-    assert(f->f_stackdepth == stack_height + 3);
-    f->f_stackdepth -= 3;
+    assert(f->f_stackdepth == stack_height + 6);
     // TODO: 直接传arr[3]进来如何
-    PyObject *exc = f->f_valuestack[stack_height + 2];
-    PyObject *val = f->f_valuestack[stack_height + 1];
-    PyObject *tb = f->f_valuestack[stack_height + 0];
+    PyObject *exc = f->f_valuestack[--f->f_stackdepth];
+    PyObject *val = f->f_valuestack[--f->f_stackdepth];
+    PyObject *tb = f->f_valuestack[--f->f_stackdepth];
     assert(PyExceptionClass_Check(exc));
     auto tstate = _PyThreadState_GET();
     _PyErr_Restore(tstate, exc, val, tb);
@@ -1375,12 +1372,14 @@ void handle_SETUP_WITH(PyFrameObject *f, PyObject **sp, int handler) {
     Py_DECREF(enter);
     gotoErrorHandler(!res);
     *sp++ = res;
-    PyFrame_BlockSetup(f, SETUP_FINALLY, handler, sp - f->f_valuestack);
+    PyFrame_BlockSetup(f, SETUP_FINALLY, handler, sp - f->f_valuestack - 1); //  太黑暗了
 }
 
 
 PyObject *handle_WITH_EXCEPT_START(PyObject *exc, PyObject *val, PyObject *tb, PyObject *exit_func) {
     PyObject *stack[4] = {nullptr, exc, val, tb};
+    assert(!Py_IsNone(exc));
+    assert(!PyLong_Check(exc));
     auto res = PyObject_Vectorcall(exit_func, stack + 1, 3 | PY_VECTORCALL_ARGUMENTS_OFFSET, nullptr);
     gotoErrorHandler(!res);
     return res;

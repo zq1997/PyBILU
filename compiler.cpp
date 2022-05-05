@@ -110,6 +110,7 @@ void *Compiler::operator()(llvm::Module &mod) {
         if (sec.isText()) {
             assert(!code.data());
             code = check(sec.getContents());
+            assert(code.size());
         }
     }
 

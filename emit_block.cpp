@@ -738,6 +738,7 @@ void Translator::emitBlock(unsigned index) {
         case SETUP_FINALLY: {
             auto &py_finally_block = findPyBlock(instr.offset + instr.oparg);
             py_finally_block.initial_stack_height = stack_height + 6;
+            py_finally_block.is_handler = true;
             auto block_addr_diff = builder.CreateSub(
                     builder.CreatePtrToInt(BlockAddress::get(func, py_finally_block.block), types.get<uintptr_t>()),
                     builder.CreatePtrToInt(BlockAddress::get(func, blocks[1].block), types.get<uintptr_t>())
@@ -778,6 +779,7 @@ void Translator::emitBlock(unsigned index) {
         case SETUP_WITH: {
             auto &py_finally_block = findPyBlock(instr.offset + instr.oparg);
             py_finally_block.initial_stack_height = stack_height - 1 + 7;
+            py_finally_block.is_handler = true;
             auto block_addr_diff = builder.CreateSub(
                     builder.CreatePtrToInt(BlockAddress::get(func, py_finally_block.block), types.get<uintptr_t>()),
                     builder.CreatePtrToInt(BlockAddress::get(func, blocks[1].block), types.get<uintptr_t>())

@@ -51,6 +51,7 @@ struct PyBasicBlock {
     unsigned end;
     llvm::BasicBlock *block;
     decltype(PyFrameObject::f_stackdepth) initial_stack_height;
+    bool is_handler;
 
     PyBasicBlock() = default;
     PyBasicBlock(const PyBasicBlock &) = delete;

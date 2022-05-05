@@ -65,6 +65,7 @@ void *Translator::operator()(Compiler &compiler, PyCodeObject *code) {
     auto start = blocks[0].end;
     for (auto &b : Range(block_num - 1, &blocks[1])) {
         b.initial_stack_height = -1;
+        b.is_handler = false;
         b.block = createBlock(useName("$instr.", start), nullptr);
         start = b.end;
     }
@@ -138,8 +139,14 @@ void *Translator::operator()(Compiler &compiler, PyCodeObject *code) {
     builder.CreateUnreachable();
 
     builder.SetInsertPoint(blocks[0].block);
-    builder.CreateIndirectBr(
+    auto indirect_br = builder.CreateIndirectBr(
             builder.CreateInBoundsGEP(types.get<char>(), BlockAddress::get(blocks[1].block), func->getArg(2)));
+    blocks[1].is_handler = true;
+    for (auto &b : Range(block_num - 1, &blocks[1])) {
+        if (b.is_handler) {
+            indirect_br->addDestination(b.block);
+        }
+    }
 
     auto result = compiler(mod);
 
@@ -269,8 +276,7 @@ PyBasicBlock &Translator::findPyBlock(unsigned offset) {
             return blocks[mid + 1];
         }
     }
-    assert(false);
-    return blocks[0];
+    Py_UNREACHABLE();
 }
 
 llvm::Value *Translator::getSymbol(size_t offset) {
