@@ -73,8 +73,6 @@ class Translator {
     llvm::MDNode *tbaa_frame_slot{};
     llvm::MDNode *tbaa_frame_cells{};
     llvm::MDNode *tbaa_code_const{};
-    llvm::MDNode *tbaa_frame_status{};
-    llvm::MDNode *tbaa_symbols{};
     llvm::AttributeList attr_return{};
     llvm::AttributeList attr_noreturn{};
     llvm::AttributeList attr_inaccessible_or_arg{};

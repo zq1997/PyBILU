@@ -27,8 +27,6 @@ Translator::Translator(const DataLayout &dl) : data_layout{dl} {
     tbaa_frame_slot = createTBAANode(md_builder, tbaa_root, "frame slot");
     tbaa_frame_cells = createTBAANode(md_builder, tbaa_root, "frame cells");
     tbaa_code_const = createTBAANode(md_builder, tbaa_root, "code const", true);
-    tbaa_frame_status = createTBAANode(md_builder, tbaa_root, "stack pointer");
-    tbaa_symbols = createTBAANode(md_builder, tbaa_root, "symbols", true);
 
     auto attr_builder = AttrBuilder(context);
     attr_builder.addAttribute(Attribute::NoReturn);

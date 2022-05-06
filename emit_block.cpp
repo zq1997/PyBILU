@@ -27,9 +27,9 @@ void Translator::emitBlock(unsigned index) {
         instr.next();
         lasti = instr.offset - 1;
         // TODO：不如合并到cframe中去，一次性写入
-        storeValue<decltype(lasti)>(asValue(lasti), rt_lasti, tbaa_frame_status);
         // 注意stack_height记录于此，这就意味着在调用”风险函数“之前不允许DECREF，否则可能DEC两次
-        storeValue<decltype(stack_height)>(asValue(stack_height), rt_stack_height_pointer, tbaa_frame_status);
+        storeValue<decltype(lasti)>(asValue(lasti), rt_lasti, tbaa_frame_slot);
+        storeValue<decltype(stack_height)>(asValue(stack_height), rt_stack_height_pointer, tbaa_frame_slot);
 
         switch (instr.opcode) {
         case EXTENDED_ARG: {
@@ -411,7 +411,7 @@ void Translator::emitBlock(unsigned index) {
         case RETURN_VALUE: {
             auto retval = do_POP();
             // 或者INCREF，防止DECREF两次
-            storeValue<decltype(stack_height)>(asValue(stack_height), rt_stack_height_pointer, tbaa_frame_status);
+            do_Py_INCREF(retval);
             builder.CreateRet(retval);
             fall_through = false;
             break;

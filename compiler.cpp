@@ -15,7 +15,7 @@ inline void throwIf(const T &cond, const string &msg) {
 
 class {
 public:
-    const char *file_name{"/tmp/jit"};
+    const char *file_name{"jit"};
     bool output{true};
 
     inline void dump(const string &ext, const char *data, size_t size) const {

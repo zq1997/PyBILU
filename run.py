@@ -43,6 +43,7 @@ def bar(n):
 class A:
     def __enter__(self):
         print('进入')
+        return None
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         print("退出")
@@ -51,9 +52,9 @@ class A:
 
 @pynic.apply
 def test(a):
-    with a as none:
-        print(none)
-        none.call()
+    with a:
+        print(a)
+        a
         # raise Exception('抛出')
     # return d.func(1, 2)
 
