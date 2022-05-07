@@ -54,7 +54,7 @@ class A:
 def test(a):
     with a:
         print(a)
-        a
+        # a
         # raise Exception('抛出')
     # return d.func(1, 2)
 

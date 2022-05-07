@@ -21,15 +21,16 @@ static Py_ssize_t code_extra_index;
 
 PyObject *eval_func(PyThreadState *tstate, PyFrameObject *f, int throwflag) {
     // TODO: manually implement set/get extra
-    void *compiled_code;
-    if (_PyCode_GetExtra(reinterpret_cast<PyObject *>(f->f_code), code_extra_index, &compiled_code) == -1) {
+    Translator::TranslatedResult *compiled_result;
+    if (_PyCode_GetExtra(reinterpret_cast<PyObject *>(f->f_code),
+            code_extra_index,
+            reinterpret_cast<void **>(&compiled_result)) == -1) {
         return nullptr;
     }
-    if (!compiled_code) {
+    if (!compiled_result) {
         return _PyEval_EvalFrameDefault(tstate, f, throwflag);
     }
-    // Strictly speaking, converting void* to a function pointer is undefined behavior in C++
-    auto jit_callee = reinterpret_cast<TranslatedFunctionType *>(compiled_code);
+    auto jit_callee = compiled_result->binary_code;
     // TODO: support generator and throwflag
     assert(!throwflag);
 
@@ -40,15 +41,17 @@ PyObject *eval_func(PyThreadState *tstate, PyFrameObject *f, int throwflag) {
     tstate->cframe = &cframe;
     tstate->frame = f;
     PyObject *result;
-    if (!setjmp(cframe.frame_jmp_buf)) {
-        result = jit_callee(&symbol_addresses[0], f, 0);
+    if (!setjmp(cframe.frame_jmp_buf)) [[likely]] {
+        result = jit_callee(&symbol_addresses[0], f, ptrdiff_t{0});
+        f->f_stackdepth = compiled_result->sp_map[f->f_lasti];
         // TODO: 为啥return的时候不要清理stack
     } else {
+        f->f_stackdepth = compiled_result->sp_map[f->f_lasti];
         assert(_PyErr_Occurred(tstate));
         PyTraceBack_Here(f);
         assert(!tstate->c_tracefunc); // 暂时的
         f->f_state = FRAME_UNWINDING;
-        int handler = -1;
+        ptrdiff_t handler = -1;
 
         while (f->f_iblock > 0) {
             /* Pop the current block. */
@@ -86,7 +89,7 @@ PyObject *eval_func(PyThreadState *tstate, PyFrameObject *f, int throwflag) {
                 f->f_valuestack[f->f_stackdepth++] = exc_info->exc_traceback;
                 f->f_valuestack[f->f_stackdepth++] = exc_info->exc_value;
                 if (exc_info->exc_type) {
-                    f->f_valuestack[f->f_stackdepth++] =  exc_info->exc_type;
+                    f->f_valuestack[f->f_stackdepth++] = exc_info->exc_type;
                 } else {
                     Py_INCREF(Py_None);
                     f->f_valuestack[f->f_stackdepth++] = Py_None;
@@ -146,14 +149,14 @@ PyObject *apply(PyObject *, PyObject *maybe_func) {
         return nullptr;
     }
     auto func = reinterpret_cast<PyFunctionObject *>(maybe_func);
-    void *compiled_func;
+    Translator::TranslatedResult *result;
     try {
-        compiled_func = (*translator)(*compiler, reinterpret_cast<PyCodeObject *>(func->func_code));
+        result = translator->translate(*compiler, reinterpret_cast<PyCodeObject *>(func->func_code));
     } catch (runtime_error &err) {
         PyErr_SetString(PyExc_RuntimeError, err.what());
         return nullptr;
     }
-    _PyCode_SetExtra(func->func_code, code_extra_index, compiled_func);
+    _PyCode_SetExtra(func->func_code, code_extra_index, result);
     return Py_NewRef(func);
 }
 

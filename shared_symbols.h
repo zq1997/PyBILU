@@ -113,6 +113,7 @@ constexpr std::tuple external_symbols{
         ENTRY(handle_INCREF),
         ENTRY(handle_DECREF),
         ENTRY(handle_XDECREF),
+        ENTRY(_Py_Dealloc),
         ENTRY(raiseException),
         ENTRY(handle_LOAD_CLASSDEREF),
         ENTRY(handle_LOAD_GLOBAL),
@@ -228,7 +229,7 @@ constexpr auto searchSymbol() {
 
 extern const std::array<const char *, external_symbol_count> symbol_names;
 extern const std::array<void *, external_symbol_count> symbol_addresses;
-using TranslatedFunctionType = PyObject *(void *const[], PyFrameObject *, int);
+using TranslatedFunctionType = PyObject *(void *const[], PyFrameObject *, ptrdiff_t);
 
 template <typename T, typename = void>
 struct Normalizer;

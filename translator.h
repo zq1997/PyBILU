@@ -67,7 +67,7 @@ class Translator {
             types.get<TranslatedFunctionType>(),
             llvm::Function::ExternalLinkage, "singleton_function", &mod
     )};
-    llvm::Argument *frame_obj{func->getArg(1)};
+    llvm::Argument *frame_obj{};
     llvm::MDNode *likely_true{};
     llvm::MDNode *tbaa_refcnt{};
     llvm::MDNode *tbaa_frame_slot{};
@@ -82,18 +82,14 @@ class Translator {
     decltype(PyFrameObject::f_lasti) lasti{};
     decltype(PyFrameObject::f_stackdepth) stack_height{};
     unsigned block_num{};
+    DynamicArray<decltype(PyFrameObject::f_stackdepth)> vpc_to_stack_depth;
     DynamicArray<PyBasicBlock> blocks;
     llvm::BasicBlock *error_block{};
-    DynamicArray<llvm::Value *> py_names;
-    DynamicArray<llvm::Value *> py_consts;
-    DynamicArray<llvm::Value *> py_locals;
-    DynamicArray<llvm::Value *> py_freevars;
-    DynamicArray<llvm::Value *> py_stack;
-    llvm::Value *py_symbols[external_symbol_count]{};
+    llvm::Value *code_names;
+    llvm::Value *code_consts;
 
     llvm::Constant *c_null{llvm::ConstantPointerNull::get(types.get<void *>())};
     llvm::Value *rt_lasti{};
-    llvm::Value *rt_stack_height_pointer{};
 
 
     template <typename T>
@@ -113,7 +109,7 @@ class Translator {
     }
 
     auto createBlock(const char *extra) {
-        return llvm::BasicBlock::Create(context, useName("$instr.", lasti, ".", extra), func);
+        return llvm::BasicBlock::Create(context, useName("instr.", lasti, ".", extra), func);
     }
 
     template <typename T>
@@ -200,16 +196,11 @@ class Translator {
     void do_SETLOCAL(PyOparg oparg, llvm::Value *value);
     llvm::Value *do_POP();
     void do_PUSH(llvm::Value *value);
-
-    auto do_PEAK(int i) {
-        assert(stack_height >= i);
-        return loadValue<PyObject *>(py_stack[stack_height - i], tbaa_frame_cells);
-    }
-
-    auto do_SET_PEAK(int i, llvm::Value *value) {
-        assert(stack_height >= i);
-        return storeValue<PyObject *>(value, py_stack[stack_height - i], tbaa_frame_cells);
-    }
+    llvm::Value *getStackSlot(int i);
+    llvm::Value *do_PEAK(int i);
+    void do_SET_PEAK(int i, llvm::Value *value);
+    llvm::Value *getName(int i);
+    llvm::Value *getFreevar(int i);
 
     void do_Py_INCREF(llvm::Value *v);
     void do_Py_DECREF(llvm::Value *v);
@@ -273,7 +264,11 @@ class Translator {
 public:
     explicit Translator(const llvm::DataLayout &dl);
 
-    void *operator()(Compiler &compiler, PyCodeObject *code);
+    struct TranslatedResult {
+        TranslatedFunctionType *binary_code;
+        int *sp_map;
+    };
+    TranslatedResult *translate(Compiler &compiler, PyCodeObject *code);
 };
 
 class QuickPyInstrIter {

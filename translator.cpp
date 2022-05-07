@@ -47,85 +47,38 @@ Translator::Translator(const DataLayout &dl) : data_layout{dl} {
             .addAttribute(Attribute::NoUnwind)
             .addAttribute("tune-cpu", sys::getHostCPUName());
     func->setAttributes(AttributeList::get(context, AttributeList::FunctionIndex, attr_builder));
-    func->getArg(0)->setName(useName("$symbols"));
-    frame_obj->setName(useName("$frame"));
+    func->getArg(0)->setName(useName("symbols"));
+    (frame_obj = func->getArg(1))->setName(useName("frame"));
     // TODO: 下面的，不知是否有必要
     func->getArg(0)->addAttr(Attribute::NoAlias);
     func->getArg(1)->addAttr(Attribute::NoAlias);
 }
 
-void *Translator::operator()(Compiler &compiler, PyCodeObject *code) {
+Translator::TranslatedResult *Translator::translate(Compiler &compiler, PyCodeObject *code) {
     py_code = code;
     // TODO: 重复了
     parseCFG();
 
-    blocks[0].block = createBlock("$entry_block", func);
+    blocks[0].block = createBlock("entry_block", func);
     auto start = blocks[0].end;
     for (auto &b : Range(block_num - 1, &blocks[1])) {
         b.initial_stack_height = -1;
         b.is_handler = false;
-        b.block = createBlock(useName("$instr.", start), nullptr);
+        b.block = createBlock(useName("instr.", start), nullptr);
         start = b.end;
     }
     blocks[1].initial_stack_height = 0;
 
     builder.SetInsertPoint(blocks[0].block);
 
-    auto code_obj = readData(frame_obj, &PyFrameObject::f_code, useName("$code"));
-
-    auto names_tuple = loadFieldValue(code_obj, &PyCodeObject::co_names, tbaa_code_const);
-    auto names_array = getPointer(names_tuple, &PyTupleObject::ob_item, "$names");
-    py_names.reserve(PyTuple_GET_SIZE(code->co_names));
-    for (auto i : Range(PyTuple_GET_SIZE(code->co_names))) {
-        PyObject *repr{};
-        if constexpr(debug_build) {
-            repr = PyTuple_GET_ITEM(code->co_names, i);
-        }
-        py_names[i] = loadElementValue<PyObject *>(names_array, i, tbaa_code_const, useName(repr));
-    }
-
+    auto code_obj = readData(frame_obj, &PyFrameObject::f_code, useName("code"));
+    auto names_tuple = loadFieldValue(code_obj, &PyCodeObject::co_names, tbaa_frame_slot);
+    code_names = getPointer(names_tuple, &PyTupleObject::ob_item, "names");
     auto consts_tuple = loadFieldValue(code_obj, &PyCodeObject::co_consts, tbaa_code_const);
-    auto consts_array = getPointer(consts_tuple, &PyTupleObject::ob_item, "$consts");
-    py_consts.reserve(PyTuple_GET_SIZE(code->co_consts));
-    for (auto i : Range(PyTuple_GET_SIZE(code->co_consts))) {
-        PyObject *repr{};
-        if constexpr(debug_build) {
-            repr = PyObject_Repr(PyTuple_GET_ITEM(code->co_consts, i));
-        }
-        py_consts[i] = loadElementValue<PyObject *>(consts_array, i, tbaa_code_const, useName(repr));
-    }
+    code_consts = getPointer(consts_tuple, &PyTupleObject::ob_item, "consts");
+    rt_lasti = getPointer(frame_obj, &PyFrameObject::f_lasti, "lasti");
 
-    auto localsplus = getPointer(frame_obj, &PyFrameObject::f_localsplus, useName("$localsplus"));
-    auto nlocals = code->co_nlocals;
-    auto start_cells = nlocals;
-    auto ncells = PyTuple_GET_SIZE(code->co_cellvars);
-    auto start_frees = start_cells + ncells;
-    auto nfrees = PyTuple_GET_SIZE(code->co_freevars);
-    auto start_stack = start_frees + nfrees;
-    auto nstack = code->co_stacksize;
-    py_locals.reserve(nlocals);
-    for (auto i : Range(nlocals)) {
-        auto name = PyTuple_GET_ITEM(code->co_varnames, i);
-        py_locals[i] = getPointer<PyObject *>(localsplus, i, useName("$local.", name));
-    }
-    py_freevars.reserve(ncells + nfrees);
-    for (auto i : Range(ncells)) {
-        auto name = PyTuple_GET_ITEM(code->co_cellvars, i);
-        // TODO: 直接read出来，反正tbaa是const
-        py_freevars[i] = getPointer<PyObject *>(localsplus, start_cells + i, useName("$cell.", name));
-    }
-    for (auto i : Range(nfrees)) {
-        auto name = PyTuple_GET_ITEM(code->co_freevars, i);
-        py_freevars[ncells + i] = getPointer<PyObject *>(localsplus, start_frees + i, useName("$free.", name));
-    }
-    py_stack.reserve(nstack);
-    for (auto i : Range(nstack)) {
-        py_stack[i] = getPointer<PyObject *>(localsplus, start_stack + i, useName("$stack.", i));
-    }
-    rt_stack_height_pointer = getPointer(frame_obj, &PyFrameObject::f_stackdepth, "$stack_height");
-    rt_lasti = getPointer(frame_obj, &PyFrameObject::f_lasti, "$lasti");
-
-    error_block = createBlock("$error_here", nullptr);
+    error_block = createBlock("error_here", nullptr);
 
     for (auto &i : Range(block_num - 1, 1U)) {
         emitBlock(i);
@@ -146,20 +99,20 @@ void *Translator::operator()(Compiler &compiler, PyCodeObject *code) {
         }
     }
 
-    auto result = compiler(mod);
+    auto result = compiler.compile(mod);
 
     // TODO: 可能需要考虑mod.dropAllReferences();不复用函数了，改成复用module，甚至都不复用
     func->dropAllReferences();
 
-    return result;
+    return new TranslatedResult{reinterpret_cast<TranslatedFunctionType *>(result), &vpc_to_stack_depth[0]};
 }
 
 void Translator::parseCFG() {
     py_instructions = reinterpret_cast<PyInstr *>(PyBytes_AS_STRING(py_code->co_code));
     auto size = PyBytes_GET_SIZE(py_code->co_code) / sizeof(PyInstr);
+    vpc_to_stack_depth.reserve(size);
 
     BitArray is_boundary(size + 1);
-    DynamicArray<int> instr_stack_height(size);
     block_num = 0;
 
     for (QuickPyInstrIter instr(py_instructions, 0, size); instr.next();) {
@@ -203,29 +156,30 @@ void Translator::parseCFG() {
 
 
 void Translator::do_Py_INCREF(Value *py_obj) {
-    do_CallSymbol<handle_INCREF, &Translator::attr_return>(py_obj);
-    // auto ref = getPointer(py_obj, &PyObject::ob_refcnt);
-    // auto old_value = loadValue<decltype(PyObject::ob_refcnt)>(ref, tbaa_refcnt);
-    // auto *delta_1 = asValue(decltype(PyObject::ob_refcnt){1});
-    // auto new_value = builder.CreateAdd(old_value, delta_1);
-    // storeValue<decltype(PyObject::ob_refcnt)>(new_value, ref, tbaa_refcnt);
+    // do_CallSymbol<handle_INCREF, &Translator::attr_return>(py_obj);
+    auto ref = getPointer(py_obj, &PyObject::ob_refcnt);
+    auto old_value = loadValue<decltype(PyObject::ob_refcnt)>(ref, tbaa_refcnt);
+    auto *delta_1 = asValue(decltype(PyObject::ob_refcnt){1});
+    auto new_value = builder.CreateAdd(old_value, delta_1);
+    builder.CreateAssumption(builder.CreateICmpSGT(new_value, delta_1)); // 需要么
+    storeValue<decltype(PyObject::ob_refcnt)>(new_value, ref, tbaa_refcnt);
 }
 
 void Translator::do_Py_DECREF(Value *py_obj) {
-    do_CallSymbol<handle_DECREF, &Translator::attr_return>(py_obj);
-    // auto ref = getPointer(py_obj, &PyObject::ob_refcnt);
-    // auto old_value = loadValue<decltype(PyObject::ob_refcnt)>(ref, tbaa_refcnt);
-    // auto *delta_1 = asValue(decltype(PyObject::ob_refcnt){1});
-    // auto *zero = asValue(decltype(PyObject::ob_refcnt){0});
-    // auto new_value = builder.CreateSub(old_value, delta_1);
-    // storeValue<decltype(PyObject::ob_refcnt)>(new_value, ref, tbaa_refcnt);
-    // auto b_dealloc = createBlock("dealloc");
-    // auto b_end = createBlock("dealloc.end");
-    // builder.CreateCondBr(builder.CreateICmpEQ(new_value, zero), b_dealloc, b_end);
-    // builder.SetInsertPoint(b_dealloc);
-    // do_CallSymbol<deallocObject>(py_obj);
-    // builder.CreateBr(b_end);
-    // builder.SetInsertPoint(b_end);
+    // do_CallSymbol<handle_DECREF, &Translator::attr_return>(py_obj);
+    auto ref = getPointer(py_obj, &PyObject::ob_refcnt);
+    auto old_value = loadValue<decltype(PyObject::ob_refcnt)>(ref, tbaa_refcnt);
+    auto *delta_1 = asValue(decltype(PyObject::ob_refcnt){1});
+    auto *zero = asValue(decltype(PyObject::ob_refcnt){0});
+    auto new_value = builder.CreateSub(old_value, delta_1);
+    storeValue<decltype(PyObject::ob_refcnt)>(new_value, ref, tbaa_refcnt);
+    auto b_dealloc = createBlock("dealloc");
+    auto b_end = createBlock("dealloc.end");
+    builder.CreateCondBr(builder.CreateICmpEQ(new_value, zero), b_dealloc, b_end, likely_true);
+    builder.SetInsertPoint(b_dealloc);
+    do_CallSymbol<_Py_Dealloc>(py_obj);
+    builder.CreateBr(b_end);
+    builder.SetInsertPoint(b_end);
 }
 
 void Translator::do_Py_XDECREF(Value *py_obj) {
@@ -241,22 +195,77 @@ void Translator::do_Py_XDECREF(Value *py_obj) {
 
 Value *Translator::do_GETLOCAL(PyOparg oparg) {
     auto varname = PyTuple_GET_ITEM(py_code->co_varnames, oparg);
-    return loadValue<PyObject *>(py_locals[oparg], tbaa_frame_slot, useName(varname));
+    auto offset = offsetof(PyFrameObject, f_localsplus) + sizeof(PyObject *) * oparg;
+    auto slot = getPointer<char>(frame_obj, offset, useName("local.", varname, "."));
+    return loadValue<PyObject *>(slot, tbaa_frame_slot, useName(varname));
 }
 
 void Translator::do_SETLOCAL(PyOparg oparg, llvm::Value *value) {
-    auto old_value = do_GETLOCAL(oparg);
-    storeValue<PyObject *>(value, py_locals[oparg], tbaa_frame_slot);
+    auto varname = PyTuple_GET_ITEM(py_code->co_varnames, oparg);
+    auto offset = offsetof(PyFrameObject, f_localsplus) + sizeof(PyObject *) * oparg;
+    auto slot = getPointer<char>(frame_obj, offset, useName("local.", varname, "."));
+    auto old_value = loadValue<PyObject *>(slot, tbaa_frame_slot, useName(varname, ".old", "."));
+    storeValue<PyObject *>(value, slot, tbaa_frame_slot);
     do_Py_XDECREF(old_value);
 }
 
+Value *Translator::getStackSlot(int i) {
+    assert(stack_height >= i);
+    auto offset = offsetof(PyFrameObject, f_localsplus) + sizeof(PyObject *) * (stack_height - i +
+            py_code->co_nlocals +
+            PyTuple_GET_SIZE(py_code->co_cellvars) +
+            PyTuple_GET_SIZE(py_code->co_freevars)
+    );
+    return getPointer<char>(frame_obj, offset, useName("stack.", i, "."));
+}
+
+Value *Translator::do_PEAK(int i) {
+    return loadValue<PyObject *>(getStackSlot(i), tbaa_frame_cells);
+}
+
+void Translator::do_SET_PEAK(int i, llvm::Value *value) {
+    storeValue<PyObject *>(value, getStackSlot(i), tbaa_frame_cells);
+}
+
 llvm::Value *Translator::do_POP() {
-    assert(stack_height > 0);
-    return loadValue<PyObject *>(py_stack[--stack_height], tbaa_frame_slot);
+    --stack_height;
+    return do_PEAK(0);
 }
 
 void Translator::do_PUSH(llvm::Value *value) {
-    storeValue<PyObject *>(value, py_stack[stack_height++], tbaa_frame_slot);
+    do_SET_PEAK(0, value);
+    stack_height++;
+}
+
+Value *Translator::getName(int i) {
+    PyObject *repr{};
+    if constexpr(debug_build) {
+        repr = PyTuple_GET_ITEM(py_code->co_names, i);
+    }
+    return loadElementValue<PyObject *>(code_names, i, tbaa_code_const, useName(repr, "$"));
+}
+
+Value *Translator::getFreevar(int i) {
+    auto offset = offsetof(PyFrameObject, f_localsplus) + sizeof(PyObject *) * (py_code->co_nlocals + i);
+    PyObject *name{};
+    if constexpr(debug_build) {
+        if (i < PyTuple_GET_SIZE(py_code->co_cellvars)) {
+            name = PyTuple_GET_ITEM(py_code->co_cellvars, i);
+        } else {
+            name = PyTuple_GET_ITEM(py_code->co_freevars, i - PyTuple_GET_SIZE(py_code->co_cellvars));
+        }
+    }
+    auto slot = getPointer<char>(frame_obj, offset, useName("free.", name, "."));
+    return loadValue<PyObject *>(slot, tbaa_frame_slot, useName(name));
+}
+
+llvm::Value *Translator::getSymbol(size_t offset) {
+    const char *name = nullptr;
+    if constexpr (debug_build) {
+        name = symbol_names[offset];
+    }
+    auto ptr = getPointer<void *>(func->getArg(0), offset, useName("sym.", offset, "."));
+    return loadValue<void *>(ptr, tbaa_code_const, useName("sym.", name, "."));
 }
 
 PyBasicBlock &Translator::findPyBlock(unsigned offset) {
@@ -275,24 +284,6 @@ PyBasicBlock &Translator::findPyBlock(unsigned offset) {
         }
     }
     Py_UNREACHABLE();
-}
-
-llvm::Value *Translator::getSymbol(size_t offset) {
-    auto &symbol = py_symbols[offset];
-    if (!symbol) {
-        auto block = builder.GetInsertBlock();
-        builder.SetInsertPoint(blocks[0].block);
-        const char *name = nullptr;
-        if constexpr (debug_build) {
-            name = symbol_names[offset];
-        }
-        // TODO: 重命名或者两个tbaa
-        // TODO: 合并为READ
-        auto ptr = getPointer<void *>(func->getArg(0), offset, useName("$symbol.", offset));
-        symbol = loadValue<void *>(ptr, tbaa_code_const, useName("$symbol.", name));
-        builder.SetInsertPoint(block);
-    }
-    return symbol;
 }
 
 void Translator::pyJumpIF(unsigned offset, bool pop_if_jump, bool jump_cond) {

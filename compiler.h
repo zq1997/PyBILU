@@ -29,7 +29,7 @@ class Compiler {
 public:
     Compiler();
 
-    void *operator()(llvm::Module &mod);
+    void *compile(llvm::Module &mod);
 
     decltype(auto) createDataLayout() { return machine->createDataLayout(); }
 };

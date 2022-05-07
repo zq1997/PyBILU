@@ -92,7 +92,7 @@ Compiler::Compiler() {
             "add emit pass error");
 }
 
-void *Compiler::operator()(llvm::Module &mod) {
+void *Compiler::compile(llvm::Module &mod) {
     debug.dump(".ll", mod);
     assert(!verifyModule(mod, &errs()));
     opt_MPM.run(mod, opt_MAM);

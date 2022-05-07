@@ -29,7 +29,7 @@ void Translator::emitBlock(unsigned index) {
         // TODO：不如合并到cframe中去，一次性写入
         // 注意stack_height记录于此，这就意味着在调用”风险函数“之前不允许DECREF，否则可能DEC两次
         storeValue<decltype(lasti)>(asValue(lasti), rt_lasti, tbaa_frame_slot);
-        storeValue<decltype(stack_height)>(asValue(stack_height), rt_stack_height_pointer, tbaa_frame_slot);
+        vpc_to_stack_depth[lasti] = stack_height;
 
         switch (instr.opcode) {
         case EXTENDED_ARG: {
@@ -67,10 +67,10 @@ void Translator::emitBlock(unsigned index) {
             break;
         }
         case ROT_N: {
-            auto dest_start = py_stack[stack_height - 1];
-            auto src_start = py_stack[stack_height - 2];
+            auto dest_start = getStackSlot(1);
+            auto src_start = getStackSlot(2);
             auto top = loadValue<PyObject *>(dest_start, tbaa_frame_cells);
-            auto last_cell = py_stack[stack_height - instr.oparg];
+            auto last_cell = getStackSlot(instr.oparg);
             auto entry_block = builder.GetInsertBlock();
             auto loop_block = createBlock("ROT_N.loop");
             auto end_block = createBlock("ROT_N.end");
@@ -112,7 +112,17 @@ void Translator::emitBlock(unsigned index) {
         }
         case LOAD_CONST: {
             // TODO: 添加non null属性
-            auto value = py_consts[instr.oparg];
+            PyObject *repr{};
+            if constexpr(debug_build) {
+                repr = PyObject_Repr(PyTuple_GET_ITEM(py_code->co_consts, instr.oparg));
+                if (!repr) {
+                    throw std::runtime_error("cannot get const object repr");
+                }
+            }
+            auto value = loadElementValue<PyObject *>(code_consts, instr.oparg, tbaa_code_const, useName(repr));
+            if constexpr(debug_build) {
+                Py_DECREF(repr);
+            }
             do_Py_INCREF(value);
             do_PUSH(value);
             break;
@@ -136,12 +146,11 @@ void Translator::emitBlock(unsigned index) {
             auto ok_block = createBlock("DELETE_FAST.OK");
             builder.CreateCondBr(builder.CreateICmpNE(value, c_null), ok_block, error_block, likely_true);
             builder.SetInsertPoint(ok_block);
-            storeValue<PyObject *>(c_null, py_locals[instr.oparg], tbaa_frame_slot);
-            do_Py_DECREF(value);
+            do_SETLOCAL(instr.oparg, c_null); // 可优化
             break;
         }
         case LOAD_DEREF: {
-            auto cell = loadValue<PyObject *>(py_freevars[instr.oparg], tbaa_code_const);
+            auto cell = loadValue<PyObject *>(getFreevar(instr.oparg), tbaa_code_const);
             auto value = loadFieldValue(cell, &PyCellObject::ob_ref, tbaa_frame_cells);
             auto ok_block = createBlock("LOAD_DEREF.OK");
             builder.CreateCondBr(builder.CreateICmpNE(value, c_null), ok_block, error_block, likely_true);
@@ -156,7 +165,7 @@ void Translator::emitBlock(unsigned index) {
             break;
         }
         case STORE_DEREF: {
-            auto cell = loadValue<PyObject *>(py_freevars[instr.oparg], tbaa_code_const);
+            auto cell = loadValue<PyObject *>(getFreevar(instr.oparg), tbaa_code_const);
             auto cell_slot = getPointer(cell, &PyCellObject::ob_ref);
             auto old_value = loadValue<PyObject *>(cell_slot, tbaa_frame_cells);
             auto value = do_POP();
@@ -165,7 +174,7 @@ void Translator::emitBlock(unsigned index) {
             break;
         }
         case DELETE_DEREF: {
-            auto cell = loadValue<PyObject *>(py_freevars[instr.oparg], tbaa_code_const);
+            auto cell = loadValue<PyObject *>(getFreevar(instr.oparg), tbaa_code_const);
             auto cell_slot = getPointer(cell, &PyCellObject::ob_ref);
             auto old_value = loadValue<PyObject *>(cell_slot, tbaa_frame_cells);
             auto ok_block = createBlock("DELETE_DEREF.OK");
@@ -176,59 +185,59 @@ void Translator::emitBlock(unsigned index) {
             break;
         }
         case LOAD_GLOBAL: {
-            auto value = do_CallSymbol<handle_LOAD_GLOBAL>(frame_obj, py_names[instr.oparg]);
+            auto value = do_CallSymbol<handle_LOAD_GLOBAL>(frame_obj, getName(instr.oparg));
             do_PUSH(value);
             break;
         }
         case STORE_GLOBAL: {
             auto value = do_POP();
-            do_CallSymbol<handle_STORE_GLOBAL>(frame_obj, py_names[instr.oparg], value);
+            do_CallSymbol<handle_STORE_GLOBAL>(frame_obj, getName(instr.oparg), value);
             do_Py_DECREF(value);
             break;
         }
         case DELETE_GLOBAL: {
-            do_CallSymbol<handle_DELETE_GLOBAL>(frame_obj, py_names[instr.oparg]);
+            do_CallSymbol<handle_DELETE_GLOBAL>(frame_obj, getName(instr.oparg));
             break;
         }
         case LOAD_NAME: {
-            auto value = do_CallSymbol<handle_LOAD_NAME>(frame_obj, py_names[instr.oparg]);
+            auto value = do_CallSymbol<handle_LOAD_NAME>(frame_obj, getName(instr.oparg));
             do_PUSH(value);
             break;
         }
         case STORE_NAME: {
             auto value = do_POP();
-            do_CallSymbol<handle_STORE_NAME>(frame_obj, py_names[instr.oparg], value);
+            do_CallSymbol<handle_STORE_NAME>(frame_obj, getName(instr.oparg), value);
             do_Py_DECREF(value);
             break;
         }
         case DELETE_NAME: {
-            do_CallSymbol<handle_DELETE_NAME>(frame_obj, py_names[instr.oparg]);
+            do_CallSymbol<handle_DELETE_NAME>(frame_obj, getName(instr.oparg));
             break;
         }
         case LOAD_ATTR: {
             auto owner = do_POP();
-            auto attr = do_CallSymbol<handle_LOAD_ATTR>(owner, py_names[instr.oparg]);
+            auto attr = do_CallSymbol<handle_LOAD_ATTR>(owner, getName(instr.oparg));
             do_PUSH(attr);
             do_Py_DECREF(owner);
             break;
         }
         case LOAD_METHOD: {
             auto obj = do_POP();
-            do_CallSymbol<handle_LOAD_METHOD>(obj, py_names[instr.oparg], py_stack[stack_height]);
+            do_CallSymbol<handle_LOAD_METHOD>(obj, getName(instr.oparg), getStackSlot(0));
             stack_height += 2;
             break;
         }
         case STORE_ATTR: {
             auto owner = do_POP();
             auto value = do_POP();
-            do_CallSymbol<handle_STORE_ATTR>(owner, py_names[instr.oparg], value);
+            do_CallSymbol<handle_STORE_ATTR>(owner, getName(instr.oparg), value);
             do_Py_DECREF(value);
             do_Py_DECREF(owner);
             break;
         }
         case DELETE_ATTR: {
             auto owner = do_POP();
-            do_CallSymbol<handle_STORE_ATTR>(owner, py_names[instr.oparg], c_null);
+            do_CallSymbol<handle_STORE_ATTR>(owner, getName(instr.oparg), c_null);
             do_Py_DECREF(owner);
             break;
         }
@@ -418,13 +427,15 @@ void Translator::emitBlock(unsigned index) {
         }
         case CALL_FUNCTION: {
             // func_args重命名
-            auto func_args = py_stack[stack_height -= instr.oparg + 1];
+            stack_height -= instr.oparg + 1;
+            auto func_args = getStackSlot(0);
             auto ret = do_CallSymbol<handle_CALL_FUNCTION>(func_args, asValue<Py_ssize_t>(instr.oparg));
             do_PUSH(ret);
             break;
         }
         case CALL_FUNCTION_KW: {
-            auto func_args = py_stack[stack_height -= instr.oparg + 2];
+            stack_height -= instr.oparg + 2;
+            auto func_args = getStackSlot(0);
             auto ret = do_CallSymbol<handle_CALL_FUNCTION_KW>(func_args, asValue<Py_ssize_t>(instr.oparg));
             do_PUSH(ret);
             break;
@@ -449,7 +460,7 @@ void Translator::emitBlock(unsigned index) {
             auto maybe_meth = do_PEAK(instr.oparg + 2);
             stack_height -= instr.oparg + 2;
             auto is_meth = builder.CreateICmpNE(maybe_meth, c_null);
-            auto func_args = builder.CreateSelect(is_meth, py_stack[stack_height], py_stack[stack_height + 1]);
+            auto func_args = builder.CreateSelect(is_meth, getStackSlot(0), getStackSlot(-1));
             auto nargs = builder.CreateSelect(is_meth,
                     asValue<Py_ssize_t>(instr.oparg + 1), asValue<Py_ssize_t>(instr.oparg));
             auto ret = do_CallSymbol<handle_CALL_FUNCTION>(func_args, nargs);
@@ -457,7 +468,7 @@ void Translator::emitBlock(unsigned index) {
             break;
         }
         case LOAD_CLOSURE: {
-            auto cell = loadValue<PyObject *>(py_freevars[instr.oparg], tbaa_code_const);
+            auto cell = loadValue<PyObject *>(getFreevar(instr.oparg), tbaa_code_const);
             do_Py_INCREF(cell);
             do_PUSH(cell);
             break;
@@ -496,7 +507,7 @@ void Translator::emitBlock(unsigned index) {
         }
 
         case IMPORT_NAME: {
-            auto name = py_names[instr.oparg];
+            auto name = getName(instr.oparg);
             auto fromlist = do_POP();
             auto level = do_POP();
             auto res = do_CallSymbol<handle_IMPORT_NAME>(frame_obj, name, fromlist, level);
@@ -507,7 +518,7 @@ void Translator::emitBlock(unsigned index) {
         }
         case IMPORT_FROM: {
             auto from = do_PEAK(1);
-            auto res = do_CallSymbol<handle_IMPORT_FROM>(from, py_names[instr.oparg]);
+            auto res = do_CallSymbol<handle_IMPORT_FROM>(from, getName(instr.oparg));
             do_PUSH(res);
             break;
         }
@@ -576,31 +587,36 @@ void Translator::emitBlock(unsigned index) {
         }
 
         case BUILD_TUPLE: {
-            auto values = py_stack[stack_height -= instr.oparg];
+            stack_height -= instr.oparg;
+            auto values = getStackSlot(0);
             auto map = do_CallSymbol<handle_BUILD_TUPLE>(values, asValue<Py_ssize_t>(instr.oparg));
             do_PUSH(map);
             break;
         }
         case BUILD_LIST: {
-            auto values = py_stack[stack_height -= instr.oparg];
+            stack_height -= instr.oparg;
+            auto values = getStackSlot(0);
             auto map = do_CallSymbol<handle_BUILD_LIST>(values, asValue<Py_ssize_t>(instr.oparg));
             do_PUSH(map);
             break;
         }
         case BUILD_SET: {
-            auto values = py_stack[stack_height -= instr.oparg];
+            stack_height -= instr.oparg;
+            auto values = getStackSlot(0);
             auto map = do_CallSymbol<handle_BUILD_SET>(values, asValue<Py_ssize_t>(instr.oparg));
             do_PUSH(map);
             break;
         }
         case BUILD_MAP: {
-            auto values = py_stack[stack_height -= 2 * instr.oparg];
+            stack_height -= 2 * instr.oparg;
+            auto values = getStackSlot(0);
             auto map = do_CallSymbol<handle_BUILD_MAP>(values, asValue<Py_ssize_t>(instr.oparg));
             do_PUSH(map);
             break;
         }
         case BUILD_CONST_KEY_MAP: {
-            auto values = py_stack[stack_height -= instr.oparg + 1];
+            stack_height -= instr.oparg + 1;
+            auto values = getStackSlot(0);
             auto map = do_CallSymbol<handle_BUILD_CONST_KEY_MAP>(values, asValue<Py_ssize_t>(instr.oparg));
             do_PUSH(map);
             break;
@@ -674,7 +690,8 @@ void Translator::emitBlock(unsigned index) {
             do_Py_DECREF(value);
         }
         case BUILD_STRING: {
-            auto values = py_stack[stack_height -= instr.oparg];
+            stack_height -= instr.oparg;
+            auto values = getStackSlot(0);
             auto str = do_CallSymbol<handle_BUILD_STRING>(values, asValue<Py_ssize_t>(instr.oparg));
             do_PUSH(str);
             break;
@@ -784,7 +801,7 @@ void Translator::emitBlock(unsigned index) {
                     builder.CreatePtrToInt(BlockAddress::get(func, py_finally_block.block), types.get<uintptr_t>()),
                     builder.CreatePtrToInt(BlockAddress::get(func, blocks[1].block), types.get<uintptr_t>())
             );
-            do_CallSymbol<handle_SETUP_WITH>(frame_obj, py_stack[stack_height],
+            do_CallSymbol<handle_SETUP_WITH>(frame_obj, getStackSlot(0),
                     builder.CreateIntCast(block_addr_diff, types.get<int>(), true));
             stack_height += 1;
             break;
