@@ -143,6 +143,8 @@ void freeExtra(void *extra) {
     // 没有实现内存管理
 }
 
+// void notifyCodeLoaded(const char *obj_file, size_t obj_file_size, void *loaded_addr) {}
+
 PyObject *apply(PyObject *, PyObject *maybe_func) {
     if (!PyFunction_Check(maybe_func)) {
         PyErr_SetString(PyExc_TypeError, "bad argument type");

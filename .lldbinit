@@ -1,0 +1,2 @@
+command alias reimport_script command script import debug_tool/lldb_script.py
+reimport_script

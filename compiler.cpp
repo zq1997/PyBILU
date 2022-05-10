@@ -1,5 +1,3 @@
-#include <fstream>
-
 #include "compiler.h"
 #include "general_utilities.h"
 
@@ -12,27 +10,6 @@ inline void throwIf(const T &cond, const string &msg) {
         throw runtime_error(msg);
     }
 }
-
-class {
-public:
-    const char *file_name{"jit"};
-    bool output{true};
-
-    inline void dump(const string &ext, const char *data, size_t size) const {
-        if (output) {
-            ofstream(file_name + ext).write(data, size);
-        }
-    }
-
-    inline void dump(const string &ext, const Module &mod) const {
-        if (output) {
-            error_code ec;
-            raw_fd_ostream out(file_name + ext, ec);
-            mod.print(out, nullptr);
-            throwIf(ec, "cannnot write file: " + string(file_name) + ext);
-        }
-    }
-} debug;
 
 template <typename T>
 inline T check(Expected<T> v) {
@@ -92,34 +69,40 @@ Compiler::Compiler() {
             "add emit pass error");
 }
 
-void *Compiler::compile(llvm::Module &mod) {
-    debug.dump(".ll", mod);
-    assert(!verifyModule(mod, &errs()));
-    opt_MPM.run(mod, opt_MAM);
-    opt_MAM.clear();
-    debug.dump(".opt.ll", mod);
-
-    out_PM.run(mod);
-    debug.dump(".o", out_vec.data(), out_vec.size());
-
-    StringRef code{};
-    auto obj = check(object::ObjectFile::createObjectFile(
-            MemoryBufferRef(StringRef(out_vec.data(), out_vec.size()), "")));
+StringRef Compiler::findPureCode(StringRef obj_file) {
+    StringRef code;
+    auto obj = check(object::ObjectFile::createObjectFile(MemoryBufferRef(obj_file, "")));
     for (auto &sec : obj->sections()) {
-        assert(sec.relocations().empty());
         if (sec.isText()) {
+            assert(sec.relocations().empty());
             assert(!code.data());
             code = check(sec.getContents());
-            assert(code.size());
+            assert(!code.empty());
         }
     }
-
-    error_code ec;
-    auto flag = sys::Memory::ProtectionFlags::MF_RWE_MASK;
-    auto llvm_mem = sys::Memory::allocateMappedMemory(code.size(), nullptr, flag, ec);
-    throwIf(ec, ec.message());
-    memcpy(llvm_mem.base(), code.data(), code.size());
-
-    out_vec.clear();
-    return llvm_mem.base();
+    return code;
 }
+
+// StringRef Compiler::compile(llvm::Module &mod) {
+//     debug.dump(".ll", mod);
+//     assert(!verifyModule(mod, &errs()));
+//     opt_MPM.run(mod, opt_MAM);
+//     opt_MAM.clear();
+//     debug.dump(".opt.ll", mod);
+//
+//     out_PM.run(mod);
+//     debug.dump(".o", out_vec.data(), out_vec.size());
+//
+//     StringRef code{};
+//     StringRef obj_file(out_vec.data(), out_vec.size());
+//     auto obj = check(object::ObjectFile::createObjectFile(MemoryBufferRef(obj_file, "")));
+//     for (auto &sec : obj->sections()) {
+//         if (sec.isText()) {
+//             assert(sec.relocations().empty());
+//             assert(!code.data());
+//             code = check(sec.getContents());
+//             assert(!code.empty());
+//         }
+//     }
+//     return code;
+// }

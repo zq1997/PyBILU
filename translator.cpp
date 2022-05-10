@@ -8,25 +8,26 @@
 using namespace std;
 using namespace llvm;
 
-static auto createTBAANode(MDBuilder &builder, MDNode *root, const char *name, bool is_const = false) {
-    // TODO: 为啥name为空就会被合并
-    // if constexpr(!debug_build) {
-    //     name = "";
-    // }
-    auto scalar_node = builder.createTBAANode(name, root);
-    return builder.createTBAAStructTagNode(scalar_node, scalar_node, 0, is_const);
-}
 
 Translator::Translator(const DataLayout &dl) : data_layout{dl} {
     mod.setDataLayout(data_layout);
 
     auto md_builder = MDBuilder(context);
-    likely_true = md_builder.createBranchWeights(INT32_MAX, 0);
     auto tbaa_root = md_builder.createTBAARoot("TBAA root for CPython");
-    tbaa_refcnt = createTBAANode(md_builder, tbaa_root, "refcnt");
-    tbaa_frame_slot = createTBAANode(md_builder, tbaa_root, "frame slot");
-    tbaa_frame_cells = createTBAANode(md_builder, tbaa_root, "frame cells");
-    tbaa_code_const = createTBAANode(md_builder, tbaa_root, "code const", true);
+    const auto &createTBAA = [&](const char *name, bool is_const = false) {
+        // TODO: 为啥name为空就会被合并
+        // if constexpr(!debug_build) {
+        //     name = "";
+        // }
+        auto scalar_node = md_builder.createTBAANode(name, tbaa_root);
+        return md_builder.createTBAAStructTagNode(scalar_node, scalar_node, 0, is_const);
+    };
+    tbaa_refcnt = createTBAA("refcnt");
+    tbaa_frame_slot = createTBAA("frame slot");
+    tbaa_frame_cells = createTBAA("frame cells");
+    tbaa_code_const = createTBAA("code const", true);
+
+    likely_true = md_builder.createBranchWeights(INT32_MAX, 0);
 
     auto attr_builder = AttrBuilder(context);
     attr_builder.addAttribute(Attribute::NoReturn);
@@ -53,6 +54,26 @@ Translator::Translator(const DataLayout &dl) : data_layout{dl} {
     func->getArg(0)->addAttr(Attribute::NoAlias);
     func->getArg(1)->addAttr(Attribute::NoAlias);
 }
+
+static void dumpModule(const string &ext, const Module &mod) {
+    error_code ec;
+    const auto &file_path = "jit" + ext;
+    raw_fd_ostream out(file_path, ec);
+    mod.print(out, nullptr);
+    if (ec) {
+        throw runtime_error("cannot write: " + file_path + "\nbecause: " + ec.message());
+    }
+}
+
+static void dumpObject(StringRef obj) {
+    ofstream ofs("jit.o");
+    ofs.write(obj.data(), obj.size());
+    if (!ofs) {
+        throw runtime_error("cannot dump object file");
+    }
+}
+
+static void notifyCodeLoaded(PyCodeObject *py_code, StringRef obj_file, void *code_addr) {}
 
 Translator::TranslatedResult *Translator::translate(Compiler &compiler, PyCodeObject *code) {
     py_code = code;
@@ -81,6 +102,7 @@ Translator::TranslatedResult *Translator::translate(Compiler &compiler, PyCodeOb
     error_block = createBlock("error_here", nullptr);
 
     for (auto &i : Range(block_num - 1, 1U)) {
+        // 队列(栈)式生成
         emitBlock(i);
     }
 
@@ -99,12 +121,35 @@ Translator::TranslatedResult *Translator::translate(Compiler &compiler, PyCodeOb
         }
     }
 
-    auto result = compiler.compile(mod);
+    di_builder.finalizeSubprogram(di_function);
+
+    dumpModule(".ll", mod);
+    assert(!verifyModule(mod, &llvm::errs()));
+    compiler.optimize(mod);
+    dumpModule(".opt.ll", mod);
+    auto obj_file = compiler.compile(mod);
+    dumpObject(obj_file);
+    auto binary_code = compiler.findPureCode(obj_file);
+
+    error_code ec;
+    auto flag = sys::Memory::ProtectionFlags::MF_RWE_MASK;
+    auto llvm_mem = sys::Memory::allocateMappedMemory(binary_code.size(), nullptr, flag, ec);
+    if (ec) {
+        throw runtime_error(ec.message());
+    }
+    memcpy(llvm_mem.base(), binary_code.data(), binary_code.size());
+    notifyCodeLoaded(code, obj_file, llvm_mem.base());
+    compiler.clean();
 
     // TODO: 可能需要考虑mod.dropAllReferences();不复用函数了，改成复用module，甚至都不复用
     func->dropAllReferences();
 
-    return new TranslatedResult{reinterpret_cast<TranslatedFunctionType *>(result), &vpc_to_stack_depth[0]};
+    return new TranslatedResult{
+            reinterpret_cast<TranslatedFunctionType *>(llvm_mem.base()),
+            static_cast<int>(binary_code.size()),
+            static_cast<int>(llvm_mem.allocatedSize()),
+            &vpc_to_stack_depth[0]
+    };;
 }
 
 void Translator::parseCFG() {
@@ -183,14 +228,14 @@ void Translator::do_Py_DECREF(Value *py_obj) {
 }
 
 void Translator::do_Py_XDECREF(Value *py_obj) {
-    do_CallSymbol<handle_XDECREF, &Translator::attr_return>(py_obj);
-    // auto b_decref = createBlock("decref");
-    // auto b_end = createBlock("decref.end");
-    // builder.CreateCondBr(builder.CreateICmpNE(py_obj, c_null), b_decref, b_end);
-    // builder.SetInsertPoint(b_decref);
-    // do_Py_DECREF(py_obj);
-    // builder.CreateBr(b_end);
-    // builder.SetInsertPoint(b_end);
+    // do_CallSymbol<handle_XDECREF, &Translator::attr_return>(py_obj);
+    auto b_decref = createBlock("decref");
+    auto b_end = createBlock("decref.end");
+    builder.CreateCondBr(builder.CreateICmpNE(py_obj, c_null), b_decref, b_end, likely_true);
+    builder.SetInsertPoint(b_decref);
+    do_Py_DECREF(py_obj);
+    builder.CreateBr(b_end);
+    builder.SetInsertPoint(b_end);
 }
 
 Value *Translator::do_GETLOCAL(PyOparg oparg) {

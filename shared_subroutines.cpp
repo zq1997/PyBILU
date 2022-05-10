@@ -40,8 +40,8 @@ void handle_XDECREF(PyObject *obj) {
 // TODO: 能否设置hot inline等确保展开
 
 [[noreturn]] static void gotoErrorHandler(PyThreadState *tstate) {
-    auto cframe = static_cast<ExtendedCFrame &>(*tstate->cframe);
-    longjmp(cframe.frame_jmp_buf, 1);
+    auto cframe = static_cast<ExtendedCFrame *>(tstate->cframe);
+    longjmp(cframe->frame_jmp_buf, 1);
 }
 
 [[noreturn]] static void gotoErrorHandler() {
@@ -1331,8 +1331,7 @@ void handle_RERAISE(PyFrameObject *f, bool restore_lasti) {
     assert(f->f_iblock > 0);
     const auto &try_block = f->f_blockstack[f->f_iblock - 1];
     f->f_lasti = restore_lasti ? try_block.b_handler : f->f_lasti;
-    auto stack_height = try_block.b_level;
-    assert(f->f_stackdepth == stack_height + 6);
+    assert(f->f_stackdepth == try_block.b_level + 6);
     // TODO: 直接传arr[3]进来如何
     PyObject *exc = f->f_valuestack[--f->f_stackdepth];
     PyObject *val = f->f_valuestack[--f->f_stackdepth];

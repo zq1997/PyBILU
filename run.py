@@ -4,7 +4,6 @@ import pynic
 
 import time
 
-
 def stat(name, func, repeat, get_args):
     t0 = time.time()
     for i in range(repeat):
@@ -20,8 +19,9 @@ def foo(L):
     return s
 
 
-# stat('无优化', foo, 1, lambda: [range(5000000)])
-# stat('有优化', pynic.apply(foo), 1, lambda: [range(5000000)])
+foo_ = pynic.apply(foo)
+stat('无优化', foo, 1, lambda: [range(5000000)])
+stat('有优化', foo_, 1, lambda: [range(5000000)])
 
 def bar(n):
     if n < 2:
@@ -37,26 +37,27 @@ def bar(n):
     return y
 
 
-# stat('无优化', bar, 111, lambda: [12345])
-# stat('有优化', pynic.apply(bar), 111, lambda: [12345])
+# bar_ = pynic.apply(bar)
+# stat('无优化', bar, 1234, lambda: [12345])
+# stat('有优化', bar_, 1234, lambda: [12345])
 
-class A:
-    def __enter__(self):
-        print('进入')
-        return None
-
-    def __exit__(self, exc_type, exc_val, exc_tb):
-        print("退出")
-        return True
-
-
-@pynic.apply
-def test(a):
-    with a:
-        print(a)
-        # a
-        # raise Exception('抛出')
-    # return d.func(1, 2)
-
-
-test(A())
+# class A:
+#     def __enter__(self):
+#         print('进入')
+#         return None
+#
+#     def __exit__(self, exc_type, exc_val, exc_tb):
+#         print("退出")
+#         return True
+#
+#
+# @pynic.apply
+# def test(a):
+#     with a:
+#         print(a)
+#         # a
+#         # raise Exception('抛出')
+#     # return d.func(1, 2)
+#
+#
+# test(A())

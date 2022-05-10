@@ -1,15 +1,20 @@
 #ifndef PYNIC_TRANSLATOR
 #define PYNIC_TRANSLATOR
 
+#include <fstream>
+
 #include <Python.h>
 #include <frameobject.h>
 #include <opcode.h>
 
+#include <llvm/IR/Verifier.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/Module.h>
 #include <llvm/IR/IRBuilder.h>
+#include <llvm/IR/DIBuilder.h>
 #include <llvm/IR/MDBuilder.h>
 #include <llvm/Support/Host.h>
+#include <llvm/Support/Memory.h>
 
 #include "shared_symbols.h"
 #include "general_utilities.h"
@@ -67,6 +72,17 @@ class Translator {
             types.get<TranslatedFunctionType>(),
             llvm::Function::ExternalLinkage, "singleton_function", &mod
     )};
+    llvm::DIBuilder di_builder{mod};
+    llvm::DISubprogram *di_function{([&] {
+        auto di_file = di_builder.createFile("jit.pydis", "/home/zq/pynic/pynic/cmake-build-debug");
+        auto di_cu = di_builder.createCompileUnit(llvm::dwarf::DW_LANG_C, di_file, "pynic", false, "", 0, "",
+                llvm::DICompileUnit::DebugEmissionKind::LineTablesOnly);
+        auto di_st = di_builder.createSubroutineType({});
+        auto sp = di_builder.createFunction(di_cu, "name", "name", di_file, 1, di_st, 1,
+                llvm::DINode::FlagPrototyped, llvm::DISubprogram::SPFlagDefinition);
+        func->setSubprogram(sp);
+        return sp;
+    })()};
     llvm::Argument *frame_obj{};
     llvm::MDNode *likely_true{};
     llvm::MDNode *tbaa_refcnt{};
@@ -266,6 +282,8 @@ public:
 
     struct TranslatedResult {
         TranslatedFunctionType *binary_code;
+        int code_size;
+        int allocated_size;
         int *sp_map;
     };
     TranslatedResult *translate(Compiler &compiler, PyCodeObject *code);
