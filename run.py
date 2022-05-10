@@ -37,9 +37,9 @@ def bar(n):
     return y
 
 
-stat('无优化', bar, 1234, lambda: [12345])
+# stat('无优化', bar, 123, lambda: [1234])
 bar_ = pynic.apply(bar)
-stat('有优化', bar_, 1234, lambda: [12345])
+stat('有优化', bar_, 123, lambda: [1234])
 
 # class A:
 #     def __enter__(self):
