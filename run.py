@@ -19,9 +19,9 @@ def foo(L):
     return s
 
 
-foo_ = pynic.apply(foo)
-stat('无优化', foo, 1, lambda: [range(5000000)])
-stat('有优化', foo_, 1, lambda: [range(5000000)])
+# stat('无优化', foo, 1, lambda: [range(5000000)])
+# foo_ = pynic.apply(foo)
+# stat('有优化', foo_, 1, lambda: [range(5000000)])
 
 def bar(n):
     if n < 2:
@@ -37,9 +37,9 @@ def bar(n):
     return y
 
 
-# bar_ = pynic.apply(bar)
-# stat('无优化', bar, 1234, lambda: [12345])
-# stat('有优化', bar_, 1234, lambda: [12345])
+stat('无优化', bar, 1234, lambda: [12345])
+bar_ = pynic.apply(bar)
+stat('有优化', bar_, 1234, lambda: [12345])
 
 # class A:
 #     def __enter__(self):
