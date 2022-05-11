@@ -198,5 +198,9 @@ def current_objfile():
     return None
 
 
-pretty_printers = []
+class pretty_printers:
+    @staticmethod
+    def append(_): pass
+
+
 error = AssertionError
