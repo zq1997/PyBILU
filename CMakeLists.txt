@@ -26,7 +26,8 @@ add_compile_options(-Wall -Wpedantic -Wno-unused-but-set-variable -fno-rtti -Wno
 link_directories(${LLVM_LIBRARY_DIRS})
 add_link_options(-Wl,--exclude-libs,ALL,--gc-sections)
 
-add_library(pynic SHARED main.cpp translator.cpp compiler.cpp shared_subroutines.cpp emit_block.cpp)
+file(GLOB SRC CONFIGURE_DEPENDS "*.h" "*.cpp")
+add_library(pynic SHARED ${SRC})
 set_target_properties(pynic PROPERTIES
         PREFIX ""
         SUFFIX ".so"

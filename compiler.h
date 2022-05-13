@@ -10,6 +10,15 @@
 #include <llvm/MC/TargetRegistry.h>
 #include <llvm/MC/SubtargetFeature.h>
 
+#include "memory_manager.h"
+
+
+#ifdef NDEBUG
+constexpr auto debug_build = false;
+#else
+constexpr auto debug_build = true;
+#endif
+
 class Compiler {
     std::unique_ptr<llvm::TargetMachine> machine{};
 
@@ -24,22 +33,21 @@ class Compiler {
     llvm::SmallVector<char> out_vec{};
     llvm::raw_svector_ostream out_stream{out_vec};
 
+    llvm::sys::MemoryBlock loadCode();
+    llvm::sys::MemoryBlock compileForDebug(PyCodeObject *py_code, llvm::Module &mod);
 public:
     Compiler();
 
-    void optimize(llvm::Module &mod) {
-        opt_MPM.run(mod, opt_MAM);
-        opt_MAM.clear();
+    llvm::sys::MemoryBlock compile(PyCodeObject *py_code, llvm::Module &mod) {
+        if constexpr (debug_build) {
+            return compileForDebug(py_code, mod);
+        } else {
+            opt_MPM.run(mod, opt_MAM);
+            opt_MAM.clear();
+            out_PM.run(mod);
+            return loadCode();
+        }
     }
-
-    auto compile(llvm::Module &mod) {
-        out_PM.run(mod);
-        return llvm::StringRef{out_vec.data(), out_vec.size()};
-    }
-
-    llvm::StringRef findPureCode(llvm::StringRef obj_file);
-
-    void clean() { out_vec.clear(); }
 
     decltype(auto) createDataLayout() { return machine->createDataLayout(); }
 };

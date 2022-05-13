@@ -20,11 +20,6 @@
 #include "general_utilities.h"
 #include "compiler.h"
 
-#ifdef NDEBUG
-constexpr auto debug_build = false;
-#else
-constexpr auto debug_build = true;
-#endif
 
 template <typename T>
 auto useName(const T &arg) {
@@ -62,7 +57,20 @@ struct PyBasicBlock {
     PyBasicBlock(const PyBasicBlock &) = delete;
 };
 
+
 class Translator {
+public:
+    struct TranslatedResult {
+        llvm::sys::MemoryBlock mem_block;
+        int *sp_map;
+
+        template <typename... Args>
+        auto operator()(Args ...args) {
+            return reinterpret_cast<TranslatedFunctionType *>(mem_block.base())(args...);
+        }
+    };
+
+private:
     const llvm::DataLayout &data_layout;
     llvm::LLVMContext context{};
     const RegisteredLLVMTypes types{(context.enableOpaquePointers(), context), data_layout};
@@ -74,7 +82,7 @@ class Translator {
     )};
     llvm::DIBuilder di_builder{mod};
     llvm::DISubprogram *di_function{([&] {
-        auto di_file = di_builder.createFile("jit.pydis", "/home/zq/pynic/pynic/cmake-build-debug");
+        auto di_file = di_builder.createFile("test/run.py.27.bar.pydis", "/home/zq/pynic/pynic/cmake-build-debug");
         auto di_cu = di_builder.createCompileUnit(llvm::dwarf::DW_LANG_C, di_file, "pynic", false, "", 0, "",
                 llvm::DICompileUnit::DebugEmissionKind::LineTablesOnly);
         auto di_st = di_builder.createSubroutineType({});
@@ -263,29 +271,24 @@ class Translator {
 
     PyBasicBlock &findPyBlock(unsigned instr_offset);
 
-    // TODO：删除
-    void createIf(llvm::Value *cond, const std::function<void()> &make_body, bool terminated = false) {
-        auto block_true = createBlock(useName("if_true"), func);
-        auto block_end = createBlock(useName("if_false"), nullptr);
-        builder.CreateCondBr(cond, block_true, block_end);
-        builder.SetInsertPoint(block_true);
-        make_body();
-        if (!terminated) {
-            builder.CreateBr(block_end);
-        }
-        block_end->insertInto(func);
-        builder.SetInsertPoint(block_end);
-    }
+    // // TODO：删除
+    // void createIf(llvm::Value *cond, const std::function<void()> &make_body, bool terminated = false) {
+    //     auto block_true = createBlock(useName("if_true"), func);
+    //     auto block_end = createBlock(useName("if_false"), nullptr);
+    //     builder.CreateCondBr(cond, block_true, block_end);
+    //     builder.SetInsertPoint(block_true);
+    //     make_body();
+    //     if (!terminated) {
+    //         builder.CreateBr(block_end);
+    //     }
+    //     block_end->insertInto(func);
+    //     builder.SetInsertPoint(block_end);
+    // }
 
 public:
     explicit Translator(const llvm::DataLayout &dl);
 
-    struct TranslatedResult {
-        TranslatedFunctionType *binary_code;
-        int code_size;
-        int allocated_size;
-        int *sp_map;
-    };
+
     TranslatedResult *translate(Compiler &compiler, PyCodeObject *code);
 };
 
@@ -336,13 +339,13 @@ public:
 
     auto next() {
         opcode = _Py_OPCODE(base[offset]);
-        oparg = ext_oparg << EXTENDED_ARG_BITS | _Py_OPARG(base[offset]);
+        oparg = ext_oparg | _Py_OPARG(base[offset]);
         offset++;
         ext_oparg = 0;
     }
 
     auto extend_current_oparg() {
-        ext_oparg = oparg;
+        ext_oparg = oparg << EXTENDED_ARG_BITS;
     }
     // void fetch_next() {
     //     assert(bool(*this));

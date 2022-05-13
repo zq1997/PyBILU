@@ -30,10 +30,7 @@ void Translator::emitBlock(unsigned index) {
         // 注意stack_height记录于此，这就意味着在调用”风险函数“之前不允许DECREF，否则可能DEC两次
         storeValue<decltype(lasti)>(asValue(lasti), rt_lasti, tbaa_frame_slot);
         vpc_to_stack_depth[lasti] = stack_height;
-        builder.SetCurrentDebugLocation(DILocation::get(context, lasti + 2, 0, di_function));
-        // auto di_file = DIFile::get(context, "jit.ll", "./cmake_build_debug");
-        // DISubprogram::get(context, di_file, "single_function", "single", di_file, 1, nullptr, 1, nullptr, 0, 0, );
-        // DICompileUnit::getDistinct()
+        builder.SetCurrentDebugLocation(DILocation::get(context, lasti + 1, 0, di_function));
 
         switch (instr.opcode) {
         case EXTENDED_ARG: {

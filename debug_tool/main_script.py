@@ -10,21 +10,15 @@ import gdb
 def on_code_loaded(frame: lldb.SBFrame, bp_loc, extra_args, internal_dict):
     py_code = gdb_script.PyCodeObjectPtr(gdb.Value(frame.FindVariable('py_code')))
     code_addr = frame.FindVariable('code_addr').unsigned
-    obj_file = frame.FindVariable('obj_file')
 
     co_filename = gdb_script.PyObjectPtr.from_pyobject_ptr(py_code.field('co_filename')).proxyval(None)
     co_name = gdb_script.PyObjectPtr.from_pyobject_ptr(py_code.field('co_name')).proxyval(None)
     co_firstlineno = int(py_code.field('co_firstlineno'))
-    assert os.path.isfile(co_filename)
-    cache_filename = '%s.%d.%s' % (co_filename, co_firstlineno, co_name)
-    obj_cache_filename = cache_filename + '.obj'
+    obj_file = '%s.%d.%s.o' % (co_filename, co_firstlineno, co_name)
+    assert os.path.isfile(co_filename) and os.path.isfile(obj_file)
 
-    with open(obj_cache_filename, 'wb') as f:
-        length = obj_file.GetChildMemberWithName('Length').unsigned
-        data = bytes(obj_file.GetChildMemberWithName('Data').GetPointeeData(0, length).uint8)
-        f.write(data)
     target: lldb.SBTarget = frame.thread.process.target
-    mod = target.AddModule(obj_cache_filename, None, None)
+    mod = target.AddModule(obj_file, None, None)
     target.SetModuleLoadAddress(mod, code_addr)
     print('jit module loaded:', mod)
 

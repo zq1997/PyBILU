@@ -1,3 +1,5 @@
+#include "Python.h"
+
 #include "compiler.h"
 #include "general_utilities.h"
 
@@ -69,9 +71,10 @@ Compiler::Compiler() {
             "add emit pass error");
 }
 
-StringRef Compiler::findPureCode(StringRef obj_file) {
+sys::MemoryBlock Compiler::loadCode() {
+    StringRef out_vec_ref{out_vec.data(), out_vec.size()};
     StringRef code;
-    auto obj = check(object::ObjectFile::createObjectFile(MemoryBufferRef(obj_file, "")));
+    auto obj = check(object::ObjectFile::createObjectFile(MemoryBufferRef(out_vec_ref, "")));
     for (auto &sec : obj->sections()) {
         if (sec.isText()) {
             assert(sec.relocations().empty());
@@ -80,29 +83,51 @@ StringRef Compiler::findPureCode(StringRef obj_file) {
             assert(!code.empty());
         }
     }
-    return code;
+    auto addr = loadCodeToMemory(code.data(), code.size());
+    out_vec.clear();
+    return addr;
 }
 
-// StringRef Compiler::compile(llvm::Module &mod) {
-//     debug.dump(".ll", mod);
-//     assert(!verifyModule(mod, &errs()));
-//     opt_MPM.run(mod, opt_MAM);
-//     opt_MAM.clear();
-//     debug.dump(".opt.ll", mod);
-//
-//     out_PM.run(mod);
-//     debug.dump(".o", out_vec.data(), out_vec.size());
-//
-//     StringRef code{};
-//     StringRef obj_file(out_vec.data(), out_vec.size());
-//     auto obj = check(object::ObjectFile::createObjectFile(MemoryBufferRef(obj_file, "")));
-//     for (auto &sec : obj->sections()) {
-//         if (sec.isText()) {
-//             assert(sec.relocations().empty());
-//             assert(!code.data());
-//             code = check(sec.getContents());
-//             assert(!code.empty());
-//         }
-//     }
-//     return code;
-// }
+static void notifyCodeLoaded(PyCodeObject *py_code, void *code_addr) {}
+
+sys::MemoryBlock Compiler::compileForDebug(PyCodeObject *py_code, Module &mod) {
+    struct PyObjectRef {
+        PyObject *o;
+
+        explicit PyObjectRef(PyObject *o) : o{o} {
+            if (!o) {
+                throw bad_exception();
+            }
+        }
+
+        ~PyObjectRef() { Py_DECREF(o); }
+
+        operator PyObject *() const { return o; }
+    };
+
+    SmallVector<char> opt_ll_vec{};
+    raw_svector_ostream ll_os{opt_ll_vec};
+
+    mod.print(ll_os, nullptr);
+    auto ll_vec = SmallVector<char>{opt_ll_vec};
+
+    opt_MPM.run(mod, opt_MAM);
+    opt_MAM.clear();
+    mod.print(ll_os, nullptr);
+
+    out_PM.run(mod);
+
+    PyObjectRef dump_mod{PyImport_ImportModule("dump")};
+    PyObjectRef dump_func{PyObject_GetAttrString(dump_mod, "dump")};
+    PyObjectRef ll_bytes{PyMemoryView_FromMemory(ll_vec.data(), ll_vec.size(), PyBUF_READ)};
+    PyObjectRef opt_ll_bytes{PyMemoryView_FromMemory(opt_ll_vec.data(), opt_ll_vec.size(), PyBUF_READ)};
+    PyObjectRef obj_bytes{PyMemoryView_FromMemory(out_vec.data(), out_vec.size(), PyBUF_READ)};
+    PyObject *args[]{
+            nullptr, reinterpret_cast<PyObject *>(py_code), ll_bytes, opt_ll_bytes, obj_bytes
+    };
+    PyObjectRef res{PyObject_Vectorcall(dump_func, &args[1], 4 | PY_VECTORCALL_ARGUMENTS_OFFSET, nullptr)};
+
+    auto mem = loadCode();
+    notifyCodeLoaded(py_code, mem.base());
+    return mem;
+}

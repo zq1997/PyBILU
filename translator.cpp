@@ -3,6 +3,7 @@
 #include <Python.h>
 
 #include "translator.h"
+#include "memory_manager.h"
 
 
 using namespace std;
@@ -55,34 +56,6 @@ Translator::Translator(const DataLayout &dl) : data_layout{dl} {
     func->getArg(1)->addAttr(Attribute::NoAlias);
 }
 
-static void dumpResult(PyCodeObject *py_code,
-        const SmallVector<char> &ll, const SmallVector<char> &opt_ll, StringRef obj) {
-    struct PyObjectRef {
-        PyObject *o;
-
-        explicit PyObjectRef(PyObject *o) : o{o} {
-            if (!o) {
-                throw runtime_error("unexpected null value");
-            }
-        }
-
-        ~PyObjectRef() { Py_DECREF(o); }
-
-        operator PyObject *() { return o; }
-    };
-
-    PyObjectRef dump_mod{PyImport_ImportModule("dump")};
-    PyObjectRef dump_func{PyObject_GetAttrString(dump_mod, "dump")};
-    PyObjectRef ll_bytes{PyBytes_FromStringAndSize(ll.data(), ll.size())};
-    PyObjectRef opt_ll_bytes{PyBytes_FromStringAndSize(opt_ll.data(), opt_ll.size())};
-    PyObjectRef obj_bytes{PyBytes_FromStringAndSize(obj.data(), obj.size())};
-    PyObject *args[]{
-            nullptr, reinterpret_cast<PyObject *>(py_code), ll_bytes, opt_ll_bytes, obj_bytes
-    };
-    PyObjectRef res{PyObject_Vectorcall(dump_func, &args[1], 4 | PY_VECTORCALL_ARGUMENTS_OFFSET, nullptr)};
-}
-
-static void notifyCodeLoaded(PyCodeObject *py_code, StringRef obj_file, void *code_addr) {}
 
 Translator::TranslatedResult *Translator::translate(Compiler &compiler, PyCodeObject *code) {
     py_code = code;
@@ -131,39 +104,15 @@ Translator::TranslatedResult *Translator::translate(Compiler &compiler, PyCodeOb
     }
 
     di_builder.finalizeSubprogram(di_function);
-
     assert(!verifyModule(mod, &llvm::errs()));
-
-    SmallVector<char> out_vec{};
-    raw_svector_ostream out_stream{out_vec};
-    mod.print(out_stream, nullptr, false, true);
-    auto dumped_mod = SmallVector<char>{out_vec};
-    compiler.optimize(mod);
-    mod.print(out_stream, nullptr, false, true);
-    auto &dumped_opt_mod = out_vec;
-    auto obj_file = compiler.compile(mod);
-    auto binary_code = compiler.findPureCode(obj_file);
-    dumpResult(py_code, dumped_mod, dumped_opt_mod, obj_file);
-
-    error_code ec;
-    auto flag = sys::Memory::ProtectionFlags::MF_RWE_MASK;
-    auto llvm_mem = sys::Memory::allocateMappedMemory(binary_code.size(), nullptr, flag, ec);
-    if (ec) {
-        throw runtime_error(ec.message());
-    }
-    memcpy(llvm_mem.base(), binary_code.data(), binary_code.size());
-    notifyCodeLoaded(py_code, obj_file, llvm_mem.base());
-    compiler.clean();
+    auto addr = compiler.compile(py_code, mod);
 
     // TODO: 可能需要考虑mod.dropAllReferences();不复用函数了，改成复用module，甚至都不复用
     func->dropAllReferences();
-
-    return new TranslatedResult{
-            reinterpret_cast<TranslatedFunctionType *>(llvm_mem.base()),
-            static_cast<int>(binary_code.size()),
-            static_cast<int>(llvm_mem.allocatedSize()),
+    return new Translator::TranslatedResult{
+            addr,
             &vpc_to_stack_depth[0]
-    };;
+    };
 }
 
 void Translator::parseCFG() {

@@ -6,18 +6,12 @@ using namespace std;
 #include <internal/pycore_pyerrors.h>
 
 #include "translator.h"
+#include "memory_manager.h"
 
 static unique_ptr<Compiler> compiler;
 static unique_ptr<Translator> translator;
 static Py_ssize_t code_extra_index;
 
-
-// PyObject *vectorcall(PyObject *callable, PyObject *const *args, size_t nargsf, PyObject *kwnames) {
-//     assert(PyFunction_Check(callable));
-//     auto func = reinterpret_cast<PyFunctionObject *>(callable);
-//     // argument check here
-//     // auto nargs = PyVectorcall_NARGS(nargsf);
-// }
 
 PyObject *eval_func(PyThreadState *tstate, PyFrameObject *f, int throwflag) {
     // TODO: manually implement set/get extra
@@ -30,7 +24,6 @@ PyObject *eval_func(PyThreadState *tstate, PyFrameObject *f, int throwflag) {
     if (!compiled_result) {
         return _PyEval_EvalFrameDefault(tstate, f, throwflag);
     }
-    auto jit_callee = compiled_result->binary_code;
     // TODO: support generator and throwflag
     assert(!throwflag);
 
@@ -42,7 +35,7 @@ PyObject *eval_func(PyThreadState *tstate, PyFrameObject *f, int throwflag) {
     tstate->frame = f;
     PyObject *result;
     if (!setjmp(cframe.frame_jmp_buf)) [[likely]] {
-        result = jit_callee(&symbol_addresses[0], f, ptrdiff_t{0});
+        result = (*compiled_result)(&symbol_addresses[0], f, ptrdiff_t{0});
         f->f_stackdepth = compiled_result->sp_map[f->f_lasti];
         // TODO: 为啥return的时候不要清理stack
     } else {
@@ -124,7 +117,7 @@ PyObject *eval_func(PyThreadState *tstate, PyFrameObject *f, int throwflag) {
         }
 
         if (handler > 0) {
-            result = jit_callee(&symbol_addresses[0], f, handler);
+            result = (*compiled_result)(&symbol_addresses[0], f, handler);
         } else {
             while (f->f_stackdepth) {
                 PyObject *v = f->f_valuestack[--f->f_stackdepth];
@@ -139,8 +132,10 @@ PyObject *eval_func(PyThreadState *tstate, PyFrameObject *f, int throwflag) {
     return result;
 }
 
-void freeExtra(void *extra) {
-    // 没有实现内存管理
+void freeExtra(void *result) {
+    auto result_ = reinterpret_cast< Translator::TranslatedResult *>(result);
+    unloadCode(result_->mem_block);
+    delete result_;
 }
 
 // void notifyCodeLoaded(const char *obj_file, size_t obj_file_size, void *loaded_addr) {}
@@ -156,6 +151,8 @@ PyObject *apply(PyObject *, PyObject *maybe_func) {
         result = translator->translate(*compiler, reinterpret_cast<PyCodeObject *>(func->func_code));
     } catch (runtime_error &err) {
         PyErr_SetString(PyExc_RuntimeError, err.what());
+        return nullptr;
+    } catch (bad_exception &) {
         return nullptr;
     }
     _PyCode_SetExtra(func->func_code, code_extra_index, result);
