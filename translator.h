@@ -14,7 +14,6 @@
 #include <llvm/IR/DIBuilder.h>
 #include <llvm/IR/MDBuilder.h>
 #include <llvm/Support/Host.h>
-#include <llvm/Support/Memory.h>
 
 #include "shared_symbols.h"
 #include "general_utilities.h"
@@ -64,8 +63,7 @@ public:
         llvm::sys::MemoryBlock mem_block;
         int *sp_map;
 
-        template <typename... Args>
-        auto operator()(Args ...args) {
+        auto operator()(auto ...args) {
             return reinterpret_cast<TranslatedFunctionType *>(mem_block.base())(args...);
         }
     };
@@ -109,8 +107,8 @@ private:
     DynamicArray<decltype(PyFrameObject::f_stackdepth)> vpc_to_stack_depth;
     DynamicArray<PyBasicBlock> blocks;
     llvm::BasicBlock *error_block{};
-    llvm::Value *code_names;
-    llvm::Value *code_consts;
+    llvm::Value *code_names{};
+    llvm::Value *code_consts{};
 
     llvm::Constant *c_null{llvm::ConstantPointerNull::get(types.get<void *>())};
     llvm::Value *rt_lasti{};
@@ -286,8 +284,10 @@ private:
     // }
 
 public:
+    // Translator() = default;
     explicit Translator(const llvm::DataLayout &dl);
 
+    // static std::unique_ptr<Translator> create(Compiler &compiler);
 
     TranslatedResult *translate(Compiler &compiler, PyCodeObject *code);
 };

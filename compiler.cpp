@@ -1,3 +1,4 @@
+#include <filesystem>
 #include "Python.h"
 
 #include "compiler.h"
@@ -71,8 +72,8 @@ Compiler::Compiler() {
             "add emit pass error");
 }
 
-sys::MemoryBlock Compiler::loadCode() {
-    StringRef out_vec_ref{out_vec.data(), out_vec.size()};
+sys::MemoryBlock loadCode(llvm::SmallVector<char> &obj_vec) {
+    StringRef out_vec_ref{obj_vec.data(), obj_vec.size()};
     StringRef code;
     auto obj = check(object::ObjectFile::createObjectFile(MemoryBufferRef(out_vec_ref, "")));
     for (auto &sec : obj->sections()) {
@@ -83,9 +84,20 @@ sys::MemoryBlock Compiler::loadCode() {
             assert(!code.empty());
         }
     }
-    auto addr = loadCodeToMemory(code.data(), code.size());
-    out_vec.clear();
-    return addr;
+    error_code ec;
+    auto flag = sys::Memory::ProtectionFlags::MF_RWE_MASK;
+    auto mem = sys::Memory::allocateMappedMemory(code.size(), nullptr, flag, ec);
+    if (ec) {
+        // TODO: exception分为设置了PythonError的和没有的
+        throw runtime_error(ec.message());
+    }
+    memcpy(mem.base(), code.data(), code.size());
+    obj_vec.clear();
+    return mem;
+}
+
+void unloadCode(sys::MemoryBlock &mem) {
+    sys::Memory::releaseMappedMemory(mem);
 }
 
 static void notifyCodeLoaded(PyCodeObject *py_code, void *code_addr) {}
@@ -127,7 +139,7 @@ sys::MemoryBlock Compiler::compileForDebug(PyCodeObject *py_code, Module &mod) {
     };
     PyObjectRef res{PyObject_Vectorcall(dump_func, &args[1], 4 | PY_VECTORCALL_ARGUMENTS_OFFSET, nullptr)};
 
-    auto mem = loadCode();
+    auto mem = loadCode(out_vec);
     notifyCodeLoaded(py_code, mem.base());
     return mem;
 }

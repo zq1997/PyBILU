@@ -9,15 +9,16 @@
 #include <llvm/Object/ObjectFile.h>
 #include <llvm/MC/TargetRegistry.h>
 #include <llvm/MC/SubtargetFeature.h>
-
-#include "memory_manager.h"
-
+#include <llvm/Support/Memory.h>
 
 #ifdef NDEBUG
 constexpr auto debug_build = false;
 #else
 constexpr auto debug_build = true;
 #endif
+
+llvm::sys::MemoryBlock loadCode(llvm::SmallVector<char> &obj_vec);
+void unloadCode(llvm::sys::MemoryBlock &mem);
 
 class Compiler {
     std::unique_ptr<llvm::TargetMachine> machine{};
@@ -33,7 +34,6 @@ class Compiler {
     llvm::SmallVector<char> out_vec{};
     llvm::raw_svector_ostream out_stream{out_vec};
 
-    llvm::sys::MemoryBlock loadCode();
     llvm::sys::MemoryBlock compileForDebug(PyCodeObject *py_code, llvm::Module &mod);
 public:
     Compiler();
@@ -45,7 +45,7 @@ public:
             opt_MPM.run(mod, opt_MAM);
             opt_MAM.clear();
             out_PM.run(mod);
-            return loadCode();
+            return loadCode(out_vec);
         }
     }
 

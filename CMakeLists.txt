@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 project(pynic)
-set(CMAKE_CXX_STANDARD 17)
+set(CMAKE_CXX_STANDARD 20)
 
 IF(CMAKE_BUILD_TYPE MATCHES Debug)
     set(CPython_INC_DIR_DEFAULT "/opt/cpython/build/install-debug/include/python3.10d")
@@ -22,7 +22,7 @@ find_package(LLVM 14 REQUIRED CONFIG PATHS ${LLVM_DIR} NO_DEFAULT_PATH)
 add_definitions(${LLVM_DEFINITIONS})
 add_compile_definitions(Py_BUILD_CORE)
 include_directories(${LLVM_INCLUDE_DIRS} ${CPython_INC_DIR})
-add_compile_options(-Wall -Wpedantic -Wno-unused-but-set-variable -fno-rtti -Wno-c++20-attribute-extensions)
+add_compile_options(-Wall -Wpedantic -Wno-unused-but-set-variable -fno-rtti)
 link_directories(${LLVM_LIBRARY_DIRS})
 add_link_options(-Wl,--exclude-libs,ALL,--gc-sections)
 

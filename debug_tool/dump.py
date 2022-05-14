@@ -7,7 +7,8 @@ from opcode import EXTENDED_ARG, HAVE_ARGUMENT, opname, cmp_op, \
 def dump(co, ll, opt_ll, obj):
     assert os.path.isfile(co.co_filename)
 
-    save_name = '%s.%d.%s' % (co.co_filename, co.co_firstlineno, co.co_name)
+    # save_name = '%s.%d.%s' % (co.co_filename, co.co_firstlineno, co.co_name)
+    save_name = '%s.%s' % (co.co_filename, co.co_name)
     with open(save_name + '.pydis', 'wt') as f:
         disassemble_code(co, f)
     with open(save_name + '.ll', 'wb') as f:

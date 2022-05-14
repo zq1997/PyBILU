@@ -3,7 +3,6 @@
 #include <Python.h>
 
 #include "translator.h"
-#include "memory_manager.h"
 
 
 using namespace std;
@@ -28,7 +27,6 @@ Translator::Translator(const DataLayout &dl) : data_layout{dl} {
     tbaa_frame_cells = createTBAA("frame cells");
     tbaa_code_const = createTBAA("code const", true);
 
-    likely_true = md_builder.createBranchWeights(INT32_MAX, 0);
 
     auto attr_builder = AttrBuilder(context);
     attr_builder.addAttribute(Attribute::NoReturn);
@@ -55,7 +53,6 @@ Translator::Translator(const DataLayout &dl) : data_layout{dl} {
     func->getArg(0)->addAttr(Attribute::NoAlias);
     func->getArg(1)->addAttr(Attribute::NoAlias);
 }
-
 
 Translator::TranslatedResult *Translator::translate(Compiler &compiler, PyCodeObject *code) {
     py_code = code;

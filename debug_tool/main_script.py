@@ -14,7 +14,8 @@ def on_code_loaded(frame: lldb.SBFrame, bp_loc, extra_args, internal_dict):
     co_filename = gdb_script.PyObjectPtr.from_pyobject_ptr(py_code.field('co_filename')).proxyval(None)
     co_name = gdb_script.PyObjectPtr.from_pyobject_ptr(py_code.field('co_name')).proxyval(None)
     co_firstlineno = int(py_code.field('co_firstlineno'))
-    obj_file = '%s.%d.%s.o' % (co_filename, co_firstlineno, co_name)
+    # obj_file = '%s.%d.%s.o' % (co_filename, co_firstlineno, co_name)
+    obj_file = '%s.%s.o' % (co_filename, co_name)
     assert os.path.isfile(co_filename) and os.path.isfile(obj_file)
 
     target: lldb.SBTarget = frame.thread.process.target

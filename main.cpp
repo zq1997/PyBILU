@@ -1,12 +1,9 @@
-#include <iostream>
-
-using namespace std;
-
 #include <Python.h>
 #include <internal/pycore_pyerrors.h>
 
 #include "translator.h"
-#include "memory_manager.h"
+
+using namespace std;
 
 static unique_ptr<Compiler> compiler;
 static unique_ptr<Translator> translator;
