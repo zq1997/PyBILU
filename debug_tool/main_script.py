@@ -28,7 +28,7 @@ def pretty_print(debugger, command, result: lldb.SBCommandReturnObject, internal
     var = gdb.get_lldb_frame().EvaluateExpression(command)
     printer = gdb_script.pretty_printer_lookup(gdb.Value(var))
     if printer is not None:
-        result.Print(printer.to_string())
+        result.Print(printer.to_string() + '\n')
         return
     result.SetError('no pretty printer for ' + str(var))
 
@@ -37,7 +37,7 @@ def print_ref(debugger, command, result: lldb.SBCommandReturnObject, internal_di
     var = gdb.get_lldb_frame().EvaluateExpression(command)
     cast_type = gdb_script.PyObjectPtr.get_gdb_type()
     ob_refcnt = int(gdb_script.PyObjectPtr(gdb.Value(var), cast_type).field('ob_refcnt'))
-    result.Print(f'{ob_refcnt} refs')
+    result.Print(f'{ob_refcnt} refs\n')
 
 
 def __lldb_init_module(debugger: lldb.SBDebugger, internal_dict):

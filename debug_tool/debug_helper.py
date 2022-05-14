@@ -4,18 +4,26 @@ from opcode import EXTENDED_ARG, HAVE_ARGUMENT, opname, cmp_op, \
     haslocal, hasconst, hasname, hasfree, hasjabs, hasjrel, hascompare
 
 
+def get_save_prefix(co):
+    # save_name = '%s.%d.%s' % (co.co_filename, co.co_firstlineno, co.co_name)
+    return '%s.%s' % (co.co_filename, co.co_name)
+
+
+def get_pydis_dir_and_file(co):
+    return os.path.split(get_save_prefix(co) + '.pydis')
+
+
 def dump(co, ll, opt_ll, obj):
     assert os.path.isfile(co.co_filename)
 
-    # save_name = '%s.%d.%s' % (co.co_filename, co.co_firstlineno, co.co_name)
-    save_name = '%s.%s' % (co.co_filename, co.co_name)
-    with open(save_name + '.pydis', 'wt') as f:
+    save_prefix = '%s.%s' % (co.co_filename, co.co_name)
+    with open(save_prefix + '.pydis', 'wt') as f:
         disassemble_code(co, f)
-    with open(save_name + '.ll', 'wb') as f:
+    with open(save_prefix + '.ll', 'wb') as f:
         f.write(ll)
-    with open(save_name + '.opt.ll', 'wb') as f:
+    with open(save_prefix + '.opt.ll', 'wb') as f:
         f.write(opt_ll)
-    with open(save_name + '.o', 'wb') as f:
+    with open(save_prefix + '.o', 'wb') as f:
         f.write(obj)
 
 
@@ -33,6 +41,7 @@ OPNAME_WIDTH = max(len(x) for x in opname)
 
 
 def disassemble_code(co, file):
+    print('%s @ %r\n' % (co.co_name, co.co_filename), file=file)
     lastline = None
     linestarts = {}
     for start, end, line in co.co_lines():

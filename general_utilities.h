@@ -1,8 +1,47 @@
 #ifndef PYNIC_GENERAL_UTILITIES
 #define PYNIC_GENERAL_UTILITIES
 
+#include <exception>
 #include <string>
 #include <type_traits>
+
+#include <Python.h>
+
+struct PyObjectRef {
+    PyObject *o;
+
+    PyObjectRef(const PyObjectRef &) = delete;
+
+    // PyObjectRef(PyObjectRef &&other) : o{other.o} { other.o = nullptr; };
+
+    PyObjectRef(PyObject *o) : o{o} {
+        if (!o) {
+            throw std::bad_exception();
+        }
+    }
+
+    ~PyObjectRef() {
+        Py_DECREF(o);
+    }
+
+    operator PyObject *() const { return o; }
+};
+
+inline const char *PyStringAsString(PyObject *o) {
+    auto str = PyUnicode_AsUTF8(o);
+    if (!str) {
+        throw std::bad_exception();
+    }
+    return str;
+}
+
+inline PyObjectRef callDebugHelperFunction(const char *callee_name, const auto &... args) {
+    PyObjectRef py_mod = PyImport_ImportModule("debug_helper");
+    PyObjectRef py_callee = PyObject_GetAttrString(py_mod, callee_name);
+    PyObject *py_args[]{nullptr, args...};
+    return PyObjectRef{PyObject_Vectorcall(py_callee, &py_args[1],
+            sizeof...(args) | PY_VECTORCALL_ARGUMENTS_OFFSET, nullptr)};
+}
 
 template <typename T, typename = void>
 struct HasDereference : std::false_type {};

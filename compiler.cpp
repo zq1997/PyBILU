@@ -103,20 +103,6 @@ void unloadCode(sys::MemoryBlock &mem) {
 static void notifyCodeLoaded(PyCodeObject *py_code, void *code_addr) {}
 
 sys::MemoryBlock Compiler::compileForDebug(PyCodeObject *py_code, Module &mod) {
-    struct PyObjectRef {
-        PyObject *o;
-
-        explicit PyObjectRef(PyObject *o) : o{o} {
-            if (!o) {
-                throw bad_exception();
-            }
-        }
-
-        ~PyObjectRef() { Py_DECREF(o); }
-
-        operator PyObject *() const { return o; }
-    };
-
     SmallVector<char> opt_ll_vec{};
     raw_svector_ostream ll_os{opt_ll_vec};
 
@@ -129,15 +115,11 @@ sys::MemoryBlock Compiler::compileForDebug(PyCodeObject *py_code, Module &mod) {
 
     out_PM.run(mod);
 
-    PyObjectRef dump_mod{PyImport_ImportModule("dump")};
-    PyObjectRef dump_func{PyObject_GetAttrString(dump_mod, "dump")};
-    PyObjectRef ll_bytes{PyMemoryView_FromMemory(ll_vec.data(), ll_vec.size(), PyBUF_READ)};
-    PyObjectRef opt_ll_bytes{PyMemoryView_FromMemory(opt_ll_vec.data(), opt_ll_vec.size(), PyBUF_READ)};
-    PyObjectRef obj_bytes{PyMemoryView_FromMemory(out_vec.data(), out_vec.size(), PyBUF_READ)};
-    PyObject *args[]{
-            nullptr, reinterpret_cast<PyObject *>(py_code), ll_bytes, opt_ll_bytes, obj_bytes
-    };
-    PyObjectRef res{PyObject_Vectorcall(dump_func, &args[1], 4 | PY_VECTORCALL_ARGUMENTS_OFFSET, nullptr)};
+    callDebugHelperFunction("dump", reinterpret_cast<PyObject *>(py_code),
+            PyObjectRef{PyMemoryView_FromMemory(ll_vec.data(), ll_vec.size(), PyBUF_READ)},
+            PyObjectRef{PyMemoryView_FromMemory(opt_ll_vec.data(), opt_ll_vec.size(), PyBUF_READ)},
+            PyObjectRef{PyMemoryView_FromMemory(out_vec.data(), out_vec.size(), PyBUF_READ)}
+    );
 
     auto mem = loadCode(out_vec);
     notifyCodeLoaded(py_code, mem.base());

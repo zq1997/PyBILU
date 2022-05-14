@@ -13,6 +13,8 @@ Translator::Translator(const DataLayout &dl) : data_layout{dl} {
     mod.setDataLayout(data_layout);
 
     auto md_builder = MDBuilder(context);
+    likely_true = md_builder.createBranchWeights(INT32_MAX >> 1, 1);
+
     auto tbaa_root = md_builder.createTBAARoot("TBAA root for CPython");
     const auto &createTBAA = [&](const char *name, bool is_const = false) {
         // TODO: 为啥name为空就会被合并
@@ -47,15 +49,16 @@ Translator::Translator(const DataLayout &dl) : data_layout{dl} {
             .addAttribute(Attribute::NoUnwind)
             .addAttribute("tune-cpu", sys::getHostCPUName());
     func->setAttributes(AttributeList::get(context, AttributeList::FunctionIndex, attr_builder));
-    func->getArg(0)->setName(useName("symbols"));
+    (shared_symbols = func->getArg(0))->setName(useName("symbols"));
     (frame_obj = func->getArg(1))->setName(useName("frame"));
     // TODO: 下面的，不知是否有必要
-    func->getArg(0)->addAttr(Attribute::NoAlias);
-    func->getArg(1)->addAttr(Attribute::NoAlias);
+    shared_symbols->addAttr(Attribute::NoAlias);
+    frame_obj->addAttr(Attribute::NoAlias);
 }
 
 Translator::TranslatedResult *Translator::translate(Compiler &compiler, PyCodeObject *code) {
     py_code = code;
+    di_builder.reset(builder, func, code);
     // TODO: 重复了
     parseCFG();
 
@@ -100,8 +103,14 @@ Translator::TranslatedResult *Translator::translate(Compiler &compiler, PyCodeOb
         }
     }
 
-    di_builder.finalizeSubprogram(di_function);
-    assert(!verifyModule(mod, &llvm::errs()));
+    di_builder.finalize();
+    if constexpr (debug_build) {
+        if (verifyModule(mod, &errs())) {
+            mod.print(errs(), nullptr);
+            throw runtime_error("the translater failed");
+        }
+    }
+
     auto addr = compiler.compile(py_code, mod);
 
     // TODO: 可能需要考虑mod.dropAllReferences();不复用函数了，改成复用module，甚至都不复用
@@ -269,7 +278,7 @@ llvm::Value *Translator::getSymbol(size_t offset) {
     if constexpr (debug_build) {
         name = symbol_names[offset];
     }
-    auto ptr = getPointer<void *>(func->getArg(0), offset, useName("sym.", offset, "."));
+    auto ptr = getPointer<void *>(shared_symbols, offset, useName("sym.", offset, "."));
     return loadValue<void *>(ptr, tbaa_code_const, useName("sym.", name, "."));
 }
 

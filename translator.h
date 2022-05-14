@@ -56,6 +56,34 @@ struct PyBasicBlock {
     PyBasicBlock(const PyBasicBlock &) = delete;
 };
 
+class DebugInfoBuilder {
+    llvm::DIBuilder builder;
+    llvm::DISubprogram *sp;
+
+public:
+    DebugInfoBuilder(llvm::Module &mod) : builder{mod}, sp{nullptr} {};
+
+    void setLocation(llvm::IRBuilder<> &ir_builder, int vpc) {
+        ir_builder.SetCurrentDebugLocation(llvm::DILocation::get(ir_builder.getContext(), vpc + 3, 0, sp));
+    }
+
+    void finalize() { builder.finalize(); }
+
+    void reset(llvm::IRBuilder<> &ir_builder, llvm::Function *function, PyCodeObject *py_code) {
+        auto res = callDebugHelperFunction("get_pydis_dir_and_file", reinterpret_cast<PyObject *>(py_code));
+        auto *res_tuple = static_cast<PyObject *>(res);
+        auto dis_dir = PyTuple_GET_ITEM(res_tuple, 0);
+        auto dis_file = PyTuple_GET_ITEM(res_tuple, 1);
+
+        auto file = builder.createFile(PyStringAsString(dis_file), PyStringAsString(dis_dir));
+        builder.createCompileUnit(llvm::dwarf::DW_LANG_C, file, "", false, "", 0);
+        sp = builder.createFunction(file, "", "", file, 1, builder.createSubroutineType({}), 1,
+                llvm::DINode::FlagZero, llvm::DISubprogram::SPFlagDefinition);
+        function->setSubprogram(sp);
+        setLocation(ir_builder, -2);
+    }
+};
+
 
 class Translator {
 public:
@@ -71,25 +99,9 @@ public:
 private:
     const llvm::DataLayout &data_layout;
     llvm::LLVMContext context{};
+
     const RegisteredLLVMTypes types{(context.enableOpaquePointers(), context), data_layout};
-    llvm::IRBuilder<> builder{context};
-    llvm::Module mod{"singleton_module", context};
-    llvm::Function *func{llvm::Function::Create(
-            types.get<TranslatedFunctionType>(),
-            llvm::Function::ExternalLinkage, "singleton_function", &mod
-    )};
-    llvm::DIBuilder di_builder{mod};
-    llvm::DISubprogram *di_function{([&] {
-        auto di_file = di_builder.createFile("test/run.py.27.bar.pydis", "/home/zq/pynic/pynic/cmake-build-debug");
-        auto di_cu = di_builder.createCompileUnit(llvm::dwarf::DW_LANG_C, di_file, "pynic", false, "", 0, "",
-                llvm::DICompileUnit::DebugEmissionKind::LineTablesOnly);
-        auto di_st = di_builder.createSubroutineType({});
-        auto sp = di_builder.createFunction(di_cu, "name", "name", di_file, 1, di_st, 1,
-                llvm::DINode::FlagPrototyped, llvm::DISubprogram::SPFlagDefinition);
-        func->setSubprogram(sp);
-        return sp;
-    })()};
-    llvm::Argument *frame_obj{};
+    llvm::Constant *c_null{llvm::ConstantPointerNull::get(types.get<void *>())};
     llvm::MDNode *likely_true{};
     llvm::MDNode *tbaa_refcnt{};
     llvm::MDNode *tbaa_frame_slot{};
@@ -98,6 +110,15 @@ private:
     llvm::AttributeList attr_return{};
     llvm::AttributeList attr_noreturn{};
     llvm::AttributeList attr_inaccessible_or_arg{};
+
+    llvm::IRBuilder<> builder{context};
+    llvm::Module mod{"reusable_module", context};
+    DebugInfoBuilder di_builder{mod};
+
+    llvm::Function *func{llvm::Function::Create(
+            types.get<TranslatedFunctionType>(), llvm::Function::ExternalLinkage, "", &mod)};
+    llvm::Argument *shared_symbols{};
+    llvm::Argument *frame_obj{};
 
     PyCodeObject *py_code{};
     PyInstr *py_instructions{};
@@ -110,9 +131,7 @@ private:
     llvm::Value *code_names{};
     llvm::Value *code_consts{};
 
-    llvm::Constant *c_null{llvm::ConstantPointerNull::get(types.get<void *>())};
     llvm::Value *rt_lasti{};
-
 
     template <typename T>
     std::enable_if_t<std::is_integral_v<T>, llvm::Constant *>
