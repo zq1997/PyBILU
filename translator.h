@@ -58,30 +58,30 @@ struct PyBasicBlock {
 
 class DebugInfoBuilder {
     llvm::DIBuilder builder;
-    llvm::DISubprogram *sp;
+    llvm::DISubprogram *sp{};
 
 public:
-    DebugInfoBuilder(llvm::Module &mod) : builder{mod}, sp{nullptr} {};
-
-    void setLocation(llvm::IRBuilder<> &ir_builder, int vpc) {
-        ir_builder.SetCurrentDebugLocation(llvm::DILocation::get(ir_builder.getContext(), vpc + 3, 0, sp));
-    }
-
-    void finalize() { builder.finalize(); }
-
-    void reset(llvm::IRBuilder<> &ir_builder, llvm::Function *function, PyCodeObject *py_code) {
+    DebugInfoBuilder(PyCodeObject *py_code,
+            llvm::IRBuilder<> &ir_builder, llvm::Module &module, llvm::Function &function) : builder{module} {
+        function.setName(PyStringAsString(py_code->co_name));
         auto res = callDebugHelperFunction("get_pydis_dir_and_file", reinterpret_cast<PyObject *>(py_code));
         auto *res_tuple = static_cast<PyObject *>(res);
         auto dis_dir = PyTuple_GET_ITEM(res_tuple, 0);
         auto dis_file = PyTuple_GET_ITEM(res_tuple, 1);
 
         auto file = builder.createFile(PyStringAsString(dis_file), PyStringAsString(dis_dir));
-        builder.createCompileUnit(llvm::dwarf::DW_LANG_C, file, "", false, "", 0);
+        builder.createCompileUnit(llvm::dwarf::DW_LANG_C, file, "pynic", false, "", 0);
         sp = builder.createFunction(file, "", "", file, 1, builder.createSubroutineType({}), 1,
                 llvm::DINode::FlagZero, llvm::DISubprogram::SPFlagDefinition);
-        function->setSubprogram(sp);
+        function.setSubprogram(sp);
         setLocation(ir_builder, -2);
+    };
+
+    void setLocation(llvm::IRBuilder<> &ir_builder, int vpc) {
+        ir_builder.SetCurrentDebugLocation(llvm::DILocation::get(ir_builder.getContext(), vpc + 3, 0, sp));
     }
+
+    void finalize() { builder.finalize(); }
 };
 
 
@@ -89,68 +89,54 @@ class Translator {
 public:
     struct TranslatedResult {
         llvm::sys::MemoryBlock mem_block;
-        int *sp_map;
+        DynamicArray<decltype(PyFrameObject::f_stackdepth)> sp_map;
 
         auto operator()(auto ...args) {
-            return reinterpret_cast<TranslatedFunctionType *>(mem_block.base())(args...);
+            auto f = reinterpret_cast<CompiledFunction *>(mem_block.base());
+            return f(args...);
         }
     };
 
 private:
     const llvm::DataLayout &data_layout;
     llvm::LLVMContext context{};
+    llvm::IRBuilder<> builder{context};
 
     const RegisteredLLVMTypes types{(context.enableOpaquePointers(), context), data_layout};
     llvm::Constant *c_null{llvm::ConstantPointerNull::get(types.get<void *>())};
     llvm::MDNode *likely_true{};
     llvm::MDNode *tbaa_refcnt{};
-    llvm::MDNode *tbaa_frame_slot{};
-    llvm::MDNode *tbaa_frame_cells{};
+    llvm::MDNode *tbaa_obj_field{};
+    llvm::MDNode *tbaa_frame_value{};
     llvm::MDNode *tbaa_code_const{};
     llvm::AttributeList attr_return{};
     llvm::AttributeList attr_noreturn{};
-    llvm::AttributeList attr_inaccessible_or_arg{};
+    llvm::AttributeList attr_default_call{};
 
-    llvm::IRBuilder<> builder{context};
-    llvm::Module mod{"reusable_module", context};
-    DebugInfoBuilder di_builder{mod};
-
-    llvm::Function *func{llvm::Function::Create(
-            types.get<TranslatedFunctionType>(), llvm::Function::ExternalLinkage, "", &mod)};
+    llvm::Function *function{};
     llvm::Argument *shared_symbols{};
     llvm::Argument *frame_obj{};
-
-    PyCodeObject *py_code{};
-    PyInstr *py_instructions{};
-    decltype(PyFrameObject::f_lasti) lasti{};
-    decltype(PyFrameObject::f_stackdepth) stack_height{};
-    unsigned block_num{};
-    DynamicArray<decltype(PyFrameObject::f_stackdepth)> vpc_to_stack_depth;
-    DynamicArray<PyBasicBlock> blocks;
+    llvm::Value *rt_lasti{};
     llvm::BasicBlock *error_block{};
     llvm::Value *code_names{};
     llvm::Value *code_consts{};
 
-    llvm::Value *rt_lasti{};
+    PyCodeObject *py_code{};
+    decltype(PyFrameObject::f_stackdepth) stack_depth{};
+    unsigned block_num{};
+    DynamicArray<decltype(PyFrameObject::f_stackdepth)> vpc_to_stack_depth;
+    DynamicArray<PyBasicBlock> blocks;
 
     template <typename T>
     std::enable_if_t<std::is_integral_v<T>, llvm::Constant *>
-    asValue(T t) {
-        return llvm::ConstantInt::get(types.get<T>(), t);
-    }
-
-    // template <typename T>
-    // std::enable_if_t<std::is_base_of_v<llvm::Value, std::remove_pointer_t<T>>, llvm::Value *>
-    // asValue(llvm::Value *t) {
-    //     return t;
-    // }
+    asValue(T t) { return llvm::ConstantInt::get(types.get<T>(), t); }
 
     auto createBlock(const llvm::Twine &name, llvm::Function *parent) {
         return llvm::BasicBlock::Create(context, name, parent);
     }
 
     auto createBlock(const char *extra) {
-        return llvm::BasicBlock::Create(context, useName("instr.", lasti, ".", extra), func);
+        return llvm::BasicBlock::Create(context, useName(extra), function);
     }
 
     template <typename T>
@@ -177,12 +163,6 @@ private:
         return load_inst;
     }
 
-    template <typename T>
-    auto loadElementValue(llvm::Value *base, ptrdiff_t index, llvm::MDNode *tbaa_node, const llvm::Twine &name = "") {
-        auto ptr = getPointer<T>(base, index);
-        return loadValue<T>(ptr, tbaa_node, name);
-    }
-
     template <typename T, typename M>
     auto loadFieldValue(llvm::Value *instance, M T::* member, llvm::MDNode *tbaa_node, const llvm::Twine &name = "") {
         auto ptr = getPointer(instance, member);
@@ -197,42 +177,16 @@ private:
         store_inst->setMetadata(llvm::LLVMContext::MD_tbaa, tbaa_node);
     }
 
-    template <typename T>
-    auto storeElementValue(llvm::Value *value, llvm::Value *base, ptrdiff_t index, llvm::MDNode *tbaa_node) {
-        auto ptr = getPointer<T>(base, index);
-        return storeValue<T>(value, ptr, tbaa_node);
-    }
-
     template <typename T, typename M>
     auto storeFiledValue(llvm::Value *value, llvm::Value *instance, M T::* member, llvm::MDNode *tbaa_node) {
         auto ptr = getPointer(instance, member);
         return storeValue<M>(ptr, ptr, tbaa_node);
     }
 
-    template <typename T>
-    auto readData(llvm::Value *base, ptrdiff_t index, const llvm::Twine &name = "") {
-        return builder.CreateLoad(types.get<T>(), getPointer<T>(base, index), name);
-    }
-
-    template <typename T, typename M>
-    auto readData(llvm::Value *instance, M T::* member, const llvm::Twine &name = "") {
-        return builder.CreateLoad(types.get<M>(), getPointer(instance, member), name);
-    }
-
-    template <typename T>
-    auto writeData(llvm::Value *base, ptrdiff_t index, llvm::Value *value) {
-        return builder.CreateStore(value, getPointer<T>(base, index));
-    }
-
-    template <typename T, typename M>
-    auto writeData(llvm::Value *instance, M T::* member, llvm::Value *value) {
-        return builder.CreateStore(value, getPointer(instance, member));
-    }
-
     llvm::Value *getSymbol(size_t offset);
 
     void parseCFG();
-    void emitBlock(unsigned index);
+    void emitBlock(DebugInfoBuilder &di_builder, unsigned index);
     llvm::Value *do_GETLOCAL(PyOparg oparg);
     void do_SETLOCAL(PyOparg oparg, llvm::Value *value);
     llvm::Value *do_POP();
@@ -247,20 +201,14 @@ private:
     void do_Py_DECREF(llvm::Value *v);
     void do_Py_XDECREF(llvm::Value *v);
 
-
-    template <llvm::AttributeList Translator::* Attr = &Translator::attr_inaccessible_or_arg, typename... Args>
+    template <llvm::AttributeList Translator::* Attr = &Translator::attr_default_call, typename... Args>
     llvm::CallInst *do_Call(llvm::FunctionType *type, llvm::Value *callee, Args... args) {
         auto call_instr = builder.CreateCall(type, callee, {args...});
         call_instr->setAttributes(this->*Attr);
         return call_instr;
     }
 
-    template <typename T, typename M, typename... Args>
-    llvm::CallInst *do_CallSlot(llvm::Value *instance, M *T::* member, Args... args) {
-        return do_Call(types.get<M>(), readData(instance, member), args...);
-    }
-
-    template <auto &S, llvm::AttributeList Translator::* Attr = &Translator::attr_inaccessible_or_arg, typename... Args>
+    template <auto &S, llvm::AttributeList Translator::* Attr = &Translator::attr_default_call, typename... Args>
     llvm::CallInst *do_CallSymbol(Args... args) {
         return do_Call<Attr>(types.get<std::remove_reference_t<decltype(S)>>(), getSymbol(searchSymbol<S>()), args...);
     }
@@ -303,7 +251,6 @@ private:
     // }
 
 public:
-    // Translator() = default;
     explicit Translator(const llvm::DataLayout &dl);
 
     // static std::unique_ptr<Translator> create(Compiler &compiler);

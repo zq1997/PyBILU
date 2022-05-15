@@ -93,6 +93,8 @@ public:
 
     DynamicArray() = default;
 
+    DynamicArray(DynamicArray &&other) : data{std::move(other.data)} {};
+
     explicit DynamicArray(size_t size, bool init = false) : data{init ? new T[size]{} : new T[size]} {};
 
     void reserve(size_t size, bool init = false) {

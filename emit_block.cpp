@@ -8,29 +8,26 @@
 using namespace std;
 using namespace llvm;
 
-[[noreturn]] inline void unimplemented() {
-    throw runtime_error("unimplemented opcode");
-}
-
-void Translator::emitBlock(unsigned index) {
-    blocks[index].block->insertInto(func);
+void Translator::emitBlock(DebugInfoBuilder &di_builder, unsigned index) {
+    blocks[index].block->insertInto(function);
     builder.SetInsertPoint(blocks[index].block);
     bool fall_through = true;
     // TODO: 这种可能会有问题，会出现一个block没有被设置initial_stack_height但是被遍历，会assert失败
-    stack_height = blocks[index].initial_stack_height;
-    assert(stack_height >= 0);
+    stack_depth = blocks[index].initial_stack_height;
+    assert(stack_depth >= 0);
 
     assert(index);
+    auto py_instructions = reinterpret_cast<PyInstr *>(PyBytes_AS_STRING(py_code->co_code));
     auto first = blocks[index - 1].end;
     auto last = blocks[index].end;
     for (PyInstrIter instr(py_instructions, first, last); instr;) {
+        auto vpc = instr.offset;
         instr.next();
-        lasti = instr.offset - 1;
         // TODO：不如合并到cframe中去，一次性写入
         // 注意stack_height记录于此，这就意味着在调用”风险函数“之前不允许DECREF，否则可能DEC两次
-        storeValue<decltype(lasti)>(asValue(lasti), rt_lasti, tbaa_frame_slot);
-        vpc_to_stack_depth[lasti] = stack_height;
-        di_builder.setLocation(builder, lasti);
+        storeValue<decltype(PyFrameObject::f_lasti)>(asValue(vpc), rt_lasti, tbaa_frame_value);
+        vpc_to_stack_depth[vpc] = stack_depth;
+        di_builder.setLocation(builder, vpc);
 
         switch (instr.opcode) {
         case EXTENDED_ARG: {
@@ -70,7 +67,7 @@ void Translator::emitBlock(unsigned index) {
         case ROT_N: {
             auto dest_start = getStackSlot(1);
             auto src_start = getStackSlot(2);
-            auto top = loadValue<PyObject *>(dest_start, tbaa_frame_cells);
+            auto top = loadValue<PyObject *>(dest_start, tbaa_frame_value);
             auto last_cell = getStackSlot(instr.oparg);
             auto entry_block = builder.GetInsertBlock();
             auto loop_block = createBlock("ROT_N.loop");
@@ -79,8 +76,8 @@ void Translator::emitBlock(unsigned index) {
             builder.SetInsertPoint(loop_block);
             auto dest = builder.CreatePHI(types.get<PyObject *>(), 2);
             auto src = builder.CreatePHI(types.get<PyObject *>(), 2);
-            auto value = loadValue<PyObject *>(src, tbaa_frame_cells);
-            storeValue<PyObject *>(value, dest, tbaa_frame_cells);
+            auto value = loadValue<PyObject *>(src, tbaa_frame_value);
+            storeValue<PyObject *>(value, dest, tbaa_frame_value);
             auto src_update = getPointer<PyObject *>(src, -1);
             auto should_break = builder.CreateICmpEQ(dest, last_cell);
             builder.CreateCondBr(should_break, end_block, loop_block);
@@ -89,7 +86,7 @@ void Translator::emitBlock(unsigned index) {
             src->addIncoming(src_start, entry_block);
             src->addIncoming(src_update, loop_block);
             builder.SetInsertPoint(entry_block);
-            storeValue<PyObject *>(top, last_cell, tbaa_frame_cells);
+            storeValue<PyObject *>(top, last_cell, tbaa_frame_value);
         }
         case DUP_TOP: {
             auto top = do_PEAK(1);
@@ -120,7 +117,8 @@ void Translator::emitBlock(unsigned index) {
                     throw std::runtime_error("cannot get const object repr");
                 }
             }
-            auto value = loadElementValue<PyObject *>(code_consts, instr.oparg, tbaa_code_const, useName(repr));
+            auto ptr = getPointer<PyObject *>(code_consts, instr.oparg);
+            auto value = loadValue<PyObject *>(ptr, tbaa_code_const, useName(repr));
             if constexpr(debug_build) {
                 Py_DECREF(repr);
             }
@@ -151,8 +149,8 @@ void Translator::emitBlock(unsigned index) {
             break;
         }
         case LOAD_DEREF: {
-            auto cell = loadValue<PyObject *>(getFreevar(instr.oparg), tbaa_code_const);
-            auto value = loadFieldValue(cell, &PyCellObject::ob_ref, tbaa_frame_cells);
+            auto cell = getFreevar(instr.oparg);
+            auto value = loadFieldValue(cell, &PyCellObject::ob_ref, tbaa_obj_field);
             auto ok_block = createBlock("LOAD_DEREF.OK");
             builder.CreateCondBr(builder.CreateICmpNE(value, c_null), ok_block, error_block, likely_true);
             builder.SetInsertPoint(ok_block);
@@ -166,22 +164,22 @@ void Translator::emitBlock(unsigned index) {
             break;
         }
         case STORE_DEREF: {
-            auto cell = loadValue<PyObject *>(getFreevar(instr.oparg), tbaa_code_const);
+            auto cell = getFreevar(instr.oparg);
             auto cell_slot = getPointer(cell, &PyCellObject::ob_ref);
-            auto old_value = loadValue<PyObject *>(cell_slot, tbaa_frame_cells);
+            auto old_value = loadValue<PyObject *>(cell_slot, tbaa_obj_field);
             auto value = do_POP();
-            storeValue<PyObject *>(value, cell_slot, tbaa_frame_cells);
+            storeValue<PyObject *>(value, cell_slot, tbaa_obj_field);
             do_Py_XDECREF(old_value);
             break;
         }
         case DELETE_DEREF: {
-            auto cell = loadValue<PyObject *>(getFreevar(instr.oparg), tbaa_code_const);
+            auto cell = getFreevar(instr.oparg);
             auto cell_slot = getPointer(cell, &PyCellObject::ob_ref);
-            auto old_value = loadValue<PyObject *>(cell_slot, tbaa_frame_cells);
+            auto old_value = loadValue<PyObject *>(cell_slot, tbaa_obj_field);
             auto ok_block = createBlock("DELETE_DEREF.OK");
             builder.CreateCondBr(builder.CreateICmpNE(old_value, c_null), ok_block, error_block, likely_true);
             builder.SetInsertPoint(ok_block);
-            storeValue<PyObject *>(c_null, cell_slot, tbaa_frame_cells);
+            storeValue<PyObject *>(c_null, cell_slot, tbaa_obj_field);
             do_Py_DECREF(old_value);
             break;
         }
@@ -225,7 +223,7 @@ void Translator::emitBlock(unsigned index) {
         case LOAD_METHOD: {
             auto obj = do_POP();
             do_CallSymbol<handle_LOAD_METHOD>(obj, getName(instr.oparg), getStackSlot(0));
-            stack_height += 2;
+            stack_depth += 2;
             break;
         }
         case STORE_ATTR: {
@@ -427,14 +425,14 @@ void Translator::emitBlock(unsigned index) {
         }
         case CALL_FUNCTION: {
             // func_args重命名
-            stack_height -= instr.oparg + 1;
+            stack_depth -= instr.oparg + 1;
             auto func_args = getStackSlot(0);
             auto ret = do_CallSymbol<handle_CALL_FUNCTION>(func_args, asValue<Py_ssize_t>(instr.oparg));
             do_PUSH(ret);
             break;
         }
         case CALL_FUNCTION_KW: {
-            stack_height -= instr.oparg + 2;
+            stack_depth -= instr.oparg + 2;
             auto func_args = getStackSlot(0);
             auto ret = do_CallSymbol<handle_CALL_FUNCTION_KW>(func_args, asValue<Py_ssize_t>(instr.oparg));
             do_PUSH(ret);
@@ -458,7 +456,7 @@ void Translator::emitBlock(unsigned index) {
         }
         case CALL_METHOD: {
             auto maybe_meth = do_PEAK(instr.oparg + 2);
-            stack_height -= instr.oparg + 2;
+            stack_depth -= instr.oparg + 2;
             auto is_meth = builder.CreateICmpNE(maybe_meth, c_null);
             auto func_args = builder.CreateSelect(is_meth, getStackSlot(0), getStackSlot(-1));
             auto nargs = builder.CreateSelect(is_meth,
@@ -531,7 +529,7 @@ void Translator::emitBlock(unsigned index) {
 
         case JUMP_FORWARD: {
             auto &jmp_block = findPyBlock(instr.offset + instr.oparg);
-            jmp_block.initial_stack_height = stack_height;
+            jmp_block.initial_stack_height = stack_depth;
             builder.CreateBr(jmp_block.block);
             fall_through = false;
             break;
@@ -539,7 +537,7 @@ void Translator::emitBlock(unsigned index) {
         case JUMP_ABSOLUTE: {
             // TODO: 如果有，则不要设置，要校验
             auto &jmp_block = findPyBlock(instr.oparg);
-            jmp_block.initial_stack_height = stack_height;
+            jmp_block.initial_stack_height = stack_depth;
             builder.CreateBr(jmp_block.block);
             fall_through = false;
             break;
@@ -568,54 +566,55 @@ void Translator::emitBlock(unsigned index) {
             break;
         }
         case FOR_ITER: {
-            auto sp = stack_height;
+            auto sp = stack_depth;
             auto iter = do_PEAK(1);
-            auto the_type = readData(iter, &PyObject::ob_type);
-            auto next = do_CallSlot(the_type, &PyTypeObject::tp_iternext, iter);
+            auto the_type = loadFieldValue(iter, &PyObject::ob_type, tbaa_obj_field);
+            auto the_iternextfunc = loadFieldValue(the_type, &PyTypeObject::tp_iternext, tbaa_obj_field);
+            auto next = do_Call(types.get<remove_pointer_t<iternextfunc>>(), the_iternextfunc, iter);
             auto b_continue = createBlock("FOR_ITER.continue");
             auto b_break = createBlock("FOR_ITER.break");
             builder.CreateCondBr(builder.CreateICmpEQ(next, c_null), b_break, b_continue);
             builder.SetInsertPoint(b_break);
             do_Py_DECREF(iter);
             auto &break_block = findPyBlock(instr.offset + instr.oparg);
-            break_block.initial_stack_height = stack_height - 1;
+            break_block.initial_stack_height = stack_depth - 1;
             builder.CreateBr(break_block.block);
             builder.SetInsertPoint(b_continue);
-            stack_height = sp;
+            stack_depth = sp;
             do_PUSH(next);
             break;
         }
 
         case BUILD_TUPLE: {
-            stack_height -= instr.oparg;
+            stack_depth -= instr.oparg;
             auto values = getStackSlot(0);
             auto map = do_CallSymbol<handle_BUILD_TUPLE>(values, asValue<Py_ssize_t>(instr.oparg));
             do_PUSH(map);
             break;
         }
         case BUILD_LIST: {
-            stack_height -= instr.oparg;
+            stack_depth -= instr.oparg;
             auto values = getStackSlot(0);
             auto map = do_CallSymbol<handle_BUILD_LIST>(values, asValue<Py_ssize_t>(instr.oparg));
             do_PUSH(map);
             break;
         }
         case BUILD_SET: {
-            stack_height -= instr.oparg;
+            stack_depth -= instr.oparg;
             auto values = getStackSlot(0);
             auto map = do_CallSymbol<handle_BUILD_SET>(values, asValue<Py_ssize_t>(instr.oparg));
             do_PUSH(map);
             break;
         }
         case BUILD_MAP: {
-            stack_height -= 2 * instr.oparg;
+            stack_depth -= 2 * instr.oparg;
             auto values = getStackSlot(0);
             auto map = do_CallSymbol<handle_BUILD_MAP>(values, asValue<Py_ssize_t>(instr.oparg));
             do_PUSH(map);
             break;
         }
         case BUILD_CONST_KEY_MAP: {
-            stack_height -= instr.oparg + 1;
+            stack_depth -= instr.oparg + 1;
             auto values = getStackSlot(0);
             auto map = do_CallSymbol<handle_BUILD_CONST_KEY_MAP>(values, asValue<Py_ssize_t>(instr.oparg));
             do_PUSH(map);
@@ -690,7 +689,7 @@ void Translator::emitBlock(unsigned index) {
             do_Py_DECREF(value);
         }
         case BUILD_STRING: {
-            stack_height -= instr.oparg;
+            stack_depth -= instr.oparg;
             auto values = getStackSlot(0);
             auto str = do_CallSymbol<handle_BUILD_STRING>(values, asValue<Py_ssize_t>(instr.oparg));
             do_PUSH(str);
@@ -698,72 +697,72 @@ void Translator::emitBlock(unsigned index) {
         }
 
         case UNPACK_SEQUENCE: {
-            unimplemented();
+            throw runtime_error("unimplemented opcode");
             break;
         }
         case UNPACK_EX: {
-            unimplemented();
+            throw runtime_error("unimplemented opcode");
             break;
         }
 
         case GET_LEN: {
-            unimplemented();
+            throw runtime_error("unimplemented opcode");
             break;
         }
         case MATCH_MAPPING: {
-            unimplemented();
+            throw runtime_error("unimplemented opcode");
             break;
         }
         case MATCH_SEQUENCE: {
-            unimplemented();
+            throw runtime_error("unimplemented opcode");
             break;
         }
         case MATCH_KEYS: {
-            unimplemented();
+            throw runtime_error("unimplemented opcode");
             break;
         }
         case MATCH_CLASS: {
-            unimplemented();
+            throw runtime_error("unimplemented opcode");
             break;
         }
         case COPY_DICT_WITHOUT_KEYS: {
-            unimplemented();
+            throw runtime_error("unimplemented opcode");
             break;
         }
 
         case BUILD_SLICE: {
-            unimplemented();
+            throw runtime_error("unimplemented opcode");
             break;
         }
         case LOAD_ASSERTION_ERROR: {
-            unimplemented();
+            throw runtime_error("unimplemented opcode");
             break;
         }
         case RAISE_VARARGS: {
-            unimplemented();
+            throw runtime_error("unimplemented opcode");
             break;
         }
         case SETUP_ANNOTATIONS: {
-            unimplemented();
+            throw runtime_error("unimplemented opcode");
             break;
         }
         case PRINT_EXPR: {
-            unimplemented();
+            throw runtime_error("unimplemented opcode");
             break;
         }
 
         case SETUP_FINALLY: {
             auto &py_finally_block = findPyBlock(instr.offset + instr.oparg);
-            py_finally_block.initial_stack_height = stack_height + 6;
+            py_finally_block.initial_stack_height = stack_depth + 6;
             py_finally_block.is_handler = true;
             auto block_addr_diff = builder.CreateSub(
-                    builder.CreatePtrToInt(BlockAddress::get(func, py_finally_block.block), types.get<uintptr_t>()),
-                    builder.CreatePtrToInt(BlockAddress::get(func, blocks[1].block), types.get<uintptr_t>())
+                    builder.CreatePtrToInt(BlockAddress::get(function, py_finally_block.block), types.get<uintptr_t>()),
+                    builder.CreatePtrToInt(BlockAddress::get(function, blocks[1].block), types.get<uintptr_t>())
             );
             do_CallSymbol<PyFrame_BlockSetup>(frame_obj,
                     asValue<int>(SETUP_FINALLY),
                     builder.CreateIntCast(block_addr_diff, types.get<int>(), true),
-                    asValue<int>(stack_height));
+                    asValue<int>(stack_depth));
             break;
         }
         case POP_BLOCK: {
@@ -781,7 +780,7 @@ void Translator::emitBlock(unsigned index) {
             do_Py_DECREF(left);
             do_Py_DECREF(right);
             auto &jump_target = findPyBlock(instr.oparg);
-            jump_target.initial_stack_height = stack_height;
+            jump_target.initial_stack_height = stack_depth;
             auto fall_block = createBlock("");
             builder.CreateCondBr(match, fall_block, jump_target.block);
             builder.SetInsertPoint(fall_block);
@@ -795,15 +794,15 @@ void Translator::emitBlock(unsigned index) {
         }
         case SETUP_WITH: {
             auto &py_finally_block = findPyBlock(instr.offset + instr.oparg);
-            py_finally_block.initial_stack_height = stack_height - 1 + 7;
+            py_finally_block.initial_stack_height = stack_depth - 1 + 7;
             py_finally_block.is_handler = true;
             auto block_addr_diff = builder.CreateSub(
-                    builder.CreatePtrToInt(BlockAddress::get(func, py_finally_block.block), types.get<uintptr_t>()),
-                    builder.CreatePtrToInt(BlockAddress::get(func, blocks[1].block), types.get<uintptr_t>())
+                    builder.CreatePtrToInt(BlockAddress::get(function, py_finally_block.block), types.get<uintptr_t>()),
+                    builder.CreatePtrToInt(BlockAddress::get(function, blocks[1].block), types.get<uintptr_t>())
             );
             do_CallSymbol<handle_SETUP_WITH>(frame_obj, getStackSlot(0),
                     builder.CreateIntCast(block_addr_diff, types.get<int>(), true));
-            stack_height += 1;
+            stack_depth += 1;
             break;
         }
         case WITH_EXCEPT_START: {
@@ -817,43 +816,43 @@ void Translator::emitBlock(unsigned index) {
         }
 
         case GEN_START: {
-            unimplemented();
+            throw runtime_error("unimplemented opcode");
             break;
         }
         case YIELD_VALUE: {
-            unimplemented();
+            throw runtime_error("unimplemented opcode");
             break;
         }
         case GET_YIELD_FROM_ITER: {
-            unimplemented();
+            throw runtime_error("unimplemented opcode");
             break;
         }
         case YIELD_FROM: {
-            unimplemented();
+            throw runtime_error("unimplemented opcode");
             break;
         }
         case GET_AWAITABLE: {
-            unimplemented();
+            throw runtime_error("unimplemented opcode");
             break;
         }
         case GET_AITER: {
-            unimplemented();
+            throw runtime_error("unimplemented opcode");
             break;
         }
         case GET_ANEXT: {
-            unimplemented();
+            throw runtime_error("unimplemented opcode");
             break;
         }
         case END_ASYNC_FOR: {
-            unimplemented();
+            throw runtime_error("unimplemented opcode");
             break;
         }
         case SETUP_ASYNC_WITH: {
-            unimplemented();
+            throw runtime_error("unimplemented opcode");
             break;
         }
         case BEFORE_ASYNC_WITH: {
-            unimplemented();
+            throw runtime_error("unimplemented opcode");
             break;
         }
         default:
@@ -863,6 +862,6 @@ void Translator::emitBlock(unsigned index) {
     if (fall_through) {
         assert(index < block_num - 1);
         builder.CreateBr(blocks[index + 1].block);
-        blocks[index + 1].initial_stack_height = stack_height;
+        blocks[index + 1].initial_stack_height = stack_depth;
     }
 }

@@ -10,8 +10,6 @@ using namespace llvm;
 
 
 Translator::Translator(const DataLayout &dl) : data_layout{dl} {
-    mod.setDataLayout(data_layout);
-
     auto md_builder = MDBuilder(context);
     likely_true = md_builder.createBranchWeights(INT32_MAX >> 1, 1);
 
@@ -24,78 +22,84 @@ Translator::Translator(const DataLayout &dl) : data_layout{dl} {
         auto scalar_node = md_builder.createTBAANode(name, tbaa_root);
         return md_builder.createTBAAStructTagNode(scalar_node, scalar_node, 0, is_const);
     };
-    tbaa_refcnt = createTBAA("refcnt");
-    tbaa_frame_slot = createTBAA("frame slot");
-    tbaa_frame_cells = createTBAA("frame cells");
+    tbaa_refcnt = createTBAA("reference counter");
+    tbaa_obj_field = createTBAA("object field");
+    tbaa_frame_value = createTBAA("frame value");
     tbaa_code_const = createTBAA("code const", true);
 
-
     auto attr_builder = AttrBuilder(context);
-    attr_builder.addAttribute(Attribute::NoReturn);
+    attr_builder
+            .addAttribute(Attribute::NoUnwind)
+            .addAttribute(Attribute::NoReturn);
     attr_noreturn = AttributeList::get(context, AttributeList::FunctionIndex, attr_builder);
     attr_builder.clear();
     attr_builder
+            .addAttribute(Attribute::NoUnwind)
             .addAttribute(Attribute::WillReturn)
             .addAttribute(Attribute::ArgMemOnly);
     attr_return = AttributeList::get(context, AttributeList::FunctionIndex, attr_builder);
     attr_builder.clear();
     attr_builder
             .addAttribute(Attribute::NoUnwind)
+            .addAttribute("tune-cpu", sys::getHostCPUName())
             .addAttribute(Attribute::InaccessibleMemOrArgMemOnly);
-    attr_inaccessible_or_arg = AttributeList::get(context, AttributeList::FunctionIndex, attr_builder);
-
-    attr_builder.clear();
-    attr_builder
-            .addAttribute(Attribute::NoUnwind)
-            .addAttribute("tune-cpu", sys::getHostCPUName());
-    func->setAttributes(AttributeList::get(context, AttributeList::FunctionIndex, attr_builder));
-    (shared_symbols = func->getArg(0))->setName(useName("symbols"));
-    (frame_obj = func->getArg(1))->setName(useName("frame"));
-    // TODO: 下面的，不知是否有必要
-    shared_symbols->addAttr(Attribute::NoAlias);
-    frame_obj->addAttr(Attribute::NoAlias);
+    attr_default_call = AttributeList::get(context, AttributeList::FunctionIndex, attr_builder);
 }
 
 Translator::TranslatedResult *Translator::translate(Compiler &compiler, PyCodeObject *code) {
+    Module module{"the_module", context};
+    module.setDataLayout(compiler.createDataLayout());
+
+    function = Function::Create(types.get<CompiledFunction>(), Function::ExternalLinkage, "the_function", &module);
+    function->setAttributes(attr_default_call);
+
+    (shared_symbols = function->getArg(0))->setName(useName("symbols"));
+    (frame_obj = function->getArg(1))->setName(useName("frame"));
+    // TODO: 下面的，不知是否有必要
+    shared_symbols->addAttr(Attribute::NoAlias);
+    frame_obj->addAttr(Attribute::NoAlias);
+
+    DebugInfoBuilder di_builder{code, builder, module, *function};
+
     py_code = code;
-    di_builder.reset(builder, func, code);
     // TODO: 重复了
     parseCFG();
 
-    blocks[0].block = createBlock("entry_block", func);
+    blocks[0].block = createBlock("entry_block", function);
     auto start = blocks[0].end;
     for (auto &b : Range(block_num - 1, &blocks[1])) {
         b.initial_stack_height = -1;
         b.is_handler = false;
-        b.block = createBlock(useName("instr.", start), nullptr);
+        b.block = createBlock(useName("block.", start), nullptr);
         start = b.end;
     }
     blocks[1].initial_stack_height = 0;
 
     builder.SetInsertPoint(blocks[0].block);
 
-    auto code_obj = readData(frame_obj, &PyFrameObject::f_code, useName("code"));
-    auto names_tuple = loadFieldValue(code_obj, &PyCodeObject::co_names, tbaa_frame_slot);
+    auto code_obj = loadFieldValue(frame_obj, &PyFrameObject::f_code, tbaa_frame_value, useName("code"));
+    auto names_tuple = loadFieldValue(code_obj, &PyCodeObject::co_names, tbaa_frame_value);
     code_names = getPointer(names_tuple, &PyTupleObject::ob_item, "names");
     auto consts_tuple = loadFieldValue(code_obj, &PyCodeObject::co_consts, tbaa_code_const);
     code_consts = getPointer(consts_tuple, &PyTupleObject::ob_item, "consts");
     rt_lasti = getPointer(frame_obj, &PyFrameObject::f_lasti, "lasti");
 
-    error_block = createBlock("error_here", nullptr);
+    error_block = createBlock("raise_error", nullptr);
 
     for (auto &i : Range(block_num - 1, 1U)) {
         // 队列(栈)式生成
-        emitBlock(i);
+        emitBlock(di_builder, i);
     }
 
-    error_block->insertInto(func);
+    error_block->insertInto(function);
     builder.SetInsertPoint(error_block);
     do_CallSymbol<raiseException, &Translator::attr_noreturn>();
     builder.CreateUnreachable();
 
+    // TODO: debug location有时候去除
     builder.SetInsertPoint(blocks[0].block);
     auto indirect_br = builder.CreateIndirectBr(
-            builder.CreateInBoundsGEP(types.get<char>(), BlockAddress::get(blocks[1].block), func->getArg(2)));
+            builder.CreateInBoundsGEP(types.get<char>(), BlockAddress::get(blocks[1].block), function->getArg(2)));
     blocks[1].is_handler = true;
     for (auto &b : Range(block_num - 1, &blocks[1])) {
         if (b.is_handler) {
@@ -105,30 +109,26 @@ Translator::TranslatedResult *Translator::translate(Compiler &compiler, PyCodeOb
 
     di_builder.finalize();
     if constexpr (debug_build) {
-        if (verifyModule(mod, &errs())) {
-            mod.print(errs(), nullptr);
+        if (verifyModule(module, &errs())) {
+            module.dump();
             throw runtime_error("the translater failed");
         }
     }
 
-    auto addr = compiler.compile(py_code, mod);
-
-    // TODO: 可能需要考虑mod.dropAllReferences();不复用函数了，改成复用module，甚至都不复用
-    func->dropAllReferences();
     return new Translator::TranslatedResult{
-            addr,
-            &vpc_to_stack_depth[0]
+            compiler.compile(py_code, module),
+            move(vpc_to_stack_depth)
     };
 }
 
 void Translator::parseCFG() {
-    py_instructions = reinterpret_cast<PyInstr *>(PyBytes_AS_STRING(py_code->co_code));
     auto size = PyBytes_GET_SIZE(py_code->co_code) / sizeof(PyInstr);
     vpc_to_stack_depth.reserve(size);
 
     BitArray is_boundary(size + 1);
     block_num = 0;
 
+    auto py_instructions = reinterpret_cast<PyInstr *>(PyBytes_AS_STRING(py_code->co_code));
     for (QuickPyInstrIter instr(py_instructions, 0, size); instr.next();) {
         switch (instr.opcode) {
         case JUMP_FORWARD:
@@ -191,7 +191,7 @@ void Translator::do_Py_DECREF(Value *py_obj) {
     auto b_end = createBlock("dealloc.end");
     builder.CreateCondBr(builder.CreateICmpEQ(new_value, zero), b_dealloc, b_end, likely_true);
     builder.SetInsertPoint(b_dealloc);
-    do_CallSymbol<_Py_Dealloc>(py_obj);
+    do_CallSymbol<_Py_Dealloc, &Translator::attr_return>(py_obj);
     builder.CreateBr(b_end);
     builder.SetInsertPoint(b_end);
 }
@@ -211,21 +211,21 @@ Value *Translator::do_GETLOCAL(PyOparg oparg) {
     auto varname = PyTuple_GET_ITEM(py_code->co_varnames, oparg);
     auto offset = offsetof(PyFrameObject, f_localsplus) + sizeof(PyObject *) * oparg;
     auto slot = getPointer<char>(frame_obj, offset, useName("local.", varname, "."));
-    return loadValue<PyObject *>(slot, tbaa_frame_slot, useName(varname));
+    return loadValue<PyObject *>(slot, tbaa_frame_value, useName(varname));
 }
 
 void Translator::do_SETLOCAL(PyOparg oparg, llvm::Value *value) {
     auto varname = PyTuple_GET_ITEM(py_code->co_varnames, oparg);
     auto offset = offsetof(PyFrameObject, f_localsplus) + sizeof(PyObject *) * oparg;
     auto slot = getPointer<char>(frame_obj, offset, useName("local.", varname, "."));
-    auto old_value = loadValue<PyObject *>(slot, tbaa_frame_slot, useName(varname, ".old", "."));
-    storeValue<PyObject *>(value, slot, tbaa_frame_slot);
+    auto old_value = loadValue<PyObject *>(slot, tbaa_frame_value, useName(varname, ".old", "."));
+    storeValue<PyObject *>(value, slot, tbaa_frame_value);
     do_Py_XDECREF(old_value);
 }
 
 Value *Translator::getStackSlot(int i) {
-    assert(stack_height >= i);
-    auto offset = offsetof(PyFrameObject, f_localsplus) + sizeof(PyObject *) * (stack_height - i +
+    assert(stack_depth >= i);
+    auto offset = offsetof(PyFrameObject, f_localsplus) + sizeof(PyObject *) * (stack_depth - i +
             py_code->co_nlocals +
             PyTuple_GET_SIZE(py_code->co_cellvars) +
             PyTuple_GET_SIZE(py_code->co_freevars)
@@ -234,21 +234,21 @@ Value *Translator::getStackSlot(int i) {
 }
 
 Value *Translator::do_PEAK(int i) {
-    return loadValue<PyObject *>(getStackSlot(i), tbaa_frame_cells);
+    return loadValue<PyObject *>(getStackSlot(i), tbaa_frame_value);
 }
 
 void Translator::do_SET_PEAK(int i, llvm::Value *value) {
-    storeValue<PyObject *>(value, getStackSlot(i), tbaa_frame_cells);
+    storeValue<PyObject *>(value, getStackSlot(i), tbaa_frame_value);
 }
 
 llvm::Value *Translator::do_POP() {
-    --stack_height;
+    --stack_depth;
     return do_PEAK(0);
 }
 
 void Translator::do_PUSH(llvm::Value *value) {
     do_SET_PEAK(0, value);
-    stack_height++;
+    stack_depth++;
 }
 
 Value *Translator::getName(int i) {
@@ -256,7 +256,8 @@ Value *Translator::getName(int i) {
     if constexpr(debug_build) {
         repr = PyTuple_GET_ITEM(py_code->co_names, i);
     }
-    return loadElementValue<PyObject *>(code_names, i, tbaa_code_const, useName(repr, "$"));
+    auto ptr = getPointer<PyObject *>(code_names, i);
+    return loadValue<PyObject *>(ptr, tbaa_code_const, useName(repr, "$"));
 }
 
 Value *Translator::getFreevar(int i) {
@@ -270,7 +271,8 @@ Value *Translator::getFreevar(int i) {
         }
     }
     auto slot = getPointer<char>(frame_obj, offset, useName("free.", name, "."));
-    return loadValue<PyObject *>(slot, tbaa_frame_slot, useName(name));
+    // TODO: tbaa_frame_value还是const
+    return loadValue<PyObject *>(slot, tbaa_frame_value, useName(name));
 }
 
 llvm::Value *Translator::getSymbol(size_t offset) {
@@ -302,7 +304,7 @@ PyBasicBlock &Translator::findPyBlock(unsigned offset) {
 
 void Translator::pyJumpIF(unsigned offset, bool pop_if_jump, bool jump_cond) {
     auto &jump_target = findPyBlock(offset);
-    jump_target.initial_stack_height = stack_height - pop_if_jump;
+    jump_target.initial_stack_height = stack_depth - pop_if_jump;
     auto false_cmp_block = createBlock("");
     auto slow_cmp_block = createBlock("");
     auto fall_block = createBlock("");
@@ -325,5 +327,5 @@ void Translator::pyJumpIF(unsigned offset, bool pop_if_jump, bool jump_cond) {
     }
     builder.SetInsertPoint(fall_block);
     do_Py_DECREF(obj);
-    stack_height--;
+    stack_depth--;
 }

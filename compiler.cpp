@@ -74,12 +74,12 @@ Compiler::Compiler() {
 
 sys::MemoryBlock loadCode(llvm::SmallVector<char> &obj_vec) {
     StringRef out_vec_ref{obj_vec.data(), obj_vec.size()};
-    StringRef code;
+    StringRef code{};
     auto obj = check(object::ObjectFile::createObjectFile(MemoryBufferRef(out_vec_ref, "")));
     for (auto &sec : obj->sections()) {
         if (sec.isText()) {
             assert(sec.relocations().empty());
-            assert(!code.data());
+            assert(code.empty());
             code = check(sec.getContents());
             assert(!code.empty());
         }

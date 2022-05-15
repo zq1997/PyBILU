@@ -229,7 +229,7 @@ constexpr auto searchSymbol() {
 
 extern const std::array<const char *, external_symbol_count> symbol_names;
 extern const std::array<void *, external_symbol_count> symbol_addresses;
-using TranslatedFunctionType = PyObject *(void *const[], PyFrameObject *, ptrdiff_t);
+using CompiledFunction = PyObject *(void *const[], PyFrameObject *, ptrdiff_t);
 
 template <typename T, typename = void>
 struct Normalizer;
@@ -340,7 +340,7 @@ class RegisteredLLVMTypes {
             NormalizedLLVMType<A>...,
             NormalizedLLVMType<std::remove_pointer_t<typename B::first_type>>...,
             NormalizedLLVMType<std::remove_pointer_t<C>>...,
-            NormalizedLLVMType<TranslatedFunctionType>> {
+            NormalizedLLVMType<CompiledFunction>> {
     };
     using FilteredTypes = TypeFilterHelper<
             std::tuple<void *, bool, char, short, int, long, long long>,
