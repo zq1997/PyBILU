@@ -88,7 +88,7 @@ PyObject *handle_BUILD_MAP(PyObject **arr, Py_ssize_t num);
 PyObject *handle_BUILD_CONST_KEY_MAP(PyObject **arr, Py_ssize_t num);
 void handle_LIST_APPEND(PyObject *list, PyObject *value);
 void handle_SET_ADD(PyObject *set, PyObject *value);
-void handle_MAP_ADD(PyObject *map,  PyObject *key, PyObject *value);
+void handle_MAP_ADD(PyObject *map, PyObject *key, PyObject *value);
 void handle_LIST_EXTEND(PyObject *list, PyObject *iterable);
 void handle_SET_UPDATE(PyObject *set, PyObject *iterable);
 void handle_DICT_UPDATE(PyObject *dict, PyObject *update);
@@ -262,26 +262,6 @@ struct Normalizer<Ret(Args...)> {
     using type = NormalizedType<Ret>(NormalizedType<Args>...);
 };
 
-template <typename...>
-struct TypeFilter;
-
-template <typename... Ts>
-struct TypeFilter<std::tuple<Ts...>> {
-    using type = std::tuple<Ts...>;
-
-    template <typename... Args>
-    static auto create(Args &&... args) {
-        return std::tuple{Ts{std::forward<Args>(args)...}...};
-    }
-};
-
-template <typename... Ts, typename T, typename... Us>
-struct TypeFilter<std::tuple<Ts...>, T, Us...> : std::conditional_t<(
-        std::is_same_v<Ts, T> || ...),
-        TypeFilter<std::tuple<Ts...>, Us...>,
-        TypeFilter<std::tuple<Ts..., T>, Us...>> {
-};
-
 template <typename T>
 static auto createType(llvm::LLVMContext &context) {
     if constexpr(std::is_void<T>::value) {
@@ -299,66 +279,71 @@ static auto createType(llvm::LLVMContext &context) {
     }
 }
 
-class RegisteredLLVMTypes {
-    template <typename T, typename = void>
-    struct LLVMType {
-        llvm::Type *type;
+template <typename T, typename = void>
+struct LLVMType {
+    llvm::Type *type;
 
-        LLVMType(llvm::LLVMContext &context, const llvm::DataLayout &dl) : type{createType<T>(context)} {}
-    };
-
-    template <typename T>
-    struct LLVMType<T, std::enable_if_t<std::is_scalar_v<T>>> {
-        decltype(createType<T>(std::declval<llvm::LLVMContext &>())) type;
-        llvm::Align align;
-
-        LLVMType(llvm::LLVMContext &context, const llvm::DataLayout &dl) :
-                type{createType<T>(context)}, align{dl.getABITypeAlign(type)} {}
-    };
-
-    template <typename Ret, typename... Args>
-    struct LLVMType<Ret(Args...)> {
-        llvm::FunctionType *type;
-
-        LLVMType(llvm::LLVMContext &context, const llvm::DataLayout &dl) : type{
-                llvm::FunctionType::get(
-                        createType<Ret>(context),
-                        {createType<Args>(context)...},
-                        false
-                )
-        } {}
-    };
-
-    template <typename T>
-    using NormalizedLLVMType = LLVMType<NormalizedType<T>>;
-
-    template <typename...>
-    struct TypeFilterHelper;
-    template <typename... A, typename... B, typename ...C>
-    struct TypeFilterHelper<std::tuple<A...>, const std::tuple<B...>, C...> : TypeFilter<
-            std::tuple<>,
-            NormalizedLLVMType<A>...,
-            NormalizedLLVMType<std::remove_pointer_t<typename B::first_type>>...,
-            NormalizedLLVMType<std::remove_pointer_t<C>>...,
-            NormalizedLLVMType<CompiledFunction>> {
-    };
-    using FilteredTypes = TypeFilterHelper<
-            std::tuple<void *, bool, char, short, int, long, long long>,
-            decltype(external_symbols),
-            decltype(PyTypeObject::tp_iternext)
-    >;
-
-    FilteredTypes::type data;
-
-public:
-    template <typename... Args>
-    explicit RegisteredLLVMTypes(Args &&... args) : data{FilteredTypes::create(std::forward<Args>(args)...)} {}
-
-    template <typename T>
-    [[nodiscard]] auto get() const { return std::get<NormalizedLLVMType<T>>(data).type; }
-
-    template <typename T>
-    [[nodiscard]] auto getAll() const { return std::get<NormalizedLLVMType<T>>(data); }
+    LLVMType(llvm::LLVMContext &context, const llvm::DataLayout &dl) : type{createType<T>(context)} {}
 };
 
+template <typename T>
+struct LLVMType<T, std::enable_if_t<std::is_scalar_v<T>>> {
+    decltype(createType<T>(std::declval<llvm::LLVMContext &>())) type;
+    llvm::Align align;
+
+    LLVMType(llvm::LLVMContext &context, const llvm::DataLayout &dl) :
+            type{createType<T>(context)}, align{dl.getABITypeAlign(type)} {}
+};
+
+template <typename Ret, typename... Args>
+struct LLVMType<Ret(Args...)> {
+    llvm::FunctionType *type;
+
+    LLVMType(llvm::LLVMContext &context, const llvm::DataLayout &dl) : type{
+            llvm::FunctionType::get(
+                    createType<Ret>(context),
+                    {createType<Args>(context)...},
+                    false
+            )
+    } {}
+};
+
+template <typename T>
+using NormalizedLLVMType = LLVMType<NormalizedType<T>>;
+
+
+template <typename...>
+struct TypeDeduplicator;
+
+template <typename... Ts>
+struct TypeDeduplicator<std::tuple<Ts...>> {
+    using type = std::tuple<Ts...>;
+
+    template <typename... Args>
+    static auto create(Args &&... args) {
+        return std::tuple{Ts{std::forward<Args>(args)...}...};
+    }
+};
+
+template <typename... Ts, typename T, typename... Us>
+struct TypeDeduplicator<std::tuple<Ts...>, T, Us...> : std::conditional_t<(
+        std::is_same_v<Ts, T> || ...),
+        TypeDeduplicator<std::tuple<Ts...>, Us...>,
+        TypeDeduplicator<std::tuple<Ts..., T>, Us...>> {
+};
+
+template <typename...>
+struct TypeDeduplicatorHelper;
+template <typename... A, typename... B, typename... C>
+struct TypeDeduplicatorHelper<std::tuple<A...>, const std::tuple<B...>, C...> : TypeDeduplicator<
+        std::tuple<>,
+        NormalizedLLVMType<A>...,
+        NormalizedLLVMType<std::remove_pointer_t<typename B::first_type>>...,
+        NormalizedLLVMType<std::remove_pointer_t<C>>...,
+        NormalizedLLVMType<CompiledFunction>> {
+};
+using RegisteredTypes = TypeDeduplicatorHelper<
+        std::tuple<void *, bool, char, short, int, long, long long>,
+        decltype(external_symbols),
+        decltype(PyTypeObject::tp_iternext)>;
 #endif

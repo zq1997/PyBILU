@@ -37,7 +37,7 @@ Compiler::Compiler() {
     string err;
     auto *target = TargetRegistry::lookupTarget(triple, err);
     throwIf(!target, err);
-    machine = unique_ptr<TargetMachine>(target->createTargetMachine(
+    machine.reset(target->createTargetMachine(
             triple,
             sys::getHostCPUName(),
             features.getString(),
@@ -48,25 +48,13 @@ Compiler::Compiler() {
     ));
     throwIf(!machine, "cannot create TargetMachine");
 
-
-    PassBuilder pb{machine.get()};
+    PassBuilder pb{&*machine};
     pb.registerModuleAnalyses(opt_MAM);
     pb.registerCGSCCAnalyses(opt_CGAM);
     pb.registerFunctionAnalyses(opt_FAM);
     pb.registerLoopAnalyses(opt_LAM);
     pb.crossRegisterProxies(opt_LAM, opt_FAM, opt_CGAM, opt_MAM);
     opt_MPM = pb.buildPerModuleDefaultPipeline(OptimizationLevel::O3);
-
-    // pb.registerModuleAnalyses(opt_MAM);
-    // pb.registerFunctionAnalyses(opt_FAM);
-    // pb.registerLoopAnalyses(opt_LAM);
-    // opt_FAM.registerPass([&] { return ModuleAnalysisManagerFunctionProxy(opt_MAM); });
-    // opt_FAM.registerPass([&] { return LoopAnalysisManagerFunctionProxy(opt_LAM); });
-    // opt_LAM.registerPass([&] { return FunctionAnalysisManagerLoopProxy(opt_FAM); });
-    // opt_FPM = pb.buildFunctionSimplificationPipeline(
-    //         OptimizationLevel::O3,
-    //         ThinOrFullLTOPhase::None
-    // );
 
     throwIf(machine->addPassesToEmitFile(out_PM, out_stream, nullptr, CodeGenFileType::CGFT_ObjectFile),
             "add emit pass error");
@@ -124,4 +112,44 @@ sys::MemoryBlock Compiler::compileForDebug(PyCodeObject *py_code, Module &mod) {
     auto mem = loadCode(out_vec);
     notifyCodeLoaded(py_code, mem.base());
     return mem;
+}
+
+WrappedContext::WrappedContext(const DataLayout &dl) :
+        context{},
+        registered_types{RegisteredTypes::create((context.enableOpaquePointers(), context), dl)},
+        c_null{ConstantPointerNull::get(type<void *>())} {
+    auto md_builder = MDBuilder(context);
+    likely_true = md_builder.createBranchWeights(INT32_MAX >> 1, 1);
+
+    auto tbaa_root = md_builder.createTBAARoot("TBAA root for CPython");
+    const auto &createTBAA = [&](const char *name, bool is_const = false) {
+        // TODO: 为啥name为空就会被合并
+        // if constexpr(!debug_build) {
+        //     name = "";
+        // }
+        auto scalar_node = md_builder.createTBAANode(name, tbaa_root);
+        return md_builder.createTBAAStructTagNode(scalar_node, scalar_node, 0, is_const);
+    };
+    tbaa_refcnt = createTBAA("reference counter");
+    tbaa_obj_field = createTBAA("object field");
+    tbaa_frame_value = createTBAA("frame value");
+    tbaa_code_const = createTBAA("code const", true);
+
+    auto attr_builder = AttrBuilder(context);
+    attr_builder
+            .addAttribute(Attribute::NoUnwind)
+            .addAttribute(Attribute::NoReturn);
+    attr_noreturn = AttributeList::get(context, AttributeList::FunctionIndex, attr_builder);
+    attr_builder.clear();
+    attr_builder
+            .addAttribute(Attribute::NoUnwind)
+            .addAttribute(Attribute::WillReturn)
+            .addAttribute(Attribute::ArgMemOnly);
+    attr_return = AttributeList::get(context, AttributeList::FunctionIndex, attr_builder);
+    attr_builder.clear();
+    attr_builder
+            .addAttribute(Attribute::NoUnwind)
+            .addAttribute("tune-cpu", sys::getHostCPUName())
+            .addAttribute(Attribute::InaccessibleMemOrArgMemOnly);
+    attr_default_call = AttributeList::get(context, AttributeList::FunctionIndex, attr_builder);
 }

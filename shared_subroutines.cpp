@@ -851,8 +851,7 @@ PyObject *handle_CALL_FUNCTION_KW(PyObject **func_args, Py_ssize_t nargs) {
     return ret;
 }
 
-template <typename... Args>
-static void formatFunctionCallError(PyThreadState *tstate, PyObject *func, const char *error, Args... args) {
+static void formatFunctionCallError(PyThreadState *tstate, PyObject *func, const char *error, auto... args) {
     PyObject *funcstr = _PyObject_FunctionStr(func);
     if (funcstr) {
         _PyErr_Format(tstate, PyExc_TypeError, error, funcstr, args...);

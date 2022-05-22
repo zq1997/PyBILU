@@ -8,7 +8,7 @@
 using namespace std;
 using namespace llvm;
 
-void Translator::emitBlock(DebugInfoBuilder &di_builder, unsigned index) {
+void WrappedModule::emitBlock(DebugInfoBuilder &di_builder, unsigned index) {
     blocks[index].block->insertInto(function);
     builder.SetInsertPoint(blocks[index].block);
     bool fall_through = true;
@@ -25,7 +25,7 @@ void Translator::emitBlock(DebugInfoBuilder &di_builder, unsigned index) {
         instr.next();
         // TODO：不如合并到cframe中去，一次性写入
         // 注意stack_height记录于此，这就意味着在调用”风险函数“之前不允许DECREF，否则可能DEC两次
-        storeValue<decltype(PyFrameObject::f_lasti)>(asValue(vpc), rt_lasti, tbaa_frame_value);
+        storeValue<decltype(PyFrameObject::f_lasti)>(asValue(vpc), rt_lasti, context.tbaa_frame_value);
         vpc_to_stack_depth[vpc] = stack_depth;
         di_builder.setLocation(builder, vpc);
 
@@ -67,17 +67,17 @@ void Translator::emitBlock(DebugInfoBuilder &di_builder, unsigned index) {
         case ROT_N: {
             auto dest_start = getStackSlot(1);
             auto src_start = getStackSlot(2);
-            auto top = loadValue<PyObject *>(dest_start, tbaa_frame_value);
+            auto top = loadValue<PyObject *>(dest_start, context.tbaa_frame_value);
             auto last_cell = getStackSlot(instr.oparg);
             auto entry_block = builder.GetInsertBlock();
             auto loop_block = createBlock("ROT_N.loop");
             auto end_block = createBlock("ROT_N.end");
             builder.CreateBr(loop_block);
             builder.SetInsertPoint(loop_block);
-            auto dest = builder.CreatePHI(types.get<PyObject *>(), 2);
-            auto src = builder.CreatePHI(types.get<PyObject *>(), 2);
-            auto value = loadValue<PyObject *>(src, tbaa_frame_value);
-            storeValue<PyObject *>(value, dest, tbaa_frame_value);
+            auto dest = builder.CreatePHI(context.type<PyObject *>(), 2);
+            auto src = builder.CreatePHI(context.type<PyObject *>(), 2);
+            auto value = loadValue<PyObject *>(src, context.tbaa_frame_value);
+            storeValue<PyObject *>(value, dest, context.tbaa_frame_value);
             auto src_update = getPointer<PyObject *>(src, -1);
             auto should_break = builder.CreateICmpEQ(dest, last_cell);
             builder.CreateCondBr(should_break, end_block, loop_block);
@@ -86,7 +86,7 @@ void Translator::emitBlock(DebugInfoBuilder &di_builder, unsigned index) {
             src->addIncoming(src_start, entry_block);
             src->addIncoming(src_update, loop_block);
             builder.SetInsertPoint(entry_block);
-            storeValue<PyObject *>(top, last_cell, tbaa_frame_value);
+            storeValue<PyObject *>(top, last_cell, context.tbaa_frame_value);
         }
         case DUP_TOP: {
             auto top = do_PEAK(1);
@@ -118,7 +118,7 @@ void Translator::emitBlock(DebugInfoBuilder &di_builder, unsigned index) {
                 }
             }
             auto ptr = getPointer<PyObject *>(code_consts, instr.oparg);
-            auto value = loadValue<PyObject *>(ptr, tbaa_code_const, useName(repr));
+            auto value = loadValue<PyObject *>(ptr, context.tbaa_code_const, useName(repr));
             if constexpr(debug_build) {
                 Py_DECREF(repr);
             }
@@ -129,7 +129,7 @@ void Translator::emitBlock(DebugInfoBuilder &di_builder, unsigned index) {
         case LOAD_FAST: {
             auto value = do_GETLOCAL(instr.oparg);
             auto ok_block = createBlock("LOAD_FAST.OK");
-            builder.CreateCondBr(builder.CreateICmpNE(value, c_null), ok_block, error_block, likely_true);
+            builder.CreateCondBr(builder.CreateICmpNE(value, context.c_null), ok_block, error_block, context.likely_true);
             builder.SetInsertPoint(ok_block);
             do_Py_INCREF(value);
             do_PUSH(value);
@@ -143,112 +143,112 @@ void Translator::emitBlock(DebugInfoBuilder &di_builder, unsigned index) {
         case DELETE_FAST: {
             auto value = do_GETLOCAL(instr.oparg);
             auto ok_block = createBlock("DELETE_FAST.OK");
-            builder.CreateCondBr(builder.CreateICmpNE(value, c_null), ok_block, error_block, likely_true);
+            builder.CreateCondBr(builder.CreateICmpNE(value, context.c_null), ok_block, error_block, context.likely_true);
             builder.SetInsertPoint(ok_block);
-            do_SETLOCAL(instr.oparg, c_null); // 可优化
+            do_SETLOCAL(instr.oparg, context.c_null); // 可优化
             break;
         }
         case LOAD_DEREF: {
             auto cell = getFreevar(instr.oparg);
-            auto value = loadFieldValue(cell, &PyCellObject::ob_ref, tbaa_obj_field);
+            auto value = loadFieldValue(cell, &PyCellObject::ob_ref, context.tbaa_obj_field);
             auto ok_block = createBlock("LOAD_DEREF.OK");
-            builder.CreateCondBr(builder.CreateICmpNE(value, c_null), ok_block, error_block, likely_true);
+            builder.CreateCondBr(builder.CreateICmpNE(value, context.c_null), ok_block, error_block, context.likely_true);
             builder.SetInsertPoint(ok_block);
             do_Py_INCREF(value);
             do_PUSH(value);
             break;
         }
         case LOAD_CLASSDEREF: {
-            auto value = do_CallSymbol<handle_LOAD_CLASSDEREF>(frame_obj, asValue(instr.oparg));
+            auto value = callSymbol<handle_LOAD_CLASSDEREF>(frame_obj, asValue(instr.oparg));
             do_PUSH(value);
             break;
         }
         case STORE_DEREF: {
             auto cell = getFreevar(instr.oparg);
             auto cell_slot = getPointer(cell, &PyCellObject::ob_ref);
-            auto old_value = loadValue<PyObject *>(cell_slot, tbaa_obj_field);
+            auto old_value = loadValue<PyObject *>(cell_slot, context.tbaa_obj_field);
             auto value = do_POP();
-            storeValue<PyObject *>(value, cell_slot, tbaa_obj_field);
+            storeValue<PyObject *>(value, cell_slot, context.tbaa_obj_field);
             do_Py_XDECREF(old_value);
             break;
         }
         case DELETE_DEREF: {
             auto cell = getFreevar(instr.oparg);
             auto cell_slot = getPointer(cell, &PyCellObject::ob_ref);
-            auto old_value = loadValue<PyObject *>(cell_slot, tbaa_obj_field);
+            auto old_value = loadValue<PyObject *>(cell_slot, context.tbaa_obj_field);
             auto ok_block = createBlock("DELETE_DEREF.OK");
-            builder.CreateCondBr(builder.CreateICmpNE(old_value, c_null), ok_block, error_block, likely_true);
+            builder.CreateCondBr(builder.CreateICmpNE(old_value, context.c_null), ok_block, error_block, context.likely_true);
             builder.SetInsertPoint(ok_block);
-            storeValue<PyObject *>(c_null, cell_slot, tbaa_obj_field);
+            storeValue<PyObject *>(context.c_null, cell_slot, context.tbaa_obj_field);
             do_Py_DECREF(old_value);
             break;
         }
         case LOAD_GLOBAL: {
-            auto value = do_CallSymbol<handle_LOAD_GLOBAL>(frame_obj, getName(instr.oparg));
+            auto value = callSymbol<handle_LOAD_GLOBAL>(frame_obj, getName(instr.oparg));
             do_PUSH(value);
             break;
         }
         case STORE_GLOBAL: {
             auto value = do_POP();
-            do_CallSymbol<handle_STORE_GLOBAL>(frame_obj, getName(instr.oparg), value);
+            callSymbol<handle_STORE_GLOBAL>(frame_obj, getName(instr.oparg), value);
             do_Py_DECREF(value);
             break;
         }
         case DELETE_GLOBAL: {
-            do_CallSymbol<handle_DELETE_GLOBAL>(frame_obj, getName(instr.oparg));
+            callSymbol<handle_DELETE_GLOBAL>(frame_obj, getName(instr.oparg));
             break;
         }
         case LOAD_NAME: {
-            auto value = do_CallSymbol<handle_LOAD_NAME>(frame_obj, getName(instr.oparg));
+            auto value = callSymbol<handle_LOAD_NAME>(frame_obj, getName(instr.oparg));
             do_PUSH(value);
             break;
         }
         case STORE_NAME: {
             auto value = do_POP();
-            do_CallSymbol<handle_STORE_NAME>(frame_obj, getName(instr.oparg), value);
+            callSymbol<handle_STORE_NAME>(frame_obj, getName(instr.oparg), value);
             do_Py_DECREF(value);
             break;
         }
         case DELETE_NAME: {
-            do_CallSymbol<handle_DELETE_NAME>(frame_obj, getName(instr.oparg));
+            callSymbol<handle_DELETE_NAME>(frame_obj, getName(instr.oparg));
             break;
         }
         case LOAD_ATTR: {
             auto owner = do_POP();
-            auto attr = do_CallSymbol<handle_LOAD_ATTR>(owner, getName(instr.oparg));
+            auto attr = callSymbol<handle_LOAD_ATTR>(owner, getName(instr.oparg));
             do_PUSH(attr);
             do_Py_DECREF(owner);
             break;
         }
         case LOAD_METHOD: {
             auto obj = do_POP();
-            do_CallSymbol<handle_LOAD_METHOD>(obj, getName(instr.oparg), getStackSlot(0));
+            callSymbol<handle_LOAD_METHOD>(obj, getName(instr.oparg), getStackSlot(0));
             stack_depth += 2;
             break;
         }
         case STORE_ATTR: {
             auto owner = do_POP();
             auto value = do_POP();
-            do_CallSymbol<handle_STORE_ATTR>(owner, getName(instr.oparg), value);
+            callSymbol<handle_STORE_ATTR>(owner, getName(instr.oparg), value);
             do_Py_DECREF(value);
             do_Py_DECREF(owner);
             break;
         }
         case DELETE_ATTR: {
             auto owner = do_POP();
-            do_CallSymbol<handle_STORE_ATTR>(owner, getName(instr.oparg), c_null);
+            callSymbol<handle_STORE_ATTR>(owner, getName(instr.oparg), context.c_null);
             do_Py_DECREF(owner);
             break;
         }
         case BINARY_SUBSCR: {
-            handle_BINARY_OP(searchSymbol<handle_BINARY_SUBSCR>());
+            emit_BINARY_OP<handle_BINARY_SUBSCR>();
             break;
         }
         case STORE_SUBSCR: {
             auto sub = do_POP();
             auto container = do_POP();
             auto value = do_POP();
-            do_CallSymbol<handle_STORE_SUBSCR>(container, sub, value);
+            callSymbol<handle_STORE_SUBSCR>(container, sub, value);
             do_Py_DECREF(value);
             do_Py_DECREF(container);
             do_Py_DECREF(sub);
@@ -257,136 +257,136 @@ void Translator::emitBlock(DebugInfoBuilder &di_builder, unsigned index) {
         case DELETE_SUBSCR: {
             auto sub = do_POP();
             auto container = do_POP();
-            do_CallSymbol<handle_STORE_SUBSCR>(container, sub, c_null);
+            callSymbol<handle_STORE_SUBSCR>(container, sub, context.c_null);
             do_Py_DECREF(container);
             do_Py_DECREF(sub);
             break;
         }
         case UNARY_NOT: {
-            handle_UNARY_OP(searchSymbol<handle_UNARY_NOT>());
+            emit_UNARY_OP<handle_UNARY_NOT>();
             break;
         }
         case UNARY_POSITIVE: {
-            handle_UNARY_OP(searchSymbol<handle_UNARY_POSITIVE>());
+            emit_UNARY_OP<handle_UNARY_POSITIVE>();
             break;
         }
         case UNARY_NEGATIVE: {
-            handle_UNARY_OP(searchSymbol<handle_UNARY_NEGATIVE>());
+            emit_UNARY_OP<handle_UNARY_NEGATIVE>();
             break;
         }
         case UNARY_INVERT: {
-            handle_UNARY_OP(searchSymbol<handle_UNARY_INVERT>());
+            emit_UNARY_OP<handle_UNARY_INVERT>();
             break;
         }
         case BINARY_ADD: {
-            handle_BINARY_OP(searchSymbol<handle_BINARY_ADD>());
+            emit_BINARY_OP<handle_BINARY_ADD>();
             break;
         }
         case INPLACE_ADD: {
-            handle_BINARY_OP(searchSymbol<handle_INPLACE_ADD>());
+            emit_BINARY_OP<handle_INPLACE_ADD>();
             break;
         }
         case BINARY_SUBTRACT: {
-            handle_BINARY_OP(searchSymbol<handle_BINARY_SUBTRACT>());
+            emit_BINARY_OP<handle_BINARY_SUBTRACT>();
             break;
         }
         case INPLACE_SUBTRACT: {
-            handle_BINARY_OP(searchSymbol<handle_INPLACE_SUBTRACT>());
+            emit_BINARY_OP<handle_INPLACE_SUBTRACT>();
             break;
         }
         case BINARY_MULTIPLY: {
-            handle_BINARY_OP(searchSymbol<handle_BINARY_MULTIPLY>());
+            emit_BINARY_OP<handle_BINARY_MULTIPLY>();
             break;
         }
         case INPLACE_MULTIPLY: {
-            handle_BINARY_OP(searchSymbol<handle_INPLACE_MULTIPLY>());
+            emit_BINARY_OP<handle_INPLACE_MULTIPLY>();
             break;
         }
         case BINARY_FLOOR_DIVIDE: {
-            handle_BINARY_OP(searchSymbol<handle_BINARY_FLOOR_DIVIDE>());
+            emit_BINARY_OP<handle_BINARY_FLOOR_DIVIDE>();
             break;
         }
         case INPLACE_FLOOR_DIVIDE: {
-            handle_BINARY_OP(searchSymbol<handle_INPLACE_FLOOR_DIVIDE>());
+            emit_BINARY_OP<handle_INPLACE_FLOOR_DIVIDE>();
             break;
         }
         case BINARY_TRUE_DIVIDE: {
-            handle_BINARY_OP(searchSymbol<handle_BINARY_TRUE_DIVIDE>());
+            emit_BINARY_OP<handle_BINARY_TRUE_DIVIDE>();
             break;
         }
         case INPLACE_TRUE_DIVIDE: {
-            handle_BINARY_OP(searchSymbol<handle_INPLACE_TRUE_DIVIDE>());
+            emit_BINARY_OP<handle_INPLACE_TRUE_DIVIDE>();
             break;
         }
         case BINARY_MODULO: {
-            handle_BINARY_OP(searchSymbol<handle_BINARY_MODULO>());
+            emit_BINARY_OP<handle_BINARY_MODULO>();
             break;
         }
         case INPLACE_MODULO: {
-            handle_BINARY_OP(searchSymbol<handle_INPLACE_MODULO>());
+            emit_BINARY_OP<handle_INPLACE_MODULO>();
             break;
         }
         case BINARY_POWER: {
-            handle_BINARY_OP(searchSymbol<handle_BINARY_POWER>());
+            emit_BINARY_OP<handle_BINARY_POWER>();
             break;
         }
         case INPLACE_POWER: {
-            handle_BINARY_OP(searchSymbol<handle_INPLACE_POWER>());
+            emit_BINARY_OP<handle_INPLACE_POWER>();
             break;
         }
         case BINARY_MATRIX_MULTIPLY: {
-            handle_BINARY_OP(searchSymbol<handle_BINARY_MATRIX_MULTIPLY>());
+            emit_BINARY_OP<handle_BINARY_MATRIX_MULTIPLY>();
             break;
         }
         case INPLACE_MATRIX_MULTIPLY: {
-            handle_BINARY_OP(searchSymbol<handle_INPLACE_MATRIX_MULTIPLY>());
+            emit_BINARY_OP<handle_INPLACE_MATRIX_MULTIPLY>();
             break;
         }
         case BINARY_LSHIFT: {
-            handle_BINARY_OP(searchSymbol<handle_BINARY_LSHIFT>());
+            emit_BINARY_OP<handle_BINARY_LSHIFT>();
             break;
         }
         case INPLACE_LSHIFT: {
-            handle_BINARY_OP(searchSymbol<handle_INPLACE_LSHIFT>());
+            emit_BINARY_OP<handle_INPLACE_LSHIFT>();
             break;
         }
         case BINARY_RSHIFT: {
-            handle_BINARY_OP(searchSymbol<handle_BINARY_RSHIFT>());
+            emit_BINARY_OP<handle_BINARY_RSHIFT>();
             break;
         }
         case INPLACE_RSHIFT: {
-            handle_BINARY_OP(searchSymbol<handle_INPLACE_RSHIFT>());
+            emit_BINARY_OP<handle_INPLACE_RSHIFT>();
             break;
         }
         case BINARY_AND: {
-            handle_BINARY_OP(searchSymbol<handle_BINARY_AND>());
+            emit_BINARY_OP<handle_BINARY_AND>();
             break;
         }
         case INPLACE_AND: {
-            handle_BINARY_OP(searchSymbol<handle_INPLACE_AND>());
+            emit_BINARY_OP<handle_INPLACE_AND>();
             break;
         }
         case BINARY_OR: {
-            handle_BINARY_OP(searchSymbol<handle_BINARY_OR>());
+            emit_BINARY_OP<handle_BINARY_OR>();
             break;
         }
         case INPLACE_OR: {
-            handle_BINARY_OP(searchSymbol<handle_INPLACE_OR>());
+            emit_BINARY_OP<handle_INPLACE_OR>();
             break;
         }
         case BINARY_XOR: {
-            handle_BINARY_OP(searchSymbol<handle_BINARY_XOR>());
+            emit_BINARY_OP<handle_BINARY_XOR>();
             break;
         }
         case INPLACE_XOR: {
-            handle_BINARY_OP(searchSymbol<handle_INPLACE_XOR>());
+            emit_BINARY_OP<handle_INPLACE_XOR>();
             break;
         }
         case COMPARE_OP: {
             auto right = do_POP();
             auto left = do_POP();
             // TODO: asValue应该是形参类型
-            auto res = do_CallSymbol<handle_COMPARE_OP>(left, right, asValue<int>(instr.oparg));
+            auto res = callSymbol<handle_COMPARE_OP>(left, right, asValue<int>(instr.oparg));
             do_PUSH(res);
             do_Py_DECREF(left);
             do_Py_DECREF(right);
@@ -405,7 +405,7 @@ void Translator::emitBlock(DebugInfoBuilder &di_builder, unsigned index) {
         case CONTAINS_OP: {
             auto right = do_POP();
             auto left = do_POP();
-            auto res = do_CallSymbol<handle_CONTAINS_OP>(left, right, asValue<bool>(instr.oparg));
+            auto res = callSymbol<handle_CONTAINS_OP>(left, right, asValue<bool>(instr.oparg));
             auto py_true = getSymbol(searchSymbol<_Py_TrueStruct>());
             auto py_false = getSymbol(searchSymbol<_Py_FalseStruct>());
             auto value_for_true = !instr.oparg ? py_true : py_false;
@@ -427,25 +427,25 @@ void Translator::emitBlock(DebugInfoBuilder &di_builder, unsigned index) {
             // func_args重命名
             stack_depth -= instr.oparg + 1;
             auto func_args = getStackSlot(0);
-            auto ret = do_CallSymbol<handle_CALL_FUNCTION>(func_args, asValue<Py_ssize_t>(instr.oparg));
+            auto ret = callSymbol<handle_CALL_FUNCTION>(func_args, asValue<Py_ssize_t>(instr.oparg));
             do_PUSH(ret);
             break;
         }
         case CALL_FUNCTION_KW: {
             stack_depth -= instr.oparg + 2;
             auto func_args = getStackSlot(0);
-            auto ret = do_CallSymbol<handle_CALL_FUNCTION_KW>(func_args, asValue<Py_ssize_t>(instr.oparg));
+            auto ret = callSymbol<handle_CALL_FUNCTION_KW>(func_args, asValue<Py_ssize_t>(instr.oparg));
             do_PUSH(ret);
             break;
         }
         case CALL_FUNCTION_EX: {
-            llvm::Value *kwargs = c_null;
+            llvm::Value *kwargs = context.c_null;
             if (instr.oparg) {
                 kwargs = do_POP();
             }
             auto args = do_POP();
             auto callable = do_POP();
-            auto ret = do_CallSymbol<handle_CALL_FUNCTION_EX>(callable, args, kwargs);
+            auto ret = callSymbol<handle_CALL_FUNCTION_EX>(callable, args, kwargs);
             do_PUSH(ret);
             if (instr.oparg) {
                 do_Py_DECREF(kwargs);
@@ -457,16 +457,16 @@ void Translator::emitBlock(DebugInfoBuilder &di_builder, unsigned index) {
         case CALL_METHOD: {
             auto maybe_meth = do_PEAK(instr.oparg + 2);
             stack_depth -= instr.oparg + 2;
-            auto is_meth = builder.CreateICmpNE(maybe_meth, c_null);
+            auto is_meth = builder.CreateICmpNE(maybe_meth, context.c_null);
             auto func_args = builder.CreateSelect(is_meth, getStackSlot(0), getStackSlot(-1));
             auto nargs = builder.CreateSelect(is_meth,
                     asValue<Py_ssize_t>(instr.oparg + 1), asValue<Py_ssize_t>(instr.oparg));
-            auto ret = do_CallSymbol<handle_CALL_FUNCTION>(func_args, nargs);
+            auto ret = callSymbol<handle_CALL_FUNCTION>(func_args, nargs);
             do_PUSH(ret);
             break;
         }
         case LOAD_CLOSURE: {
-            auto cell = loadValue<PyObject *>(getFreevar(instr.oparg), tbaa_code_const);
+            auto cell = loadValue<PyObject *>(getFreevar(instr.oparg), context.tbaa_code_const);
             do_Py_INCREF(cell);
             do_PUSH(cell);
             break;
@@ -474,23 +474,23 @@ void Translator::emitBlock(DebugInfoBuilder &di_builder, unsigned index) {
         case MAKE_FUNCTION: {
             auto qualname = do_POP();
             auto codeobj = do_POP();
-            auto globals = loadFieldValue(frame_obj, &PyFrameObject::f_globals, tbaa_code_const);
-            auto py_func = do_CallSymbol<PyFunction_NewWithQualName>(codeobj, globals, qualname);
+            auto globals = loadFieldValue(frame_obj, &PyFrameObject::f_globals, context.tbaa_code_const);
+            auto py_func = callSymbol<PyFunction_NewWithQualName>(codeobj, globals, qualname);
             auto ok_block = createBlock("MAKE_FUNCTION.OK");
-            builder.CreateCondBr(builder.CreateICmpNE(py_func, c_null), ok_block, error_block, likely_true);
+            builder.CreateCondBr(builder.CreateICmpNE(py_func, context.c_null), ok_block, error_block, context.likely_true);
             builder.SetInsertPoint(ok_block);
             // TODO: 一个新的tbaa
             if (instr.oparg & 0x08) {
-                storeFiledValue(do_POP(), py_func, &PyFunctionObject::func_closure, tbaa_refcnt);
+                storeFiledValue(do_POP(), py_func, &PyFunctionObject::func_closure, context.tbaa_refcnt);
             }
             if (instr.oparg & 0x04) {
-                storeFiledValue(do_POP(), py_func, &PyFunctionObject::func_annotations, tbaa_refcnt);
+                storeFiledValue(do_POP(), py_func, &PyFunctionObject::func_annotations, context.tbaa_refcnt);
             }
             if (instr.oparg & 0x02) {
-                storeFiledValue(do_POP(), py_func, &PyFunctionObject::func_kwdefaults, tbaa_refcnt);
+                storeFiledValue(do_POP(), py_func, &PyFunctionObject::func_kwdefaults, context.tbaa_refcnt);
             }
             if (instr.oparg & 0x01) {
-                storeFiledValue(do_POP(), py_func, &PyFunctionObject::func_defaults, tbaa_refcnt);
+                storeFiledValue(do_POP(), py_func, &PyFunctionObject::func_defaults, context.tbaa_refcnt);
             }
             do_PUSH(py_func);
             do_Py_DECREF(codeobj);
@@ -498,8 +498,8 @@ void Translator::emitBlock(DebugInfoBuilder &di_builder, unsigned index) {
             break;
         }
         case LOAD_BUILD_CLASS: {
-            auto builtins = loadFieldValue(frame_obj, &PyFrameObject::f_builtins, tbaa_code_const);
-            auto bc = do_CallSymbol<handle_LOAD_BUILD_CLASS>(builtins);
+            auto builtins = loadFieldValue(frame_obj, &PyFrameObject::f_builtins, context.tbaa_code_const);
+            auto bc = callSymbol<handle_LOAD_BUILD_CLASS>(builtins);
             do_PUSH(bc);
             break;
         }
@@ -508,7 +508,7 @@ void Translator::emitBlock(DebugInfoBuilder &di_builder, unsigned index) {
             auto name = getName(instr.oparg);
             auto fromlist = do_POP();
             auto level = do_POP();
-            auto res = do_CallSymbol<handle_IMPORT_NAME>(frame_obj, name, fromlist, level);
+            auto res = callSymbol<handle_IMPORT_NAME>(frame_obj, name, fromlist, level);
             do_PUSH(res);
             Py_DECREF(level);
             Py_DECREF(fromlist);
@@ -516,13 +516,13 @@ void Translator::emitBlock(DebugInfoBuilder &di_builder, unsigned index) {
         }
         case IMPORT_FROM: {
             auto from = do_PEAK(1);
-            auto res = do_CallSymbol<handle_IMPORT_FROM>(from, getName(instr.oparg));
+            auto res = callSymbol<handle_IMPORT_FROM>(from, getName(instr.oparg));
             do_PUSH(res);
             break;
         }
         case IMPORT_STAR: {
             auto from = do_POP();
-            do_CallSymbol<handle_IMPORT_STAR>(frame_obj, from);
+            callSymbol<handle_IMPORT_STAR>(frame_obj, from);
             do_Py_DECREF(from);
             break;
         }
@@ -560,7 +560,7 @@ void Translator::emitBlock(DebugInfoBuilder &di_builder, unsigned index) {
         }
         case GET_ITER: {
             auto iterable = do_POP();
-            auto iter = do_CallSymbol<handle_GET_ITER>(iterable);
+            auto iter = callSymbol<handle_GET_ITER>(iterable);
             do_Py_DECREF(iterable);
             do_PUSH(iter);
             break;
@@ -568,12 +568,12 @@ void Translator::emitBlock(DebugInfoBuilder &di_builder, unsigned index) {
         case FOR_ITER: {
             auto sp = stack_depth;
             auto iter = do_PEAK(1);
-            auto the_type = loadFieldValue(iter, &PyObject::ob_type, tbaa_obj_field);
-            auto the_iternextfunc = loadFieldValue(the_type, &PyTypeObject::tp_iternext, tbaa_obj_field);
-            auto next = do_Call(types.get<remove_pointer_t<iternextfunc>>(), the_iternextfunc, iter);
+            auto the_type = loadFieldValue(iter, &PyObject::ob_type, context.tbaa_obj_field);
+            auto the_iternextfunc = loadFieldValue(the_type, &PyTypeObject::tp_iternext, context.tbaa_obj_field);
+            auto next = callFunction(context.type<remove_pointer_t<iternextfunc>>(), the_iternextfunc, iter);
             auto b_continue = createBlock("FOR_ITER.continue");
             auto b_break = createBlock("FOR_ITER.break");
-            builder.CreateCondBr(builder.CreateICmpEQ(next, c_null), b_break, b_continue);
+            builder.CreateCondBr(builder.CreateICmpEQ(next, context.c_null), b_break, b_continue);
             builder.SetInsertPoint(b_break);
             do_Py_DECREF(iter);
             auto &break_block = findPyBlock(instr.offset + instr.oparg);
@@ -588,49 +588,49 @@ void Translator::emitBlock(DebugInfoBuilder &di_builder, unsigned index) {
         case BUILD_TUPLE: {
             stack_depth -= instr.oparg;
             auto values = getStackSlot(0);
-            auto map = do_CallSymbol<handle_BUILD_TUPLE>(values, asValue<Py_ssize_t>(instr.oparg));
+            auto map = callSymbol<handle_BUILD_TUPLE>(values, asValue<Py_ssize_t>(instr.oparg));
             do_PUSH(map);
             break;
         }
         case BUILD_LIST: {
             stack_depth -= instr.oparg;
             auto values = getStackSlot(0);
-            auto map = do_CallSymbol<handle_BUILD_LIST>(values, asValue<Py_ssize_t>(instr.oparg));
+            auto map = callSymbol<handle_BUILD_LIST>(values, asValue<Py_ssize_t>(instr.oparg));
             do_PUSH(map);
             break;
         }
         case BUILD_SET: {
             stack_depth -= instr.oparg;
             auto values = getStackSlot(0);
-            auto map = do_CallSymbol<handle_BUILD_SET>(values, asValue<Py_ssize_t>(instr.oparg));
+            auto map = callSymbol<handle_BUILD_SET>(values, asValue<Py_ssize_t>(instr.oparg));
             do_PUSH(map);
             break;
         }
         case BUILD_MAP: {
             stack_depth -= 2 * instr.oparg;
             auto values = getStackSlot(0);
-            auto map = do_CallSymbol<handle_BUILD_MAP>(values, asValue<Py_ssize_t>(instr.oparg));
+            auto map = callSymbol<handle_BUILD_MAP>(values, asValue<Py_ssize_t>(instr.oparg));
             do_PUSH(map);
             break;
         }
         case BUILD_CONST_KEY_MAP: {
             stack_depth -= instr.oparg + 1;
             auto values = getStackSlot(0);
-            auto map = do_CallSymbol<handle_BUILD_CONST_KEY_MAP>(values, asValue<Py_ssize_t>(instr.oparg));
+            auto map = callSymbol<handle_BUILD_CONST_KEY_MAP>(values, asValue<Py_ssize_t>(instr.oparg));
             do_PUSH(map);
             break;
         }
         case LIST_APPEND: {
             auto value = do_POP();
             auto list = do_PEAK(instr.oparg);
-            do_CallSymbol<handle_LIST_APPEND>(list, value);
+            callSymbol<handle_LIST_APPEND>(list, value);
             do_Py_DECREF(value);
             break;
         }
         case SET_ADD: {
             auto value = do_POP();
             auto set = do_PEAK(instr.oparg);
-            do_CallSymbol<handle_SET_ADD>(set, value);
+            callSymbol<handle_SET_ADD>(set, value);
             do_Py_DECREF(value);
             break;
         }
@@ -638,7 +638,7 @@ void Translator::emitBlock(DebugInfoBuilder &di_builder, unsigned index) {
             auto value = do_POP();
             auto key = do_POP();
             auto map = do_PEAK(instr.oparg);
-            do_CallSymbol<handle_MAP_ADD>(map, key, value);
+            callSymbol<handle_MAP_ADD>(map, key, value);
             do_Py_DECREF(key);
             do_Py_DECREF(value);
             break;
@@ -646,21 +646,21 @@ void Translator::emitBlock(DebugInfoBuilder &di_builder, unsigned index) {
         case LIST_EXTEND: {
             auto iterable = do_POP();
             auto list = do_PEAK(instr.oparg);
-            do_CallSymbol<handle_LIST_EXTEND>(list, iterable);
+            callSymbol<handle_LIST_EXTEND>(list, iterable);
             do_Py_DECREF(iterable);
             break;
         }
         case SET_UPDATE: {
             auto iterable = do_POP();
             auto set = do_PEAK(instr.oparg);
-            do_CallSymbol<handle_SET_UPDATE>(set, iterable);
+            callSymbol<handle_SET_UPDATE>(set, iterable);
             do_Py_DECREF(iterable);
             break;
         }
         case DICT_UPDATE: {
             auto update = do_POP();
             auto dict = do_PEAK(instr.oparg);
-            do_CallSymbol<handle_DICT_UPDATE>(dict, update);
+            callSymbol<handle_DICT_UPDATE>(dict, update);
             do_Py_DECREF(update);
             break;
         }
@@ -668,30 +668,30 @@ void Translator::emitBlock(DebugInfoBuilder &di_builder, unsigned index) {
             auto update = do_POP();
             auto dict = do_PEAK(instr.oparg);
             auto callee = do_PEAK(instr.oparg + 2);
-            do_CallSymbol<handle_DICT_MERGE>(callee, dict, update);
+            callSymbol<handle_DICT_MERGE>(callee, dict, update);
             do_Py_DECREF(update);
             break;
         }
         case LIST_TO_TUPLE: {
             auto list = do_POP();
-            auto tuple = do_CallSymbol<handle_LIST_TO_TUPLE>(list);
+            auto tuple = callSymbol<handle_LIST_TO_TUPLE>(list);
             do_PUSH(tuple);
             do_Py_DECREF(list);
             break;
         }
 
         case FORMAT_VALUE: {
-            auto fmt_spec = (instr.oparg & FVS_MASK) == FVS_HAVE_SPEC ? do_POP() : c_null;
+            auto fmt_spec = (instr.oparg & FVS_MASK) == FVS_HAVE_SPEC ? do_POP() : context.c_null;
             auto value = do_POP();
             int which_conversion = instr.oparg & FVC_MASK;
-            auto result = do_CallSymbol<handle_FORMAT_VALUE>(value, fmt_spec, asValue(which_conversion));
+            auto result = callSymbol<handle_FORMAT_VALUE>(value, fmt_spec, asValue(which_conversion));
             do_PUSH(result);
             do_Py_DECREF(value);
         }
         case BUILD_STRING: {
             stack_depth -= instr.oparg;
             auto values = getStackSlot(0);
-            auto str = do_CallSymbol<handle_BUILD_STRING>(values, asValue<Py_ssize_t>(instr.oparg));
+            auto str = callSymbol<handle_BUILD_STRING>(values, asValue<Py_ssize_t>(instr.oparg));
             do_PUSH(str);
             break;
         }
@@ -756,27 +756,27 @@ void Translator::emitBlock(DebugInfoBuilder &di_builder, unsigned index) {
             py_finally_block.initial_stack_height = stack_depth + 6;
             py_finally_block.is_handler = true;
             auto block_addr_diff = builder.CreateSub(
-                    builder.CreatePtrToInt(BlockAddress::get(function, py_finally_block.block), types.get<uintptr_t>()),
-                    builder.CreatePtrToInt(BlockAddress::get(function, blocks[1].block), types.get<uintptr_t>())
+                    builder.CreatePtrToInt(BlockAddress::get(function, py_finally_block.block), context.type<uintptr_t>()),
+                    builder.CreatePtrToInt(BlockAddress::get(function, blocks[1].block), context.type<uintptr_t>())
             );
-            do_CallSymbol<PyFrame_BlockSetup>(frame_obj,
+            callSymbol<PyFrame_BlockSetup>(frame_obj,
                     asValue<int>(SETUP_FINALLY),
-                    builder.CreateIntCast(block_addr_diff, types.get<int>(), true),
+                    builder.CreateIntCast(block_addr_diff, context.type<int>(), true),
                     asValue<int>(stack_depth));
             break;
         }
         case POP_BLOCK: {
-            do_CallSymbol<PyFrame_BlockPop>(frame_obj);
+            callSymbol<PyFrame_BlockPop>(frame_obj);
             break;
         }
         case POP_EXCEPT: {
-            do_CallSymbol<handle_POP_EXCEPT>(frame_obj);
+            callSymbol<handle_POP_EXCEPT>(frame_obj);
             break;
         }
         case JUMP_IF_NOT_EXC_MATCH: {
             auto right = do_POP();
             auto left = do_POP();
-            auto match = do_CallSymbol<handle_JUMP_IF_NOT_EXC_MATCH>(left, right);
+            auto match = callSymbol<handle_JUMP_IF_NOT_EXC_MATCH>(left, right);
             do_Py_DECREF(left);
             do_Py_DECREF(right);
             auto &jump_target = findPyBlock(instr.oparg);
@@ -787,7 +787,7 @@ void Translator::emitBlock(DebugInfoBuilder &di_builder, unsigned index) {
             break;
         }
         case RERAISE: {
-            do_CallSymbol<handle_RERAISE, &Translator::attr_noreturn>(frame_obj, asValue<bool>(instr.oparg));
+            callSymbol<handle_RERAISE, &WrappedContext::attr_noreturn>(frame_obj, asValue<bool>(instr.oparg));
             builder.CreateUnreachable();
             fall_through = false;
             break;
@@ -797,11 +797,11 @@ void Translator::emitBlock(DebugInfoBuilder &di_builder, unsigned index) {
             py_finally_block.initial_stack_height = stack_depth - 1 + 7;
             py_finally_block.is_handler = true;
             auto block_addr_diff = builder.CreateSub(
-                    builder.CreatePtrToInt(BlockAddress::get(function, py_finally_block.block), types.get<uintptr_t>()),
-                    builder.CreatePtrToInt(BlockAddress::get(function, blocks[1].block), types.get<uintptr_t>())
+                    builder.CreatePtrToInt(BlockAddress::get(function, py_finally_block.block), context.type<uintptr_t>()),
+                    builder.CreatePtrToInt(BlockAddress::get(function, blocks[1].block), context.type<uintptr_t>())
             );
-            do_CallSymbol<handle_SETUP_WITH>(frame_obj, getStackSlot(0),
-                    builder.CreateIntCast(block_addr_diff, types.get<int>(), true));
+            callSymbol<handle_SETUP_WITH>(frame_obj, getStackSlot(0),
+                    builder.CreateIntCast(block_addr_diff, context.type<int>(), true));
             stack_depth += 1;
             break;
         }
@@ -810,7 +810,7 @@ void Translator::emitBlock(DebugInfoBuilder &di_builder, unsigned index) {
             auto val = do_PEAK(2);
             auto tb = do_PEAK(3);
             auto exit_func = do_PEAK(7);
-            auto res = do_CallSymbol<handle_WITH_EXCEPT_START>(exc, val, tb, exit_func);
+            auto res = callSymbol<handle_WITH_EXCEPT_START>(exc, val, tb, exit_func);
             do_PUSH(res);
             break;
         }

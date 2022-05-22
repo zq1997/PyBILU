@@ -54,6 +54,7 @@ struct PyBasicBlock {
 
     PyBasicBlock() = default;
     PyBasicBlock(const PyBasicBlock &) = delete;
+    auto operator=(const PyBasicBlock &) = delete;
 };
 
 class DebugInfoBuilder {
@@ -85,7 +86,7 @@ public:
 };
 
 
-class Translator {
+class WrappedModule {
 public:
     struct TranslatedResult {
         llvm::sys::MemoryBlock mem_block;
@@ -98,20 +99,8 @@ public:
     };
 
 private:
-    const llvm::DataLayout &data_layout;
-    llvm::LLVMContext context{};
+    WrappedContext &context;
     llvm::IRBuilder<> builder{context};
-
-    const RegisteredLLVMTypes types{(context.enableOpaquePointers(), context), data_layout};
-    llvm::Constant *c_null{llvm::ConstantPointerNull::get(types.get<void *>())};
-    llvm::MDNode *likely_true{};
-    llvm::MDNode *tbaa_refcnt{};
-    llvm::MDNode *tbaa_obj_field{};
-    llvm::MDNode *tbaa_frame_value{};
-    llvm::MDNode *tbaa_code_const{};
-    llvm::AttributeList attr_return{};
-    llvm::AttributeList attr_noreturn{};
-    llvm::AttributeList attr_default_call{};
 
     llvm::Function *function{};
     llvm::Argument *shared_symbols{};
@@ -127,64 +116,7 @@ private:
     DynamicArray<decltype(PyFrameObject::f_stackdepth)> vpc_to_stack_depth;
     DynamicArray<PyBasicBlock> blocks;
 
-    template <typename T>
-    std::enable_if_t<std::is_integral_v<T>, llvm::Constant *>
-    asValue(T t) { return llvm::ConstantInt::get(types.get<T>(), t); }
-
-    auto createBlock(const llvm::Twine &name, llvm::Function *parent) {
-        return llvm::BasicBlock::Create(context, name, parent);
-    }
-
-    auto createBlock(const char *extra) {
-        return llvm::BasicBlock::Create(context, useName(extra), function);
-    }
-
-    template <typename T>
-    auto getPointer(llvm::Value *base, ptrdiff_t index, const llvm::Twine &name = "") {
-        if (!index && name.isTriviallyEmpty()) {
-            return base;
-        }
-        return builder.CreateInBoundsGEP(types.get<T>(), base, asValue(index), name);
-    }
-
-    template <typename T, typename M>
-    auto getPointer(llvm::Value *instance, M T::* member, const llvm::Twine &name = "") {
-        T dummy;
-        auto offset = reinterpret_cast<const char *>(&(dummy.*member)) - reinterpret_cast<const char *>(&dummy);
-        return getPointer<char>(instance, offset, name);
-    }
-
-    template <typename T>
-    auto loadValue(llvm::Value *ptr, llvm::MDNode *tbaa_node, const llvm::Twine &name = "") {
-        auto type = types.getAll<T>();
-        auto load_inst = new llvm::LoadInst(type.type, ptr, name, false, type.align);
-        builder.Insert(load_inst, name);
-        load_inst->setMetadata(llvm::LLVMContext::MD_tbaa, tbaa_node);
-        return load_inst;
-    }
-
-    template <typename T, typename M>
-    auto loadFieldValue(llvm::Value *instance, M T::* member, llvm::MDNode *tbaa_node, const llvm::Twine &name = "") {
-        auto ptr = getPointer(instance, member);
-        return loadValue<M>(ptr, tbaa_node, name);
-    }
-
-    template <typename T>
-    void storeValue(llvm::Value *value, llvm::Value *ptr, llvm::MDNode *tbaa_node) {
-        auto type = types.getAll<T>();
-        auto store_inst = new llvm::StoreInst(value, ptr, false, type.align);
-        builder.Insert(store_inst);
-        store_inst->setMetadata(llvm::LLVMContext::MD_tbaa, tbaa_node);
-    }
-
-    template <typename T, typename M>
-    auto storeFiledValue(llvm::Value *value, llvm::Value *instance, M T::* member, llvm::MDNode *tbaa_node) {
-        auto ptr = getPointer(instance, member);
-        return storeValue<M>(ptr, ptr, tbaa_node);
-    }
-
     llvm::Value *getSymbol(size_t offset);
-
     void parseCFG();
     void emitBlock(DebugInfoBuilder &di_builder, unsigned index);
     llvm::Value *do_GETLOCAL(PyOparg oparg);
@@ -201,59 +133,97 @@ private:
     void do_Py_DECREF(llvm::Value *v);
     void do_Py_XDECREF(llvm::Value *v);
 
-    template <llvm::AttributeList Translator::* Attr = &Translator::attr_default_call, typename... Args>
-    llvm::CallInst *do_Call(llvm::FunctionType *type, llvm::Value *callee, Args... args) {
+    void pyJumpIF(unsigned offset, bool pop_if_jump, bool jump_cond);
+    PyBasicBlock &findPyBlock(unsigned instr_offset);
+
+    template <typename T>
+    std::enable_if_t<std::is_integral_v<T>, llvm::Constant *>
+    asValue(T t) { return llvm::ConstantInt::get(context.type<T>(), t); }
+
+    auto createBlock(const llvm::Twine &name, llvm::Function *parent) {
+        return llvm::BasicBlock::Create(context, name, parent);
+    }
+
+    auto createBlock(const char *extra) {
+        return llvm::BasicBlock::Create(context, useName(extra), function);
+    }
+
+    template <typename T>
+    auto getPointer(llvm::Value *base, ptrdiff_t index, const llvm::Twine &name = "") {
+        if (!index && name.isTriviallyEmpty()) {
+            return base;
+        }
+        return builder.CreateInBoundsGEP(context.type<T>(), base, asValue(index), name);
+    }
+
+    template <typename T, typename M>
+    auto getPointer(llvm::Value *instance, M T::* member, const llvm::Twine &name = "") {
+        T dummy;
+        auto offset = reinterpret_cast<const char *>(&(dummy.*member)) - reinterpret_cast<const char *>(&dummy);
+        return getPointer<char>(instance, offset, name);
+    }
+
+    template <typename T>
+    auto loadValue(llvm::Value *ptr, llvm::MDNode *tbaa_node, const llvm::Twine &name = "") {
+        auto load_inst = new llvm::LoadInst(context.type<T>(), ptr, name, false, context.align<T>());
+        builder.Insert(load_inst, name);
+        load_inst->setMetadata(llvm::LLVMContext::MD_tbaa, tbaa_node);
+        return load_inst;
+    }
+
+    template <typename T, typename M>
+    auto loadFieldValue(llvm::Value *instance, M T::* member, llvm::MDNode *tbaa_node, const llvm::Twine &name = "") {
+        auto ptr = getPointer(instance, member);
+        return loadValue<M>(ptr, tbaa_node, name);
+    }
+
+    template <typename T>
+    void storeValue(llvm::Value *value, llvm::Value *ptr, llvm::MDNode *tbaa_node) {
+        auto store_inst = new llvm::StoreInst(value, ptr, false, context.align<T>());
+        builder.Insert(store_inst);
+        store_inst->setMetadata(llvm::LLVMContext::MD_tbaa, tbaa_node);
+    }
+
+    template <typename T, typename M>
+    auto storeFiledValue(llvm::Value *value, llvm::Value *instance, M T::* member, llvm::MDNode *tbaa_node) {
+        auto ptr = getPointer(instance, member);
+        return storeValue<M>(ptr, ptr, tbaa_node);
+    }
+
+    template <llvm::AttributeList WrappedContext::* Attr = &WrappedContext::attr_default_call>
+    llvm::CallInst *callFunction(llvm::FunctionType *type, llvm::Value *callee, auto... args) {
         auto call_instr = builder.CreateCall(type, callee, {args...});
-        call_instr->setAttributes(this->*Attr);
+        call_instr->setAttributes(context.*Attr);
         return call_instr;
     }
 
-    template <auto &S, llvm::AttributeList Translator::* Attr = &Translator::attr_default_call, typename... Args>
-    llvm::CallInst *do_CallSymbol(Args... args) {
-        return do_Call<Attr>(types.get<std::remove_reference_t<decltype(S)>>(), getSymbol(searchSymbol<S>()), args...);
+    template <auto &Symbol, llvm::AttributeList WrappedContext::* Attr = &WrappedContext::attr_default_call>
+    llvm::CallInst *callSymbol(auto... args) {
+        auto type = context.type<std::remove_reference_t<decltype(Symbol)>>();
+        auto callee = getSymbol(searchSymbol<Symbol>());
+        return callFunction<Attr>(type, callee, args...);
     }
 
-    void pyJumpIF(unsigned offset, bool pop_if_jump, bool jump_cond);
-
-    void handle_UNARY_OP(size_t offset) {
+    template <auto &Symbol>
+    void emit_UNARY_OP() {
         auto value = do_POP();
-        using UnaryFunction = PyObject *(PyObject *);
-        auto res = do_Call(types.get<UnaryFunction>(), getSymbol(offset), value);
+        auto res = callSymbol<Symbol>(value);
         do_PUSH(res);
         do_Py_DECREF(value);
     }
 
-    // TODO:泛型化
-    void handle_BINARY_OP(size_t offset) {
+    template <auto &Symbol>
+    void emit_BINARY_OP() {
         auto right = do_POP();
         auto left = do_POP();
-        using BinaryFunction = PyObject *(PyObject *, PyObject *);
-        auto res = do_Call(types.get<BinaryFunction>(), getSymbol(offset), left, right);
+        auto res = callSymbol<Symbol>(left, right);
         do_PUSH(res);
         do_Py_DECREF(left);
         do_Py_DECREF(right);
     }
 
-    PyBasicBlock &findPyBlock(unsigned instr_offset);
-
-    // // TODO：删除
-    // void createIf(llvm::Value *cond, const std::function<void()> &make_body, bool terminated = false) {
-    //     auto block_true = createBlock(useName("if_true"), func);
-    //     auto block_end = createBlock(useName("if_false"), nullptr);
-    //     builder.CreateCondBr(cond, block_true, block_end);
-    //     builder.SetInsertPoint(block_true);
-    //     make_body();
-    //     if (!terminated) {
-    //         builder.CreateBr(block_end);
-    //     }
-    //     block_end->insertInto(func);
-    //     builder.SetInsertPoint(block_end);
-    // }
-
 public:
-    explicit Translator(const llvm::DataLayout &dl);
-
-    // static std::unique_ptr<Translator> create(Compiler &compiler);
+    explicit WrappedModule(WrappedContext &context);
 
     TranslatedResult *translate(Compiler &compiler, PyCodeObject *code);
 };

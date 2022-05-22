@@ -45,7 +45,7 @@ OPNAME_WIDTH = max(len(x) for x in opname)
 
 
 def disassemble_code(co, file):
-    print('%s @ %r\n' % (co.co_name, co.co_filename), file=file)
+    print('%s @ %r\n' % (co.co_name, os.path.normpath(co.co_filename)), file=file)
     lastline = None
     linestarts = {}
     for start, end, line in co.co_lines():
@@ -89,7 +89,7 @@ def disassemble_code(co, file):
         elif op in hasjabs:
             arg_repr = '<to %d>' % arg
         elif op in hasjrel:
-            arg_repr = '<to %d>' + (offset + 1 + arg)
+            arg_repr = '<to %d>' % (offset + 1 + arg)
         else:
             arg_repr = '<%d>' % arg
 

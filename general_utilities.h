@@ -11,6 +11,7 @@ struct PyObjectRef {
     PyObject *o;
 
     PyObjectRef(const PyObjectRef &) = delete;
+    auto operator=(const PyObjectRef &) = delete;
 
     // PyObjectRef(PyObjectRef &&other) : o{other.o} { other.o = nullptr; };
 
@@ -39,8 +40,7 @@ inline PyObjectRef callDebugHelperFunction(const char *callee_name, const auto &
     PyObjectRef py_mod = PyImport_ImportModule("debug_helper");
     PyObjectRef py_callee = PyObject_GetAttrString(py_mod, callee_name);
     PyObject *py_args[]{nullptr, args...};
-    return PyObjectRef{PyObject_Vectorcall(py_callee, &py_args[1],
-            sizeof...(args) | PY_VECTORCALL_ARGUMENTS_OFFSET, nullptr)};
+    return PyObject_Vectorcall(py_callee, &py_args[1], sizeof...(args) | PY_VECTORCALL_ARGUMENTS_OFFSET, nullptr);
 }
 
 template <typename T, typename = void>
