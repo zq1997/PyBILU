@@ -8,7 +8,7 @@ import gdb
 
 
 def on_code_loaded(frame: lldb.SBFrame, bp_loc, extra_args, internal_dict):
-    py_code = gdb_script.PyCodeObjectPtr(gdb.Value(frame.FindVariable('py_code')))
+    py_code = gdb_script.PyCodeObjectPtr.from_pyobject_ptr(gdb.Value(frame.FindVariable('py_code')))
     code_addr = frame.FindVariable('code_addr').unsigned
 
     co_filename = gdb_script.PyObjectPtr.from_pyobject_ptr(py_code.field('co_filename')).proxyval(None)

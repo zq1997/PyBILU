@@ -3,12 +3,12 @@
 
 #include <Python.h>
 
-#include "translator.h"
+#include "compile_unit.h"
 
 using namespace std;
 using namespace llvm;
 
-void WrappedModule::emitBlock(DebugInfoBuilder &di_builder, unsigned index) {
+void CompileUnit::emitBlock(DebugInfoBuilder &di_builder, unsigned index) {
     blocks[index].block->insertInto(function);
     builder.SetInsertPoint(blocks[index].block);
     bool fall_through = true;
@@ -787,7 +787,7 @@ void WrappedModule::emitBlock(DebugInfoBuilder &di_builder, unsigned index) {
             break;
         }
         case RERAISE: {
-            callSymbol<handle_RERAISE, &WrappedContext::attr_noreturn>(frame_obj, asValue<bool>(instr.oparg));
+            callSymbol<handle_RERAISE, &Context::attr_noreturn>(frame_obj, asValue<bool>(instr.oparg));
             builder.CreateUnreachable();
             fall_through = false;
             break;

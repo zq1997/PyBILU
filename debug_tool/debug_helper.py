@@ -5,30 +5,24 @@ from opcode import EXTENDED_ARG, HAVE_ARGUMENT, opname, cmp_op, \
 
 
 def get_save_prefix(co):
-    py_dir, py_file = os.path.split(co.co_filename)
-    return os.path.join(py_dir, '__pycache__'), '%s.%s' % (py_file, co.co_name)
-    # return os.path.join(py_dir, '__pycache__'), '%s.%d.%s' % (py_file, co.co_firstlineno, co.co_name)
+    py_dir, py_file = os.path.split(os.path.abspath(co.co_filename))
+    return os.path.join(py_dir, '__pycache__', '%s.%s' % (py_file, co.co_name))
 
 
-def get_pydis_dir_and_file(co):
-    the_dir, the_file = get_save_prefix(co)
-    return the_dir, the_file + '.pydis'
-
-
-def dump(co, ll, opt_ll, obj):
+def dump(co, ll, obj):
     assert os.path.isfile(co.co_filename)
-
-    the_dir, the_file = get_save_prefix(co)
-    os.makedirs(the_dir, exist_ok=True)
-    save_prefix = os.path.join(the_dir, the_file)
-    with open(save_prefix + '.pydis', 'wt') as f:
-        disassemble_code(co, f)
-    with open(save_prefix + '.ll', 'wb') as f:
-        f.write(ll)
-    with open(save_prefix + '.opt.ll', 'wb') as f:
-        f.write(opt_ll)
-    with open(save_prefix + '.o', 'wb') as f:
-        f.write(obj)
+    save_prefix = get_save_prefix(co)
+    if obj is None:
+        os.makedirs(os.path.dirname(save_prefix), exist_ok=True)
+        with open(get_save_prefix(co) + '.ll', 'wb') as f:
+            f.write(ll)
+    else:
+        with open(get_save_prefix(co) + '.opt.ll', 'wb') as f:
+            f.write(ll)
+        with open(save_prefix + '.pydis', 'wt') as f:
+            disassemble_code(co, f)
+        with open(save_prefix + '.o', 'wb') as f:
+            f.write(obj)
 
 
 def unpack_opargs(code):

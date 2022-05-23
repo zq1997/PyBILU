@@ -13,8 +13,6 @@ struct PyObjectRef {
     PyObjectRef(const PyObjectRef &) = delete;
     auto operator=(const PyObjectRef &) = delete;
 
-    // PyObjectRef(PyObjectRef &&other) : o{other.o} { other.o = nullptr; };
-
     PyObjectRef(PyObject *o) : o{o} {
         if (!o) {
             throw std::bad_exception();

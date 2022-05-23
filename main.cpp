@@ -1,18 +1,17 @@
 #include <Python.h>
 #include <internal/pycore_pyerrors.h>
 
-#include "translator.h"
+#include "compile_unit.h"
 
 using namespace std;
 
-static unique_ptr<Compiler> compiler;
-static unique_ptr<WrappedContext> context;
+static unique_ptr<Translator> translator;
 static Py_ssize_t code_extra_index;
 
 
 PyObject *eval_func(PyThreadState *tstate, PyFrameObject *f, int throwflag) {
     // TODO: manually implement set/get extra
-    WrappedModule::TranslatedResult *compiled_result;
+    CompileUnit::TranslatedResult *compiled_result;
     if (_PyCode_GetExtra(reinterpret_cast<PyObject *>(f->f_code),
             code_extra_index,
             reinterpret_cast<void **>(&compiled_result)) == -1) {
@@ -130,7 +129,7 @@ PyObject *eval_func(PyThreadState *tstate, PyFrameObject *f, int throwflag) {
 }
 
 void freeExtra(void *result) {
-    auto result_ = reinterpret_cast< WrappedModule::TranslatedResult *>(result);
+    auto result_ = reinterpret_cast< CompileUnit::TranslatedResult *>(result);
     unloadCode(result_->mem_block);
     delete result_;
 }
@@ -143,9 +142,9 @@ PyObject *apply(PyObject *, PyObject *maybe_func) {
         return nullptr;
     }
     auto func = reinterpret_cast<PyFunctionObject *>(maybe_func);
-    WrappedModule::TranslatedResult *result;
+    CompileUnit::TranslatedResult *result;
     try {
-        result = WrappedModule(*context).translate(*compiler, reinterpret_cast<PyCodeObject *>(func->func_code));
+        result = CompileUnit::emit(*translator, func->func_code);
     } catch (runtime_error &err) {
         PyErr_SetString(PyExc_RuntimeError, err.what());
         return nullptr;
@@ -158,8 +157,7 @@ PyObject *apply(PyObject *, PyObject *maybe_func) {
 
 PyMODINIT_FUNC PyInit_pynic() {
     try {
-        compiler = make_unique<Compiler>();
-        context = make_unique<WrappedContext>(compiler->createDataLayout());
+        translator = make_unique<Translator>();
     } catch (runtime_error &err) {
         PyErr_SetString(PyExc_RuntimeError, err.what());
         return nullptr;
