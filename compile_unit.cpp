@@ -1,5 +1,3 @@
-#include <memory>
-
 #include <Python.h>
 
 #include "compile_unit.h"
@@ -8,11 +6,28 @@
 using namespace std;
 using namespace llvm;
 
+void DebugInfoBuilder::setFunction(llvm::IRBuilder<> &ir_builder, PyCodeObject *py_code, llvm::Function *function) {
+    function->setName(PyStringAsString(py_code->co_name));
+    auto res = callDebugHelperFunction("get_save_prefix", reinterpret_cast<PyObject *>(py_code));
+
+    auto file = builder.createFile(PyStringAsString(res) + std::string{".pydis"}, "");
+    builder.createCompileUnit(llvm::dwarf::DW_LANG_C, file, "", false, "", 0);
+    sp = builder.createFunction(file, "", "", file, 1, builder.createSubroutineType({}), 1,
+            llvm::DINode::FlagZero, llvm::DISubprogram::SPFlagDefinition);
+    function->setSubprogram(sp);
+    setLocation(ir_builder, -2);
+};
+
+void DebugInfoBuilder::setLocation(llvm::IRBuilder<> &ir_builder, int vpc) {
+    ir_builder.SetCurrentDebugLocation(llvm::DILocation::get(ir_builder.getContext(), vpc + 3, 0, sp));
+}
+
 
 void CompileUnit::translate() {
     function = Function::Create(context.type<CompiledFunction>(),
             Function::ExternalLinkage, "the_function", &llvm_module);
     function->setAttributes(context.attr_default_call);
+    di_builder.setFunction(builder, py_code, function);
 
     (shared_symbols = function->getArg(0))->setName(useName("symbols"));
     (frame_obj = function->getArg(1))->setName(useName("frame"));
@@ -20,21 +35,22 @@ void CompileUnit::translate() {
     shared_symbols->addAttr(Attribute::NoAlias);
     frame_obj->addAttr(Attribute::NoAlias);
 
-    DebugInfoBuilder di_builder{py_code, builder, llvm_module, *function};
 
     // TODO: 重复了
     parseCFG();
 
-    blocks[0].block = createBlock("entry_block", function);
+    blocks[0].block = createBlock("entry_block");
     auto start = blocks[0].end;
     for (auto &b : Range(block_num - 1, &blocks[1])) {
         b.initial_stack_height = -1;
         b.is_handler = false;
-        b.block = createBlock(useName("block.", start), nullptr);
+        b.visited = false;
+        b.block = createBlock(useName("block.", start));
         start = b.end;
     }
     blocks[1].initial_stack_height = 0;
 
+    blocks[0].block->insertInto(function);
     builder.SetInsertPoint(blocks[0].block);
 
     auto code_obj = loadFieldValue(frame_obj, &PyFrameObject::f_code, context.tbaa_frame_value, useName("code"));
@@ -44,11 +60,13 @@ void CompileUnit::translate() {
     code_consts = getPointer(consts_tuple, &PyTupleObject::ob_item, "consts");
     rt_lasti = getPointer(frame_obj, &PyFrameObject::f_lasti, "lasti");
 
-    error_block = createBlock("raise_error", nullptr);
+    error_block = createBlock("raise_error");
 
-    for (auto &i : Range(block_num - 1, 1U)) {
-        // 队列(栈)式生成
-        emitBlock(di_builder, i);
+    declarePendingBlock(1U, 0);
+    while (!live_block_indices.empty()) {
+        auto index = live_block_indices.pop_back_val();
+        stack_depth = blocks[index].initial_stack_height;
+        emitBlock(index);
     }
 
     error_block->insertInto(function);
@@ -69,13 +87,6 @@ void CompileUnit::translate() {
     }
 
     di_builder.finalize();
-
-    if constexpr (debug_build) {
-        if (verifyModule(llvm_module, &errs())) {
-            llvm_module.dump();
-            throw runtime_error("the translater failed");
-        }
-    }
 }
 
 void CompileUnit::parseCFG() {
@@ -93,6 +104,7 @@ void CompileUnit::parseCFG() {
         case SETUP_FINALLY:
         case SETUP_WITH:
         case SETUP_ASYNC_WITH:
+            block_num += is_boundary.set(instr.offset);
             block_num += is_boundary.set(instr.offset + instr.getOparg());
             break;
         case JUMP_ABSOLUTE:
@@ -101,6 +113,7 @@ void CompileUnit::parseCFG() {
         case POP_JUMP_IF_TRUE:
         case POP_JUMP_IF_FALSE:
         case JUMP_IF_NOT_EXC_MATCH:
+            block_num += is_boundary.set(instr.offset);
             block_num += is_boundary.set(instr.getOparg());
             break;
         default:
@@ -144,8 +157,8 @@ void CompileUnit::do_Py_DECREF(Value *py_obj) {
     auto *zero = asValue(decltype(PyObject::ob_refcnt){0});
     auto new_value = builder.CreateSub(old_value, delta_1);
     storeValue<decltype(PyObject::ob_refcnt)>(new_value, ref, context.tbaa_refcnt);
-    auto b_dealloc = createBlock("dealloc");
-    auto b_end = createBlock("dealloc.end");
+    auto b_dealloc = appendBlock("dealloc");
+    auto b_end = appendBlock("dealloc.end");
     builder.CreateCondBr(builder.CreateICmpEQ(new_value, zero), b_dealloc, b_end, context.likely_true);
     builder.SetInsertPoint(b_dealloc);
     callSymbol<_Py_Dealloc, &Context::attr_return>(py_obj);
@@ -155,8 +168,8 @@ void CompileUnit::do_Py_DECREF(Value *py_obj) {
 
 void CompileUnit::do_Py_XDECREF(Value *py_obj) {
     // callSymbol<handle_XDECREF, &Translator::attr_return>(py_obj);
-    auto b_decref = createBlock("decref");
-    auto b_end = createBlock("decref.end");
+    auto b_decref = appendBlock("decref");
+    auto b_end = appendBlock("decref.end");
     builder.CreateCondBr(builder.CreateICmpNE(py_obj, context.c_null), b_decref, b_end, context.likely_true);
     builder.SetInsertPoint(b_decref);
     do_Py_DECREF(py_obj);
@@ -241,7 +254,7 @@ llvm::Value *CompileUnit::getSymbol(size_t offset) {
     return loadValue<void *>(ptr, context.tbaa_code_const, useName("sym.", name, "."));
 }
 
-PyBasicBlock &CompileUnit::findPyBlock(unsigned offset) {
+PyBasicBlock &CompileUnit::findPyBlock(unsigned offset, decltype(stack_depth) initial_stack_height) {
     assert(block_num > 1);
     decltype(block_num) left = 0;
     auto right = block_num - 1;
@@ -253,6 +266,7 @@ PyBasicBlock &CompileUnit::findPyBlock(unsigned offset) {
         } else if (v > offset) {
             right = mid - 1;
         } else {
+            declarePendingBlock(mid + 1, initial_stack_height);
             return blocks[mid + 1];
         }
     }
@@ -260,12 +274,12 @@ PyBasicBlock &CompileUnit::findPyBlock(unsigned offset) {
 }
 
 void CompileUnit::pyJumpIF(unsigned offset, bool pop_if_jump, bool jump_cond) {
-    auto &jump_target = findPyBlock(offset);
-    jump_target.initial_stack_height = stack_depth - pop_if_jump;
-    auto false_cmp_block = createBlock("");
-    auto slow_cmp_block = createBlock("");
-    auto fall_block = createBlock("");
-    auto jump_block = pop_if_jump ? createBlock("") : jump_target.block;
+    auto fall_block = appendBlock("");
+    auto &jump_target = findPyBlock(offset, stack_depth - pop_if_jump);
+
+    auto false_cmp_block = appendBlock("");
+    auto slow_cmp_block = appendBlock("");
+    auto jump_block = pop_if_jump ? appendBlock("") : jump_target.block;
     auto true_block = jump_cond ? jump_block : fall_block;
     auto false_block = jump_cond ? fall_block : jump_block;
 
@@ -297,7 +311,9 @@ static void debug_dump_obj(PyObject *py_code, Module &module, SmallVector<char> 
                 PyObjectRef{PyMemoryView_FromMemory(ll_vec.data(), ll_vec.size(), PyBUF_READ)},
                 PyObjectRef{obj_vec ? PyMemoryView_FromMemory(obj_vec->data(), obj_vec->size(), PyBUF_READ) :
                         Py_NewRef(Py_None)});
-
+        if (!obj_vec && verifyModule(module, &errs())) {
+            throw runtime_error("llvm module verification failed");
+        }
     }
 }
 
@@ -310,12 +326,11 @@ CompileUnit::TranslatedResult *CompileUnit::emit(Translator &translator, PyObjec
     cu.translate();
 
     debug_dump_obj(py_code, cu.llvm_module, nullptr);
-    translator.opt_MPM.run(cu.llvm_module, translator.opt_MAM);
-    translator.opt_MAM.clear();
-    translator.out_PM.run(cu.llvm_module);
-    auto memory = loadCode(translator.out_vec);
-    debug_dump_obj(py_code, cu.llvm_module, &translator.out_vec);
-    translator.out_vec.resize(0);
+    auto &obj = translator.compile(cu.llvm_module);
+    auto memory = loadCode(obj);
+    debug_dump_obj(py_code, cu.llvm_module, &obj);
+    obj.resize(0);
+    // TODO: cout capcity
     notifyCodeLoaded(py_code, memory.base());
 
     return new CompileUnit::TranslatedResult{memory, move(cu.vpc_to_stack_depth)};

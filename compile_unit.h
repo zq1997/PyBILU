@@ -51,6 +51,7 @@ struct PyBasicBlock {
     llvm::BasicBlock *block;
     decltype(PyFrameObject::f_stackdepth) initial_stack_height;
     bool is_handler;
+    bool visited;
 
     PyBasicBlock() = default;
     PyBasicBlock(const PyBasicBlock &) = delete;
@@ -59,31 +60,32 @@ struct PyBasicBlock {
 
 class DebugInfoBuilder {
     llvm::DIBuilder builder;
-    llvm::DISubprogram *sp{};
+    llvm::DISubprogram *sp;
 
 public:
-    DebugInfoBuilder(PyCodeObject *py_code,
-            llvm::IRBuilder<> &ir_builder, llvm::Module &module, llvm::Function &function) : builder{module} {
-        function.setName(PyStringAsString(py_code->co_name));
-        auto res = callDebugHelperFunction("get_save_prefix", reinterpret_cast<PyObject *>(py_code));
+    explicit DebugInfoBuilder(llvm::Module &module) : builder{module} {};
 
-        auto file = builder.createFile(PyStringAsString(res) + std::string{".pydis"}, "");
-        builder.createCompileUnit(llvm::dwarf::DW_LANG_C, file, "", false, "", 0);
-        sp = builder.createFunction(file, "", "", file, 1, builder.createSubroutineType({}), 1,
-                llvm::DINode::FlagZero, llvm::DISubprogram::SPFlagDefinition);
-        function.setSubprogram(sp);
-        setLocation(ir_builder, -2);
-    };
+    void setFunction(llvm::IRBuilder<> &ir_builder, PyCodeObject *py_code, llvm::Function *function);
 
-    void setLocation(llvm::IRBuilder<> &ir_builder, int vpc) {
-        ir_builder.SetCurrentDebugLocation(llvm::DILocation::get(ir_builder.getContext(), vpc + 3, 0, sp));
-    }
+    void setLocation(llvm::IRBuilder<> &ir_builder, int vpc);
 
     void finalize() { builder.finalize(); }
 };
 
+class EmptyDebugInfoBuilder {
+public:
+    explicit EmptyDebugInfoBuilder(llvm::Module &module) {};
+
+    void setFunction(llvm::IRBuilder<> &ir_builder, PyCodeObject *py_code, llvm::Function *function) {};
+
+    void setLocation(llvm::IRBuilder<> &ir_builder, int vpc) {}
+
+    void finalize() {}
+};
+
 
 class CompileUnit {
+protected:
     Context &context;
     llvm::Module llvm_module{"the_module", context.llvm_context};
     llvm::IRBuilder<> builder{context.llvm_context};
@@ -96,17 +98,20 @@ class CompileUnit {
     llvm::Value *code_consts;
 
     PyCodeObject *py_code;
+    llvm::SmallVector<unsigned> live_block_indices;
     decltype(PyFrameObject::f_stackdepth) stack_depth;
     unsigned block_num;
-    DynamicArray<decltype(PyFrameObject::f_stackdepth)> vpc_to_stack_depth;
+    DynamicArray<decltype(stack_depth)> vpc_to_stack_depth;
     DynamicArray<PyBasicBlock> blocks;
 
-    explicit CompileUnit(Context &context) : context{context} {};
+    [[no_unique_address]] std::conditional_t<debug_build, DebugInfoBuilder, EmptyDebugInfoBuilder> di_builder;
+
+    explicit CompileUnit(Context &context) : context{context}, di_builder{llvm_module} {};
 
     void parseCFG();
     void translate();
 
-    void emitBlock(DebugInfoBuilder &di_builder, unsigned index);
+    void emitBlock(unsigned index);
     llvm::Value *do_GETLOCAL(PyOparg oparg);
     void do_SETLOCAL(PyOparg oparg, llvm::Value *value);
     llvm::Value *do_POP();
@@ -122,18 +127,18 @@ class CompileUnit {
     void do_Py_XDECREF(llvm::Value *v);
 
     void pyJumpIF(unsigned offset, bool pop_if_jump, bool jump_cond);
-    PyBasicBlock &findPyBlock(unsigned instr_offset);
+    PyBasicBlock &findPyBlock(unsigned instr_offset, decltype(stack_depth) initial_stack_height);
     llvm::Value *getSymbol(size_t offset);
 
     template <typename T>
     std::enable_if_t<std::is_integral_v<T>, llvm::Constant *>
     asValue(T t) { return llvm::ConstantInt::get(context.type<T>(), t); }
 
-    auto createBlock(const llvm::Twine &name, llvm::Function *parent) {
-        return llvm::BasicBlock::Create(context.llvm_context, name, parent);
+    auto createBlock(const llvm::Twine &name) {
+        return llvm::BasicBlock::Create(context.llvm_context, name, nullptr);
     }
 
-    auto createBlock(const char *extra) {
+    auto appendBlock(const char *extra) {
         return llvm::BasicBlock::Create(context.llvm_context, useName(extra), function);
     }
 
@@ -209,6 +214,14 @@ class CompileUnit {
         do_PUSH(res);
         do_Py_DECREF(left);
         do_Py_DECREF(right);
+    }
+
+    void declarePendingBlock(unsigned index, decltype(stack_depth) initial_stack_height) {
+        if (!blocks[index].visited) {
+            blocks[index].visited = true;
+            live_block_indices.push_back(index);
+            blocks[index].initial_stack_height = initial_stack_height;
+        }
     }
 
 public:

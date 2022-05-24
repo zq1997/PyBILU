@@ -46,6 +46,13 @@ public:
 
 public:
     Compiler();
+
+    auto &compile(llvm::Module &module) {
+        opt_MPM.run(module, opt_MAM);
+        opt_MAM.clear();
+        out_PM.run(module);
+        return out_vec;
+    }
 };
 
 class Context {

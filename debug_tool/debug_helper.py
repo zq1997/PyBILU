@@ -14,13 +14,13 @@ def dump(co, ll, obj):
     save_prefix = get_save_prefix(co)
     if obj is None:
         os.makedirs(os.path.dirname(save_prefix), exist_ok=True)
+        with open(save_prefix + '.pydis', 'wt') as f:
+            disassemble_code(co, f)
         with open(get_save_prefix(co) + '.ll', 'wb') as f:
             f.write(ll)
     else:
         with open(get_save_prefix(co) + '.opt.ll', 'wb') as f:
             f.write(ll)
-        with open(save_prefix + '.pydis', 'wt') as f:
-            disassemble_code(co, f)
         with open(save_prefix + '.o', 'wb') as f:
             f.write(obj)
 

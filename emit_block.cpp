@@ -1,4 +1,3 @@
-#include <memory>
 #include <stdexcept>
 
 #include <Python.h>
@@ -8,22 +7,22 @@
 using namespace std;
 using namespace llvm;
 
-void CompileUnit::emitBlock(DebugInfoBuilder &di_builder, unsigned index) {
-    blocks[index].block->insertInto(function);
-    builder.SetInsertPoint(blocks[index].block);
+void CompileUnit::emitBlock(unsigned index) {
+    auto &this_block = blocks[index];
+    this_block.block->insertInto(function);
+    builder.SetInsertPoint(this_block.block);
+
     bool fall_through = true;
     // TODO: 这种可能会有问题，会出现一个block没有被设置initial_stack_height但是被遍历，会assert失败
-    stack_depth = blocks[index].initial_stack_height;
     assert(stack_depth >= 0);
 
     assert(index);
     auto py_instructions = reinterpret_cast<PyInstr *>(PyBytes_AS_STRING(py_code->co_code));
     auto first = blocks[index - 1].end;
-    auto last = blocks[index].end;
+    auto last = this_block.end;
     for (PyInstrIter instr(py_instructions, first, last); instr;) {
         auto vpc = instr.offset;
         instr.next();
-        // TODO：不如合并到cframe中去，一次性写入
         // 注意stack_height记录于此，这就意味着在调用”风险函数“之前不允许DECREF，否则可能DEC两次
         storeValue<decltype(PyFrameObject::f_lasti)>(asValue(vpc), rt_lasti, context.tbaa_frame_value);
         vpc_to_stack_depth[vpc] = stack_depth;
@@ -70,8 +69,8 @@ void CompileUnit::emitBlock(DebugInfoBuilder &di_builder, unsigned index) {
             auto top = loadValue<PyObject *>(dest_start, context.tbaa_frame_value);
             auto last_cell = getStackSlot(instr.oparg);
             auto entry_block = builder.GetInsertBlock();
-            auto loop_block = createBlock("ROT_N.loop");
-            auto end_block = createBlock("ROT_N.end");
+            auto loop_block = appendBlock("ROT_N.loop");
+            auto end_block = appendBlock("ROT_N.end");
             builder.CreateBr(loop_block);
             builder.SetInsertPoint(loop_block);
             auto dest = builder.CreatePHI(context.type<PyObject *>(), 2);
@@ -128,7 +127,7 @@ void CompileUnit::emitBlock(DebugInfoBuilder &di_builder, unsigned index) {
         }
         case LOAD_FAST: {
             auto value = do_GETLOCAL(instr.oparg);
-            auto ok_block = createBlock("LOAD_FAST.OK");
+            auto ok_block = appendBlock("LOAD_FAST.OK");
             builder.CreateCondBr(builder.CreateICmpNE(value, context.c_null), ok_block, error_block, context.likely_true);
             builder.SetInsertPoint(ok_block);
             do_Py_INCREF(value);
@@ -142,7 +141,7 @@ void CompileUnit::emitBlock(DebugInfoBuilder &di_builder, unsigned index) {
         }
         case DELETE_FAST: {
             auto value = do_GETLOCAL(instr.oparg);
-            auto ok_block = createBlock("DELETE_FAST.OK");
+            auto ok_block = appendBlock("DELETE_FAST.OK");
             builder.CreateCondBr(builder.CreateICmpNE(value, context.c_null), ok_block, error_block, context.likely_true);
             builder.SetInsertPoint(ok_block);
             do_SETLOCAL(instr.oparg, context.c_null); // 可优化
@@ -151,7 +150,7 @@ void CompileUnit::emitBlock(DebugInfoBuilder &di_builder, unsigned index) {
         case LOAD_DEREF: {
             auto cell = getFreevar(instr.oparg);
             auto value = loadFieldValue(cell, &PyCellObject::ob_ref, context.tbaa_obj_field);
-            auto ok_block = createBlock("LOAD_DEREF.OK");
+            auto ok_block = appendBlock("LOAD_DEREF.OK");
             builder.CreateCondBr(builder.CreateICmpNE(value, context.c_null), ok_block, error_block, context.likely_true);
             builder.SetInsertPoint(ok_block);
             do_Py_INCREF(value);
@@ -176,7 +175,7 @@ void CompileUnit::emitBlock(DebugInfoBuilder &di_builder, unsigned index) {
             auto cell = getFreevar(instr.oparg);
             auto cell_slot = getPointer(cell, &PyCellObject::ob_ref);
             auto old_value = loadValue<PyObject *>(cell_slot, context.tbaa_obj_field);
-            auto ok_block = createBlock("DELETE_DEREF.OK");
+            auto ok_block = appendBlock("DELETE_DEREF.OK");
             builder.CreateCondBr(builder.CreateICmpNE(old_value, context.c_null), ok_block, error_block, context.likely_true);
             builder.SetInsertPoint(ok_block);
             storeValue<PyObject *>(context.c_null, cell_slot, context.tbaa_obj_field);
@@ -476,7 +475,7 @@ void CompileUnit::emitBlock(DebugInfoBuilder &di_builder, unsigned index) {
             auto codeobj = do_POP();
             auto globals = loadFieldValue(frame_obj, &PyFrameObject::f_globals, context.tbaa_code_const);
             auto py_func = callSymbol<PyFunction_NewWithQualName>(codeobj, globals, qualname);
-            auto ok_block = createBlock("MAKE_FUNCTION.OK");
+            auto ok_block = appendBlock("MAKE_FUNCTION.OK");
             builder.CreateCondBr(builder.CreateICmpNE(py_func, context.c_null), ok_block, error_block, context.likely_true);
             builder.SetInsertPoint(ok_block);
             // TODO: 一个新的tbaa
@@ -528,16 +527,14 @@ void CompileUnit::emitBlock(DebugInfoBuilder &di_builder, unsigned index) {
         }
 
         case JUMP_FORWARD: {
-            auto &jmp_block = findPyBlock(instr.offset + instr.oparg);
-            jmp_block.initial_stack_height = stack_depth;
+            auto &jmp_block = findPyBlock(instr.offset + instr.oparg, stack_depth);
             builder.CreateBr(jmp_block.block);
             fall_through = false;
             break;
         }
         case JUMP_ABSOLUTE: {
             // TODO: 如果有，则不要设置，要校验
-            auto &jmp_block = findPyBlock(instr.oparg);
-            jmp_block.initial_stack_height = stack_depth;
+            auto &jmp_block = findPyBlock(instr.oparg, stack_depth);
             builder.CreateBr(jmp_block.block);
             fall_through = false;
             break;
@@ -566,21 +563,20 @@ void CompileUnit::emitBlock(DebugInfoBuilder &di_builder, unsigned index) {
             break;
         }
         case FOR_ITER: {
-            auto sp = stack_depth;
             auto iter = do_PEAK(1);
             auto the_type = loadFieldValue(iter, &PyObject::ob_type, context.tbaa_obj_field);
             auto the_iternextfunc = loadFieldValue(the_type, &PyTypeObject::tp_iternext, context.tbaa_obj_field);
             auto next = callFunction(context.type<remove_pointer_t<iternextfunc>>(), the_iternextfunc, iter);
-            auto b_continue = createBlock("FOR_ITER.continue");
-            auto b_break = createBlock("FOR_ITER.break");
+            auto b_continue = appendBlock("FOR_ITER.continue");
+            auto b_break = appendBlock("FOR_ITER.break");
             builder.CreateCondBr(builder.CreateICmpEQ(next, context.c_null), b_break, b_continue);
+            // iteration should break
             builder.SetInsertPoint(b_break);
+            auto &break_target = findPyBlock(instr.offset + instr.oparg, stack_depth - 1);
             do_Py_DECREF(iter);
-            auto &break_block = findPyBlock(instr.offset + instr.oparg);
-            break_block.initial_stack_height = stack_depth - 1;
-            builder.CreateBr(break_block.block);
+            builder.CreateBr(break_target.block);
+            // iteration should continue
             builder.SetInsertPoint(b_continue);
-            stack_depth = sp;
             do_PUSH(next);
             break;
         }
@@ -752,8 +748,7 @@ void CompileUnit::emitBlock(DebugInfoBuilder &di_builder, unsigned index) {
         }
 
         case SETUP_FINALLY: {
-            auto &py_finally_block = findPyBlock(instr.offset + instr.oparg);
-            py_finally_block.initial_stack_height = stack_depth + 6;
+            auto &py_finally_block = findPyBlock(instr.offset + instr.oparg, stack_depth + 6);
             py_finally_block.is_handler = true;
             auto block_addr_diff = builder.CreateSub(
                     builder.CreatePtrToInt(BlockAddress::get(function, py_finally_block.block), context.type<uintptr_t>()),
@@ -779,11 +774,8 @@ void CompileUnit::emitBlock(DebugInfoBuilder &di_builder, unsigned index) {
             auto match = callSymbol<handle_JUMP_IF_NOT_EXC_MATCH>(left, right);
             do_Py_DECREF(left);
             do_Py_DECREF(right);
-            auto &jump_target = findPyBlock(instr.oparg);
-            jump_target.initial_stack_height = stack_depth;
-            auto fall_block = createBlock("");
-            builder.CreateCondBr(match, fall_block, jump_target.block);
-            builder.SetInsertPoint(fall_block);
+            auto &jump_target = findPyBlock(instr.oparg, stack_depth);
+            builder.CreateCondBr(match, blocks[index + 1].block, jump_target.block);
             break;
         }
         case RERAISE: {
@@ -793,8 +785,7 @@ void CompileUnit::emitBlock(DebugInfoBuilder &di_builder, unsigned index) {
             break;
         }
         case SETUP_WITH: {
-            auto &py_finally_block = findPyBlock(instr.offset + instr.oparg);
-            py_finally_block.initial_stack_height = stack_depth - 1 + 7;
+            auto &py_finally_block = findPyBlock(instr.offset + instr.oparg, stack_depth - 1 + 7);
             py_finally_block.is_handler = true;
             auto block_addr_diff = builder.CreateSub(
                     builder.CreatePtrToInt(BlockAddress::get(function, py_finally_block.block), context.type<uintptr_t>()),
@@ -856,12 +847,12 @@ void CompileUnit::emitBlock(DebugInfoBuilder &di_builder, unsigned index) {
             break;
         }
         default:
-            throw runtime_error("illegal opcode");
+            throw runtime_error("unexpected opcode");
         }
     }
     if (fall_through) {
-        assert(index < block_num - 1);
+        assert(!builder.GetInsertBlock()->getTerminator());
         builder.CreateBr(blocks[index + 1].block);
-        blocks[index + 1].initial_stack_height = stack_depth;
+        declarePendingBlock(index + 1, stack_depth);
     }
 }
