@@ -109,6 +109,7 @@ protected:
     explicit CompileUnit(Context &context) : context{context}, di_builder{llvm_module} {};
 
     void parseCFG();
+    void analyzeRedundantLoads();
     void translate();
 
     void emitBlock(unsigned index);
@@ -238,74 +239,57 @@ public:
     static TranslatedResult *emit(Translator &translator, PyObject *py_code);
 };
 
-class QuickPyInstrIter {
-    const PyInstr *base;
-    const size_t limit;
+class PyInstrPointer {
+    PyInstr *pointer;
+
 public:
-    size_t offset;
-    PyOpcode opcode{};
+    explicit PyInstrPointer(PyCodeObject *py_code) :
+            pointer(reinterpret_cast<PyInstr *>(PyBytes_AS_STRING(py_code->co_code))) {}
 
-    QuickPyInstrIter(const PyInstr *instr, size_t from, size_t to) : base(instr), limit(to), offset(from) {}
+    explicit PyInstrPointer(PyInstr *pointer) : pointer(pointer) {}
 
-    auto next() {
-        if (offset == limit) {
-            return false;
-        } else {
-            opcode = _Py_OPCODE(base[offset]);
-            offset++;
-            return true;
-        }
-    }
+    auto opcode() const { return _Py_OPCODE(*pointer); }
 
-    auto getOparg() {
-        auto o = offset;
-        auto oparg = _Py_OPARG(base[--o]);
+    auto oparg() const { return _Py_OPARG(*pointer); }
+
+    auto fullOparg(const PyInstrPointer &instr_begin) const {
+        auto p = pointer;
+        auto arg = _Py_OPARG(*p);
         unsigned shift = 0;
-        while (o && _Py_OPCODE(base[--o]) == EXTENDED_ARG) {
+        while (p-- != instr_begin.pointer && _Py_OPCODE(*p) == EXTENDED_ARG) {
             shift += EXTENDED_ARG_BITS;
-            oparg |= _Py_OPARG(base[o]) << shift;
+            arg |= _Py_OPARG(*p) << shift;
         }
-        return oparg;
-    }
-};
-
-class PyInstrIter {
-    const PyInstr *base;
-    const size_t limit;
-    // TODO: 也许可以模仿ceval不需要ext_oparg
-    PyOparg ext_oparg{};
-public:
-    size_t offset;
-    PyOpcode opcode{};
-    PyOparg oparg{};
-
-    PyInstrIter(const PyInstr *instr, size_t from, size_t to) : base(instr), limit(to), offset(from) {}
-
-    explicit operator bool() const { return offset < limit; }
-
-    auto next() {
-        opcode = _Py_OPCODE(base[offset]);
-        oparg = ext_oparg | _Py_OPARG(base[offset]);
-        offset++;
-        ext_oparg = 0;
+        return arg;
     }
 
-    auto extend_current_oparg() {
-        ext_oparg = oparg << EXTENDED_ARG_BITS;
+    auto operator*() const { return std::pair{opcode(), oparg()}; }
+
+    auto &operator++() {
+        ++pointer;
+        return *this;
     }
-    // void fetch_next() {
-    //     assert(bool(*this));
-    //     opcode = _Py_OPCODE(base[offset]);
-    //     oparg = _Py_OPARG(base[offset]);
-    //     offset++;
-    // }
-    //
-    // auto extend_current_oparg() {
-    //     assert(bool(*this));
-    //     opcode = _Py_OPCODE(base[offset]);
-    //     oparg = oparg << EXTENDED_ARG_BITS | _Py_OPARG(base[offset]);
-    //     offset++;
-    // }
+
+    auto &operator--() {
+        --pointer;
+        return *this;
+    }
+
+    auto operator++(int) { return PyInstrPointer(pointer++); }
+
+    auto operator--(int) { return PyInstrPointer(pointer--); }
+
+    auto operator<=>(const PyInstrPointer &other) const { return pointer <=> other.pointer; }
+
+    auto operator==(const PyInstrPointer &other) const { return pointer == other.pointer; }
+
+    auto operator+(ptrdiff_t offset) const { return PyInstrPointer{pointer + offset}; }
+
+    auto operator-(ptrdiff_t offset) const { return *this + (-offset); }
+
+    auto operator-(const PyInstrPointer &other) const { return pointer - other.pointer; }
+
+    auto operator[](ptrdiff_t offset) const { return *(*this + offset); }
 };
 
 #endif

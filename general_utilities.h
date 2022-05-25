@@ -82,6 +82,7 @@ public:
     auto end() { return Iterator{to}; }
 };
 
+// TODO: 直接裸指针，省得一层unique_ptr
 template <typename T>
 class DynamicArray {
     std::unique_ptr<T[]> data;
@@ -91,7 +92,7 @@ public:
 
     DynamicArray() = default;
 
-    DynamicArray(DynamicArray &&other) : data{std::move(other.data)} {};
+    DynamicArray(DynamicArray &&other) noexcept : data{std::move(other.data)} {};
 
     explicit DynamicArray(size_t size, bool init = false) : data{init ? new T[size]{} : new T[size]} {};
 
@@ -118,6 +119,10 @@ public:
         auto old = get(index);
         (*this)[index / BitsPerValue] |= ValueType{1} << index % BitsPerValue;
         return !old;
+    }
+
+    void setIf(size_t index, bool cond) {
+        (*this)[index / BitsPerValue] |= ValueType{cond} << index % BitsPerValue;
     }
 
     bool get(size_t index) {

@@ -109,6 +109,7 @@ PyObject *handle_GET_ITER(PyObject *o);
 
 #define ENTRY(X) std::pair{&(X), #X}
 
+// TODO: 命名规范，看看要不要大写
 constexpr std::tuple external_symbols{
         ENTRY(handle_INCREF),
         ENTRY(handle_DECREF),

@@ -35,9 +35,9 @@ void CompileUnit::translate() {
     shared_symbols->addAttr(Attribute::NoAlias);
     frame_obj->addAttr(Attribute::NoAlias);
 
-
     // TODO: 重复了
     parseCFG();
+    analyzeRedundantLoads();
 
     blocks[0].block = createBlock("entry_block");
     auto start = blocks[0].end;
@@ -96,16 +96,17 @@ void CompileUnit::parseCFG() {
     BitArray is_boundary(size + 1);
     block_num = 0;
 
-    auto py_instructions = reinterpret_cast<PyInstr *>(PyBytes_AS_STRING(py_code->co_code));
-    for (QuickPyInstrIter instr(py_instructions, 0, size); instr.next();) {
-        switch (instr.opcode) {
+    const PyInstrPointer py_instr{py_code};
+    for (auto vpc : Range(size)) {
+        auto instr = py_instr + vpc;
+        switch (instr.opcode()) {
         case JUMP_FORWARD:
         case FOR_ITER:
         case SETUP_FINALLY:
         case SETUP_WITH:
         case SETUP_ASYNC_WITH:
-            block_num += is_boundary.set(instr.offset);
-            block_num += is_boundary.set(instr.offset + instr.getOparg());
+            block_num += is_boundary.set(vpc + 1);
+            block_num += is_boundary.set(vpc + 1 + instr.fullOparg(py_instr));
             break;
         case JUMP_ABSOLUTE:
         case JUMP_IF_TRUE_OR_POP:
@@ -113,8 +114,8 @@ void CompileUnit::parseCFG() {
         case POP_JUMP_IF_TRUE:
         case POP_JUMP_IF_FALSE:
         case JUMP_IF_NOT_EXC_MATCH:
-            block_num += is_boundary.set(instr.offset);
-            block_num += is_boundary.set(instr.getOparg());
+            block_num += is_boundary.set(vpc + 1);
+            block_num += is_boundary.set(instr.fullOparg(py_instr));
             break;
         default:
             break;
@@ -137,7 +138,6 @@ void CompileUnit::parseCFG() {
     }
     assert(current_num == block_num);
 }
-
 
 void CompileUnit::do_Py_INCREF(Value *py_obj) {
     // callSymbol<handle_INCREF, &Translator::attr_return>(py_obj);
