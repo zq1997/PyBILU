@@ -441,14 +441,14 @@ void CompileUnit::emitBlock(unsigned index) {
         }
         case CALL_FUNCTION_EX: {
             llvm::Value *kwargs = context.c_null;
-            if (oparg) {
+            if (oparg & 1) {
                 kwargs = do_POP();
             }
             auto args = do_POP();
             auto callable = do_POP();
             auto ret = callSymbol<handle_CALL_FUNCTION_EX>(callable, args, kwargs);
             do_PUSH(ret);
-            if (oparg) {
+            if (oparg & 1) {
                 do_Py_DECREF(kwargs);
             }
             do_Py_DECREF(args);
@@ -583,6 +583,13 @@ void CompileUnit::emitBlock(unsigned index) {
             break;
         }
 
+        case BUILD_STRING: {
+            stack_depth -= oparg;
+            auto values = getStackSlot(0);
+            auto str = callSymbol<handle_BUILD_STRING>(values, asValue<Py_ssize_t>(oparg));
+            do_PUSH(str);
+            break;
+        }
         case BUILD_TUPLE: {
             stack_depth -= oparg;
             auto values = getStackSlot(0);
@@ -685,12 +692,6 @@ void CompileUnit::emitBlock(unsigned index) {
             auto result = callSymbol<handle_FORMAT_VALUE>(value, fmt_spec, asValue(which_conversion));
             do_PUSH(result);
             do_Py_DECREF(value);
-        }
-        case BUILD_STRING: {
-            stack_depth -= oparg;
-            auto values = getStackSlot(0);
-            auto str = callSymbol<handle_BUILD_STRING>(values, asValue<Py_ssize_t>(oparg));
-            do_PUSH(str);
             break;
         }
 

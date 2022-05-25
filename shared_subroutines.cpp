@@ -882,6 +882,17 @@ PyObject *handle_CALL_FUNCTION_EX(PyObject *func, PyObject *args, PyObject *kwar
     return ret;
 }
 
+PyObject *handle_BUILD_STRING(PyObject **arr, Py_ssize_t num) {
+    auto str = PyUnicode_New(0, 0);
+    gotoErrorHandler(!str);
+    str = _PyUnicode_JoinArray(str, arr, num);
+    gotoErrorHandler(!str);
+    while (--num >= 0) {
+        Py_DECREF(arr[num]);
+    }
+    return str;
+}
+
 PyObject *handle_BUILD_TUPLE(PyObject **arr, Py_ssize_t num) {
     auto tup = PyTuple_New(num);
     gotoErrorHandler(!tup);
@@ -1053,17 +1064,6 @@ PyObject *handle_FORMAT_VALUE(PyObject *value, PyObject *fmt_spec, int which_con
     Py_DECREF(value);
     gotoErrorHandler(!fmt_value);
     return fmt_value;
-}
-
-PyObject *handle_BUILD_STRING(PyObject **arr, Py_ssize_t num) {
-    auto str = PyUnicode_New(0, 0);
-    gotoErrorHandler(!str);
-    str = _PyUnicode_JoinArray(str, arr, num);
-    gotoErrorHandler(!str);
-    while (--num >= 0) {
-        Py_DECREF(arr[num]);
-    }
-    return str;
 }
 
 PyObject *handle_LOAD_BUILD_CLASS(PyObject *builtins) {
@@ -1370,7 +1370,7 @@ void handle_SETUP_WITH(PyFrameObject *f, PyObject **sp, int handler) {
     Py_DECREF(enter);
     gotoErrorHandler(!res);
     *sp++ = res;
-    PyFrame_BlockSetup(f, SETUP_FINALLY, handler, sp - f->f_valuestack - 1); //  太黑暗了
+    PyFrame_BlockSetup(f, SETUP_FINALLY, handler, sp - f->f_valuestack - 1); // TODO: 太黑暗了
 }
 
 

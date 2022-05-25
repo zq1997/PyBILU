@@ -172,6 +172,7 @@ constexpr std::tuple external_symbols{
         ENTRY(handle_IMPORT_FROM),
         ENTRY(handle_IMPORT_STAR),
 
+        ENTRY(handle_BUILD_STRING),
         ENTRY(handle_BUILD_TUPLE),
         ENTRY(handle_BUILD_LIST),
         ENTRY(handle_BUILD_SET),
@@ -187,7 +188,6 @@ constexpr std::tuple external_symbols{
         ENTRY(handle_LIST_TO_TUPLE),
 
         ENTRY(handle_FORMAT_VALUE),
-        ENTRY(handle_BUILD_STRING),
 
         ENTRY(PyFrame_BlockSetup),
         ENTRY(PyFrame_BlockPop),
