@@ -46,9 +46,9 @@ public:
         pop(until_now);
     }
 
-    void pop_n_consecutively(int n) {
+    void pop_n_consecutively(int n, T timestamp = until_forever) {
         while (n--) {
-            pop(until_forever);
+            pop(timestamp);
         }
     }
 
@@ -58,6 +58,7 @@ public:
 };
 
 
+// TODO： 或许这里可以顺便分析出delta_stack_height，后面可以直接利用
 void CompileUnit::analyzeRedundantLoads() {
     ReversedStack<unsigned> stack(py_code->co_stacksize);
 
@@ -67,10 +68,10 @@ void CompileUnit::analyzeRedundantLoads() {
 
     const PyInstrPointer py_instr{py_code};
     unsigned code_instr_num = PyBytes_GET_SIZE(py_code->co_code) / sizeof(PyInstr);
-    const auto until_finally = code_instr_num - 1;
+    const auto until_finally = code_instr_num;
     constexpr decltype(until_finally) until_anytime = 0;
 
-    BitArray redundant_loads(code_instr_num);
+    redundant_loads.reserve(code_instr_num);
     DynamicArray<unsigned> locals(py_code->co_nlocals);
     for (auto i : Range(py_code->co_nlocals)) {
         locals[i] = until_finally;
@@ -300,7 +301,7 @@ void CompileUnit::analyzeRedundantLoads() {
             stack.pop();
             break;
         case FOR_ITER:
-            stack.pop();
+            stack.push();
             break;
 
         case BUILD_TUPLE:

@@ -92,7 +92,7 @@ public:
 
     DynamicArray() = default;
 
-    DynamicArray(DynamicArray &&other) noexcept : data{std::move(other.data)} {};
+    DynamicArray(DynamicArray &&other) noexcept: data{std::move(other.data)} {};
 
     explicit DynamicArray(size_t size, bool init = false) : data{init ? new T[size]{} : new T[size]} {};
 
@@ -108,26 +108,37 @@ public:
 };
 
 class BitArray : public DynamicArray<unsigned long> {
+    using Parent = DynamicArray<ValueType>;
 public:
     static constexpr auto BitsPerValue = CHAR_BIT * sizeof(ValueType);
 
     static auto chunkNumber(size_t size) { return size / BitsPerValue + !!(size % BitsPerValue); }
 
-    explicit BitArray(size_t size) : DynamicArray<ValueType>(chunkNumber(size), true) {}
+    BitArray() = default;
+
+    explicit BitArray(size_t size) : Parent(chunkNumber(size), true) {}
+
+    auto &getChunk(size_t index) { return Parent::operator[](index); }
+
+    void reserve(size_t size) {
+        Parent::reserve(chunkNumber(size), true);
+    }
 
     bool set(size_t index) {
         auto old = get(index);
-        (*this)[index / BitsPerValue] |= ValueType{1} << index % BitsPerValue;
+        getChunk(index / BitsPerValue) |= ValueType{1} << index % BitsPerValue;
         return !old;
     }
 
     void setIf(size_t index, bool cond) {
-        (*this)[index / BitsPerValue] |= ValueType{cond} << index % BitsPerValue;
+        getChunk(index / BitsPerValue) |= ValueType{cond} << index % BitsPerValue;
     }
 
     bool get(size_t index) {
-        return (*this)[index / BitsPerValue] & (ValueType{1} << index % BitsPerValue);
+        return getChunk(index / BitsPerValue) & (ValueType{1} << index % BitsPerValue);
     }
+
+    auto operator[](size_t index) = delete;
 };
 
 #endif

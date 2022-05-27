@@ -83,9 +83,7 @@ public:
     void finalize() {}
 };
 
-
 class CompileUnit {
-protected:
     Context &context;
     llvm::Module llvm_module{"the_module", context.llvm_context};
     llvm::IRBuilder<> builder{context.llvm_context};
@@ -98,11 +96,14 @@ protected:
     llvm::Value *code_consts;
 
     PyCodeObject *py_code;
+    BitArray redundant_loads;
     llvm::SmallVector<unsigned> live_block_indices;
     decltype(PyFrameObject::f_stackdepth) stack_depth;
     unsigned block_num;
     DynamicArray<decltype(stack_depth)> vpc_to_stack_depth;
     DynamicArray<PyBasicBlock> blocks;
+    DynamicArray<std::pair<llvm::Value *, bool>> abstract_stack;
+    decltype(stack_depth) abstract_stack_height;
 
     [[no_unique_address]] std::conditional_t<debug_build, DebugInfoBuilder, EmptyDebugInfoBuilder> di_builder;
 
@@ -111,20 +112,48 @@ protected:
     void parseCFG();
     void analyzeRedundantLoads();
     void translate();
-
     void emitBlock(unsigned index);
+
     llvm::Value *do_GETLOCAL(PyOparg oparg);
     void do_SETLOCAL(PyOparg oparg, llvm::Value *value);
-    llvm::Value *do_POP();
-    void do_PUSH(llvm::Value *value);
-    llvm::Value *getStackSlot(int i);
-    llvm::Value *do_PEAK(int i);
-    void do_SET_PEAK(int i, llvm::Value *value);
     llvm::Value *getName(int i);
     llvm::Value *getFreevar(int i);
+    llvm::Value *getStackSlot(int i);
+    void do_SET_PEAK(int i, llvm::Value *value);
+    llvm::Value *do_PEAK(int i);
+    void do_PUSH(llvm::Value *value, bool is_redundant = false);
+
+
+    class NormalPoppedValue {
+    public:
+        llvm::Value *value;
+        bool really_pushed;
+
+        NormalPoppedValue(llvm::Value *value, bool really_pushed) : value{value}, really_pushed{really_pushed} {}
+
+        NormalPoppedValue(const NormalPoppedValue &) = delete;
+
+        operator llvm::Value *() { return value; }
+
+        ~NormalPoppedValue() { assert(!value); }
+    };
+
+    NormalPoppedValue do_POP();
+
+    llvm::Value *do_POPWithStolenRef();
 
     void do_Py_INCREF(llvm::Value *v);
+
     void do_Py_DECREF(llvm::Value *v);
+
+    // TODO: 似乎存在内存泄漏
+    void do_Py_DECREF(NormalPoppedValue &v) {
+        if (v.really_pushed) {
+            do_Py_DECREF(static_cast<llvm::Value *>(v));
+        }
+        v.value = nullptr;
+    }
+
     void do_Py_XDECREF(llvm::Value *v);
 
     void pyJumpIF(unsigned offset, bool pop_if_jump, bool jump_cond);
@@ -186,14 +215,14 @@ protected:
     }
 
     template <llvm::AttributeList Context::* Attr = &Context::attr_default_call>
-    llvm::CallInst *callFunction(llvm::FunctionType *type, llvm::Value *callee, auto... args) {
+    llvm::CallInst *callFunction(llvm::FunctionType *type, llvm::Value *callee, auto &&... args) {
         auto call_instr = builder.CreateCall(type, callee, {args...});
         call_instr->setAttributes(context.*Attr);
         return call_instr;
     }
 
     template <auto &Symbol, llvm::AttributeList Context::* Attr = &Context::attr_default_call>
-    llvm::CallInst *callSymbol(auto... args) {
+    llvm::CallInst *callSymbol(auto &&... args) {
         auto type = context.type<std::remove_reference_t<decltype(Symbol)>>();
         auto callee = getSymbol(searchSymbol<Symbol>());
         return callFunction<Attr>(type, callee, args...);

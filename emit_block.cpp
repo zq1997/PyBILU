@@ -7,15 +7,17 @@
 using namespace std;
 using namespace llvm;
 
+
 void CompileUnit::emitBlock(unsigned index) {
     auto &this_block = blocks[index];
     this_block.block->insertInto(function);
     builder.SetInsertPoint(this_block.block);
 
+    for (auto i : Range(abstract_stack_height)) {
+        abstract_stack[i] = {nullptr, true};
+    }
+
     bool fall_through = true;
-    // TODO: 这种可能会有问题，会出现一个block没有被设置initial_stack_height但是被遍历，会assert失败
-    assert(stack_depth >= 0);
-    assert(index);
 
     const PyInstrPointer py_instr{py_code};
     PyOparg extended_oparg = 0;
@@ -123,21 +125,28 @@ void CompileUnit::emitBlock(unsigned index) {
             if constexpr(debug_build) {
                 Py_DECREF(repr);
             }
-            do_Py_INCREF(value);
-            do_PUSH(value);
+            auto is_redundant = redundant_loads.get(vpc);
+            if (!is_redundant) {
+                do_Py_INCREF(value);
+            }
+            do_PUSH(value, is_redundant);
             break;
         }
         case LOAD_FAST: {
             auto value = do_GETLOCAL(oparg);
             auto ok_block = appendBlock("LOAD_FAST.OK");
+            // TODO: goto error提取为一个函数来实现
             builder.CreateCondBr(builder.CreateICmpNE(value, context.c_null), ok_block, error_block, context.likely_true);
             builder.SetInsertPoint(ok_block);
-            do_Py_INCREF(value);
-            do_PUSH(value);
+            auto is_redundant = redundant_loads.get(vpc);
+            if (!is_redundant) {
+                do_Py_INCREF(value);
+            }
+            do_PUSH(value, is_redundant);
             break;
         }
         case STORE_FAST: {
-            auto value = do_POP();
+            auto value = do_POPWithStolenRef();
             do_SETLOCAL(oparg, value);
             break;
         }
@@ -168,7 +177,7 @@ void CompileUnit::emitBlock(unsigned index) {
             auto cell = getFreevar(oparg);
             auto cell_slot = getPointer(cell, &PyCellObject::ob_ref);
             auto old_value = loadValue<PyObject *>(cell_slot, context.tbaa_obj_field);
-            auto value = do_POP();
+            auto value = do_POPWithStolenRef();
             storeValue<PyObject *>(value, cell_slot, context.tbaa_obj_field);
             do_Py_XDECREF(old_value);
             break;
@@ -422,6 +431,7 @@ void CompileUnit::emitBlock(unsigned index) {
             do_Py_INCREF(retval);
             builder.CreateRet(retval);
             fall_through = false;
+            retval.value = nullptr; // 不然就会触发decref检查
             break;
         }
         case CALL_FUNCTION: {
@@ -481,17 +491,17 @@ void CompileUnit::emitBlock(unsigned index) {
             builder.CreateCondBr(builder.CreateICmpNE(py_func, context.c_null), ok_block, error_block, context.likely_true);
             builder.SetInsertPoint(ok_block);
             // TODO: 一个新的tbaa
-            if (oparg & 0x08) {
-                storeFiledValue(do_POP(), py_func, &PyFunctionObject::func_closure, context.tbaa_refcnt);
+            if (oparg & 8) {
+                storeFiledValue(do_POPWithStolenRef(), py_func, &PyFunctionObject::func_closure, context.tbaa_refcnt);
             }
-            if (oparg & 0x04) {
-                storeFiledValue(do_POP(), py_func, &PyFunctionObject::func_annotations, context.tbaa_refcnt);
+            if (oparg & 4) {
+                storeFiledValue(do_POPWithStolenRef(), py_func, &PyFunctionObject::func_annotations, context.tbaa_refcnt);
             }
-            if (oparg & 0x02) {
-                storeFiledValue(do_POP(), py_func, &PyFunctionObject::func_kwdefaults, context.tbaa_refcnt);
+            if (oparg & 2) {
+                storeFiledValue(do_POPWithStolenRef(), py_func, &PyFunctionObject::func_kwdefaults, context.tbaa_refcnt);
             }
-            if (oparg & 0x01) {
-                storeFiledValue(do_POP(), py_func, &PyFunctionObject::func_defaults, context.tbaa_refcnt);
+            if (oparg & 1) {
+                storeFiledValue(do_POPWithStolenRef(), py_func, &PyFunctionObject::func_defaults, context.tbaa_refcnt);
             }
             do_PUSH(py_func);
             do_Py_DECREF(codeobj);
@@ -511,8 +521,8 @@ void CompileUnit::emitBlock(unsigned index) {
             auto level = do_POP();
             auto res = callSymbol<handle_IMPORT_NAME>(frame_obj, name, fromlist, level);
             do_PUSH(res);
-            Py_DECREF(level);
-            Py_DECREF(fromlist);
+            do_Py_DECREF(level);
+            do_Py_DECREF(fromlist);
             break;
         }
         case IMPORT_FROM: {
@@ -565,6 +575,7 @@ void CompileUnit::emitBlock(unsigned index) {
             break;
         }
         case FOR_ITER: {
+            // TODO: 不止那么简单还有异常情况
             auto iter = do_PEAK(1);
             auto the_type = loadFieldValue(iter, &PyObject::ob_type, context.tbaa_obj_field);
             auto the_iternextfunc = loadFieldValue(the_type, &PyTypeObject::tp_iternext, context.tbaa_obj_field);

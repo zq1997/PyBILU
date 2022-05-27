@@ -62,10 +62,13 @@ void CompileUnit::translate() {
 
     error_block = createBlock("raise_error");
 
+    abstract_stack.reserve(py_code->co_stacksize);
     declarePendingBlock(1U, 0);
     while (!live_block_indices.empty()) {
         auto index = live_block_indices.pop_back_val();
-        stack_depth = blocks[index].initial_stack_height;
+        assert(index);
+        abstract_stack_height = stack_depth = blocks[index].initial_stack_height;
+        assert(stack_depth >= 0);
         emitBlock(index);
     }
 
@@ -129,7 +132,7 @@ void CompileUnit::parseCFG() {
     unsigned current_num = 0;
     for (auto i : Range(BitArray::chunkNumber(size))) {
         unsigned j = 0;
-        for (auto bits = is_boundary[i]; bits; bits >>= 1) {
+        for (auto bits = is_boundary.getChunk(i); bits; bits >>= 1) {
             if (bits & 1) {
                 blocks[current_num++].end = i * BitArray::BitsPerValue + j;
             }
@@ -145,7 +148,7 @@ void CompileUnit::do_Py_INCREF(Value *py_obj) {
     auto old_value = loadValue<decltype(PyObject::ob_refcnt)>(ref, context.tbaa_refcnt);
     auto *delta_1 = asValue(decltype(PyObject::ob_refcnt){1});
     auto new_value = builder.CreateAdd(old_value, delta_1);
-    builder.CreateAssumption(builder.CreateICmpSGT(new_value, delta_1)); // 需要么
+    // builder.CreateAssumption(builder.CreateICmpSGT(new_value, delta_1)); // 需要么
     storeValue<decltype(PyObject::ob_refcnt)>(new_value, ref, context.tbaa_refcnt);
 }
 
@@ -204,21 +207,50 @@ Value *CompileUnit::getStackSlot(int i) {
 }
 
 Value *CompileUnit::do_PEAK(int i) {
-    return loadValue<PyObject *>(getStackSlot(i), context.tbaa_frame_value);
+    auto &[value, really_pushed] = abstract_stack[abstract_stack_height - i];
+    if (really_pushed) {
+        if (!value) {
+            value = loadValue<PyObject *>(getStackSlot(i), context.tbaa_frame_value);
+        }
+    }
+    return value;
 }
 
+// 有bug，抽象栈没有协调改变
 void CompileUnit::do_SET_PEAK(int i, llvm::Value *value) {
     storeValue<PyObject *>(value, getStackSlot(i), context.tbaa_frame_value);
 }
 
-llvm::Value *CompileUnit::do_POP() {
-    --stack_depth;
-    return do_PEAK(0);
+CompileUnit::NormalPoppedValue CompileUnit::do_POP() {
+    auto &[value, really_pushed] = abstract_stack[--abstract_stack_height];
+    if (really_pushed) {
+        --stack_depth;
+        if (!value) {
+            value = loadValue<PyObject *>(getStackSlot(0), context.tbaa_frame_value);
+        }
+    }
+    return {value, really_pushed};
 }
 
-void CompileUnit::do_PUSH(llvm::Value *value) {
-    do_SET_PEAK(0, value);
-    stack_depth++;
+llvm::Value *CompileUnit::do_POPWithStolenRef() {
+    auto &[value, really_pushed] = abstract_stack[--abstract_stack_height];
+    if (really_pushed) {
+        --stack_depth;
+        if (!value) {
+            value = loadValue<PyObject *>(getStackSlot(0), context.tbaa_frame_value);
+        }
+    } else {
+        do_Py_INCREF(value);
+    }
+    return value;
+}
+
+void CompileUnit::do_PUSH(llvm::Value *value, bool is_redundant) {
+    abstract_stack[abstract_stack_height++] = {value, !is_redundant};
+    if (!is_redundant) {
+        storeValue<PyObject *>(value, getStackSlot(0), context.tbaa_frame_value);
+        stack_depth++;
+    }
 }
 
 Value *CompileUnit::getName(int i) {
@@ -302,7 +334,7 @@ void CompileUnit::pyJumpIF(unsigned offset, bool pop_if_jump, bool jump_cond) {
 }
 
 
-static void debug_dump_obj(PyObject *py_code, Module &module, SmallVector<char> *obj_vec = nullptr) {
+static void debugDumpObj(PyObject *py_code, Module &module, SmallVector<char> *obj_vec = nullptr) {
     if constexpr(debug_build) {
         SmallVector<char> ll_vec{};
         raw_svector_ostream os{ll_vec};
@@ -325,10 +357,10 @@ CompileUnit::TranslatedResult *CompileUnit::emit(Translator &translator, PyObjec
     cu.llvm_module.setDataLayout(translator.machine->createDataLayout());
     cu.translate();
 
-    debug_dump_obj(py_code, cu.llvm_module, nullptr);
+    debugDumpObj(py_code, cu.llvm_module, nullptr);
     auto &obj = translator.compile(cu.llvm_module);
     auto memory = loadCode(obj);
-    debug_dump_obj(py_code, cu.llvm_module, &obj);
+    debugDumpObj(py_code, cu.llvm_module, &obj);
     obj.resize(0);
     // TODO: cout capcity
     notifyCodeLoaded(py_code, memory.base());
