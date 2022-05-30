@@ -48,7 +48,7 @@ def __lldb_init_module(debugger: lldb.SBDebugger, internal_dict):
     else:
         internal_dict['_already_loaded'] = True
         target: lldb.SBTarget = debugger.GetDummyTarget()
-        sp: lldb.SBBreakpoint = target.BreakpointCreateByName('notifyCodeLoaded', 'pynic.so')
+        sp: lldb.SBBreakpoint = target.BreakpointCreateByName('notifyCodeLoaded', 'compyler.so')
         sp.SetScriptCallbackFunction(f'{__name__}.on_code_loaded')
         sp.SetAutoContinue(True)
 

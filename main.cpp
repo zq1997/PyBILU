@@ -155,7 +155,7 @@ PyObject *apply(PyObject *, PyObject *maybe_func) {
     return Py_NewRef(func);
 }
 
-PyMODINIT_FUNC PyInit_pynic() {
+PyMODINIT_FUNC PyInit_compyler() {
     try {
         translator = make_unique<Translator>();
     } catch (runtime_error &err) {
@@ -166,8 +166,8 @@ PyMODINIT_FUNC PyInit_pynic() {
     static PyMethodDef meth_def[] = {{"apply", apply, METH_O}, {}};
     static PyModuleDef mod_def = {
             PyModuleDef_HEAD_INIT,
-            "pynic",
-            "pynic: Python to Native Code",
+            "comPyler",
+            "A lightweight Just-In-Time compiler for Python",
             -1,
             meth_def
     };
