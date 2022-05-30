@@ -113,32 +113,31 @@ class CompileUnit {
     void analyzeRedundantLoads();
     void translate();
     void emitBlock(unsigned index);
+    void emitRotN(PyOparg n);
 
     llvm::Value *do_GETLOCAL(PyOparg oparg);
     void do_SETLOCAL(PyOparg oparg, llvm::Value *value);
     llvm::Value *getName(int i);
     llvm::Value *getFreevar(int i);
-    llvm::Value *getStackSlot(int i);
-    void do_SET_PEAK(int i, llvm::Value *value);
-    llvm::Value *do_PEAK(int i);
-    void do_PUSH(llvm::Value *value, bool is_redundant = false);
+    llvm::Value *getStackSlot(int i = 0);
+    llvm::Value *fetchStackValue(int i);
+    void do_PUSH(llvm::Value *value, bool really_pushed = true);
 
-
-    class NormalPoppedValue {
+    class PoppedStackValue {
     public:
         llvm::Value *value;
-        bool really_pushed;
+        const bool really_pushed;
 
-        NormalPoppedValue(llvm::Value *value, bool really_pushed) : value{value}, really_pushed{really_pushed} {}
+        PoppedStackValue(llvm::Value *value, bool really_pushed) : value{value}, really_pushed{really_pushed} {}
 
-        NormalPoppedValue(const NormalPoppedValue &) = delete;
+        PoppedStackValue(const PoppedStackValue &) = delete;
 
         operator llvm::Value *() { return value; }
 
-        ~NormalPoppedValue() { assert(!value); }
+        ~PoppedStackValue() { assert(!value); }
     };
 
-    NormalPoppedValue do_POP();
+    PoppedStackValue do_POP();
 
     llvm::Value *do_POPWithStolenRef();
 
@@ -146,8 +145,8 @@ class CompileUnit {
 
     void do_Py_DECREF(llvm::Value *v);
 
-    // TODO: 似乎存在内存泄漏
-    void do_Py_DECREF(NormalPoppedValue &v) {
+    void do_Py_DECREF(PoppedStackValue &v) {
+        assert(v.value);
         if (v.really_pushed) {
             do_Py_DECREF(static_cast<llvm::Value *>(v));
         }
@@ -225,7 +224,11 @@ class CompileUnit {
     llvm::CallInst *callSymbol(auto &&... args) {
         auto type = context.type<std::remove_reference_t<decltype(Symbol)>>();
         auto callee = getSymbol(searchSymbol<Symbol>());
-        return callFunction<Attr>(type, callee, args...);
+        auto call = callFunction<Attr>(type, callee, args...);
+        if constexpr (Attr == &Context::attr_refcnt_call) {
+            call->setCallingConv(llvm::CallingConv::PreserveMost);
+        }
+        return call;
     }
 
     template <auto &Symbol>

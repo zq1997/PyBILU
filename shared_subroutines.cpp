@@ -1,7 +1,9 @@
 #include "shared_symbols.h"
 
 #include <Python.h>
+
 #undef HAVE_STD_ATOMIC
+
 #include <opcode.h>
 #include <frameobject.h>
 #include <internal/pycore_pystate.h>
@@ -22,6 +24,13 @@ using namespace std;
 
 static PyObject *const python_bool_values[]{Py_False, Py_True};
 static _Py_Identifier PyId___name__{"__name__", -1};
+
+[[clang::preserve_most]] void handle_dealloc(PyObject *obj) {
+#ifdef Py_TRACE_REFS
+    _Py_ForgetReference(op);
+#endif
+    Py_TYPE(obj)->tp_dealloc(obj);
+}
 
 void handle_INCREF(PyObject *obj) {
     Py_INCREF(obj);

@@ -114,7 +114,7 @@ Context::Context(const DataLayout &dl) :
             .addAttribute(Attribute::NoUnwind)
             .addAttribute(Attribute::WillReturn)
             .addAttribute(Attribute::ArgMemOnly);
-    attr_return = AttributeList::get(llvm_context, AttributeList::FunctionIndex, attr_builder);
+    attr_refcnt_call = AttributeList::get(llvm_context, AttributeList::FunctionIndex, attr_builder);
     attr_builder.clear();
     attr_builder
             .addAttribute(Attribute::NoUnwind)

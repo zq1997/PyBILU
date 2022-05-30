@@ -143,7 +143,7 @@ void CompileUnit::parseCFG() {
 }
 
 void CompileUnit::do_Py_INCREF(Value *py_obj) {
-    // callSymbol<handle_INCREF, &Translator::attr_return>(py_obj);
+    // callSymbol<handle_INCREF, &Translator::attr_refcnt_call>(py_obj);
     auto ref = getPointer(py_obj, &PyObject::ob_refcnt);
     auto old_value = loadValue<decltype(PyObject::ob_refcnt)>(ref, context.tbaa_refcnt);
     auto *delta_1 = asValue(decltype(PyObject::ob_refcnt){1});
@@ -153,7 +153,7 @@ void CompileUnit::do_Py_INCREF(Value *py_obj) {
 }
 
 void CompileUnit::do_Py_DECREF(Value *py_obj) {
-    // callSymbol<handle_DECREF, &Translator::attr_return>(py_obj);
+    // callSymbol<handle_DECREF, &Translator::attr_refcnt_call>(py_obj);
     auto ref = getPointer(py_obj, &PyObject::ob_refcnt);
     auto old_value = loadValue<decltype(PyObject::ob_refcnt)>(ref, context.tbaa_refcnt);
     auto *delta_1 = asValue(decltype(PyObject::ob_refcnt){1});
@@ -164,13 +164,13 @@ void CompileUnit::do_Py_DECREF(Value *py_obj) {
     auto b_end = appendBlock("dealloc.end");
     builder.CreateCondBr(builder.CreateICmpEQ(new_value, zero), b_dealloc, b_end, context.likely_true);
     builder.SetInsertPoint(b_dealloc);
-    callSymbol<_Py_Dealloc, &Context::attr_return>(py_obj);
+    callSymbol<handle_dealloc, &Context::attr_refcnt_call>(py_obj);
     builder.CreateBr(b_end);
     builder.SetInsertPoint(b_end);
 }
 
 void CompileUnit::do_Py_XDECREF(Value *py_obj) {
-    // callSymbol<handle_XDECREF, &Translator::attr_return>(py_obj);
+    // callSymbol<handle_XDECREF, &Translator::attr_refcnt_call>(py_obj);
     auto b_decref = appendBlock("decref");
     auto b_end = appendBlock("decref.end");
     builder.CreateCondBr(builder.CreateICmpNE(py_obj, context.c_null), b_decref, b_end, context.likely_true);
@@ -206,49 +206,31 @@ Value *CompileUnit::getStackSlot(int i) {
     return getPointer<char>(frame_obj, offset, useName("stack.", i, "."));
 }
 
-Value *CompileUnit::do_PEAK(int i) {
-    auto &[value, really_pushed] = abstract_stack[abstract_stack_height - i];
-    if (really_pushed) {
-        if (!value) {
-            value = loadValue<PyObject *>(getStackSlot(i), context.tbaa_frame_value);
-        }
-    }
+Value *CompileUnit::fetchStackValue(int i) {
+    auto [value, _] = abstract_stack[abstract_stack_height - i];
     return value;
 }
 
-// 有bug，抽象栈没有协调改变
-void CompileUnit::do_SET_PEAK(int i, llvm::Value *value) {
-    storeValue<PyObject *>(value, getStackSlot(i), context.tbaa_frame_value);
-}
-
-CompileUnit::NormalPoppedValue CompileUnit::do_POP() {
-    auto &[value, really_pushed] = abstract_stack[--abstract_stack_height];
-    if (really_pushed) {
-        --stack_depth;
-        if (!value) {
-            value = loadValue<PyObject *>(getStackSlot(0), context.tbaa_frame_value);
-        }
-    }
+CompileUnit::PoppedStackValue CompileUnit::do_POP() {
+    auto [value, really_pushed] = abstract_stack[--abstract_stack_height];
+    stack_depth -= really_pushed;
     return {value, really_pushed};
 }
 
 llvm::Value *CompileUnit::do_POPWithStolenRef() {
-    auto &[value, really_pushed] = abstract_stack[--abstract_stack_height];
+    auto [value, really_pushed] = abstract_stack[--abstract_stack_height];
     if (really_pushed) {
         --stack_depth;
-        if (!value) {
-            value = loadValue<PyObject *>(getStackSlot(0), context.tbaa_frame_value);
-        }
     } else {
         do_Py_INCREF(value);
     }
     return value;
 }
 
-void CompileUnit::do_PUSH(llvm::Value *value, bool is_redundant) {
-    abstract_stack[abstract_stack_height++] = {value, !is_redundant};
-    if (!is_redundant) {
-        storeValue<PyObject *>(value, getStackSlot(0), context.tbaa_frame_value);
+void CompileUnit::do_PUSH(llvm::Value *value, bool really_pushed) {
+    abstract_stack[abstract_stack_height++] = {value, really_pushed};
+    if (really_pushed) {
+        storeValue<PyObject *>(value, getStackSlot(), context.tbaa_frame_value);
         stack_depth++;
     }
 }
@@ -315,7 +297,7 @@ void CompileUnit::pyJumpIF(unsigned offset, bool pop_if_jump, bool jump_cond) {
     auto true_block = jump_cond ? jump_block : fall_block;
     auto false_block = jump_cond ? fall_block : jump_block;
 
-    auto obj = do_PEAK(1);
+    auto obj = fetchStackValue(1);
     auto py_true = getSymbol(searchSymbol<_Py_TrueStruct>());
     builder.CreateCondBr(builder.CreateICmpEQ(obj, py_true), true_block, false_cmp_block);
     builder.SetInsertPoint(false_cmp_block);

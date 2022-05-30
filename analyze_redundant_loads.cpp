@@ -30,11 +30,11 @@ public:
     }
 
 
-    void peak(unsigned i, T timestamp) {
+    void peak(int i, T timestamp) {
         sp[-i] = timestamp;
     }
 
-    T set_peak(unsigned i) {
+    T set_peak(int i) {
         return sp[-i];
     }
 
@@ -255,7 +255,11 @@ void CompileUnit::analyzeRedundantLoads() {
             break;
         case CALL_FUNCTION_EX:
             stack.push();
-            stack.pop_n_consecutively(2 + (instr.fullOparg(py_instr) & 1));
+            stack.pop();
+            stack.pop();
+            if (instr.fullOparg(py_instr) & 1) {
+                stack.pop();
+            }
             break;
         case CALL_METHOD:
             stack.push();

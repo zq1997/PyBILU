@@ -20,6 +20,7 @@ using PyOpcode = decltype(_Py_OPCODE(PyInstr{}));
 using PyOparg = decltype(_Py_OPCODE(PyInstr{}));
 constexpr auto EXTENDED_ARG_BITS = 8;
 
+void handle_dealloc(PyObject *obj);
 void handle_INCREF(PyObject *obj);
 void handle_DECREF(PyObject *obj);
 void handle_XDECREF(PyObject *obj);
@@ -111,10 +112,10 @@ PyObject *handle_GET_ITER(PyObject *o);
 
 // TODO: 命名规范，看看要不要大写
 constexpr std::tuple external_symbols{
+        ENTRY(handle_dealloc),
         ENTRY(handle_INCREF),
         ENTRY(handle_DECREF),
         ENTRY(handle_XDECREF),
-        ENTRY(_Py_Dealloc),
         ENTRY(raiseException),
         ENTRY(handle_LOAD_CLASSDEREF),
         ENTRY(handle_LOAD_GLOBAL),

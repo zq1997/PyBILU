@@ -7,14 +7,59 @@
 using namespace std;
 using namespace llvm;
 
+void CompileUnit::emitRotN(PyOparg n) {
+    auto [top_value, top_really_pushed] = abstract_stack[abstract_stack_height - 1];
+    unsigned n_lift = 0;
+    for (auto i : Range(n - 1, 1)) {
+        auto [_, really_pushed] = abstract_stack[abstract_stack_height - i]
+                = abstract_stack[abstract_stack_height - (i + 1)];
+        n_lift += really_pushed;
+    }
+    abstract_stack[abstract_stack_height - n] = {top_value, top_really_pushed};
+
+    if (top_really_pushed && n_lift) {
+        auto dest_begin = getStackSlot(1);
+        auto dest_end = getStackSlot(n);
+        auto top = loadValue<PyObject *>(dest_begin, context.tbaa_frame_value);
+        if (n_lift <= 16 + 1) {
+            auto dest = dest_begin;
+            for (auto i : Range(n_lift - 1, 1U)) {
+                auto src = getStackSlot(i + 1);
+                auto value = loadValue<PyObject *>(src, context.tbaa_frame_value);
+                storeValue<PyObject *>(value, dest, context.tbaa_frame_value);
+                dest = src;
+            }
+        } else {
+            auto loop_block = appendBlock("ROT_N.loop");
+            auto end_block = appendBlock("ROT_N.end");
+            builder.CreateBr(loop_block);
+            builder.SetInsertPoint(loop_block);
+            auto dest = builder.CreatePHI(context.type<PyObject *>(), 2);
+            dest->addIncoming(dest_begin, builder.GetInsertBlock());
+            auto src = builder.CreatePHI(context.type<PyObject *>(), 2);
+            src->addIncoming(getStackSlot(2), builder.GetInsertBlock());
+            auto value = loadValue<PyObject *>(src, context.tbaa_frame_value);
+            storeValue<PyObject *>(value, dest, context.tbaa_frame_value);
+            auto next_src = getPointer<PyObject *>(src, -1);
+            builder.CreateCondBr(builder.CreateICmpEQ(dest, dest_end), end_block, loop_block);
+            dest->addIncoming(src, loop_block);
+            src->addIncoming(next_src, loop_block);
+            builder.SetInsertPoint(end_block);
+        }
+        storeValue<PyObject *>(top, dest_end, context.tbaa_frame_value);
+        return;
+    }
+}
+
 
 void CompileUnit::emitBlock(unsigned index) {
     auto &this_block = blocks[index];
     this_block.block->insertInto(function);
     builder.SetInsertPoint(this_block.block);
 
-    for (auto i : Range(abstract_stack_height)) {
-        abstract_stack[i] = {nullptr, true};
+    for (auto i : Range(stack_depth, 1)) {
+        abstract_stack[abstract_stack_height - i]
+                = {loadValue<PyObject *>(getStackSlot(i), context.tbaa_frame_value), true};
     }
 
     bool fall_through = true;
@@ -41,69 +86,43 @@ void CompileUnit::emitBlock(unsigned index) {
             break;
         }
         case ROT_TWO: {
-            auto top = do_PEAK(1);
-            auto second = do_PEAK(2);;
-            do_SET_PEAK(1, second);
-            do_SET_PEAK(2, top);
+            emitRotN(2);
             break;
         }
         case ROT_THREE: {
-            auto top = do_PEAK(1);
-            auto second = do_PEAK(2);
-            auto third = do_PEAK(3);
-            do_SET_PEAK(1, second);
-            do_SET_PEAK(2, third);
-            do_SET_PEAK(3, top);
+            emitRotN(3);
             break;
         }
         case ROT_FOUR: {
-            auto top = do_PEAK(1);
-            auto second = do_PEAK(2);
-            auto third = do_PEAK(3);
-            auto fourth = do_PEAK(4);
-            do_SET_PEAK(1, second);
-            do_SET_PEAK(2, third);
-            do_SET_PEAK(3, fourth);
-            do_SET_PEAK(4, top);
+            emitRotN(4);
             break;
         }
         case ROT_N: {
-            auto dest_start = getStackSlot(1);
-            auto src_start = getStackSlot(2);
-            auto top = loadValue<PyObject *>(dest_start, context.tbaa_frame_value);
-            auto last_cell = getStackSlot(oparg);
-            auto entry_block = builder.GetInsertBlock();
-            auto loop_block = appendBlock("ROT_N.loop");
-            auto end_block = appendBlock("ROT_N.end");
-            builder.CreateBr(loop_block);
-            builder.SetInsertPoint(loop_block);
-            auto dest = builder.CreatePHI(context.type<PyObject *>(), 2);
-            auto src = builder.CreatePHI(context.type<PyObject *>(), 2);
-            auto value = loadValue<PyObject *>(src, context.tbaa_frame_value);
-            storeValue<PyObject *>(value, dest, context.tbaa_frame_value);
-            auto src_update = getPointer<PyObject *>(src, -1);
-            auto should_break = builder.CreateICmpEQ(dest, last_cell);
-            builder.CreateCondBr(should_break, end_block, loop_block);
-            dest->addIncoming(dest_start, entry_block);
-            dest->addIncoming(src, loop_block);
-            src->addIncoming(src_start, entry_block);
-            src->addIncoming(src_update, loop_block);
-            builder.SetInsertPoint(entry_block);
-            storeValue<PyObject *>(top, last_cell, context.tbaa_frame_value);
+            emitRotN(oparg);
+            break;
         }
         case DUP_TOP: {
-            auto top = do_PEAK(1);
-            do_Py_INCREF(top);
-            do_PUSH(top);
+            auto [top, top_really_pushed] = abstract_stack[abstract_stack_height - 1];
+            abstract_stack[abstract_stack_height++] = {top, top_really_pushed};
+            if (top_really_pushed) {
+                do_Py_INCREF(top);
+                do_PUSH(top);
+            }
             break;
         }
         case DUP_TOP_TWO: {
-            auto top = do_PEAK(1);
-            auto second = do_PEAK(2);
-            do_Py_INCREF(second);
-            do_PUSH(second);
-            do_Py_INCREF(top);
-            do_PUSH(top);
+            auto [second, second_really_pushed] = abstract_stack[abstract_stack_height - 2];
+            auto [top, top_really_pushed] = abstract_stack[abstract_stack_height - 1];
+            abstract_stack[abstract_stack_height++] = {second, second_really_pushed};
+            abstract_stack[abstract_stack_height++] = {top, top_really_pushed};
+            if (second_really_pushed) {
+                do_Py_INCREF(second);
+                do_PUSH(second);
+            }
+            if (top_really_pushed) {
+                do_Py_INCREF(top);
+                do_PUSH(top);
+            }
             break;
         }
         case POP_TOP: {
@@ -129,7 +148,7 @@ void CompileUnit::emitBlock(unsigned index) {
             if (!is_redundant) {
                 do_Py_INCREF(value);
             }
-            do_PUSH(value, is_redundant);
+            do_PUSH(value, !is_redundant);
             break;
         }
         case LOAD_FAST: {
@@ -142,7 +161,7 @@ void CompileUnit::emitBlock(unsigned index) {
             if (!is_redundant) {
                 do_Py_INCREF(value);
             }
-            do_PUSH(value, is_redundant);
+            do_PUSH(value, !is_redundant);
             break;
         }
         case STORE_FAST: {
@@ -232,7 +251,7 @@ void CompileUnit::emitBlock(unsigned index) {
         }
         case LOAD_METHOD: {
             auto obj = do_POP();
-            callSymbol<handle_LOAD_METHOD>(obj, getName(oparg), getStackSlot(0));
+            callSymbol<handle_LOAD_METHOD>(obj, getName(oparg), getStackSlot());
             stack_depth += 2;
             break;
         }
@@ -427,24 +446,23 @@ void CompileUnit::emitBlock(unsigned index) {
             break;
         }
         case RETURN_VALUE: {
-            auto retval = do_POP();
+            auto retval = fetchStackValue(1);
             do_Py_INCREF(retval);
             builder.CreateRet(retval);
             fall_through = false;
-            retval.value = nullptr; // 不然就会触发decref检查
             break;
         }
         case CALL_FUNCTION: {
             // func_args重命名
             stack_depth -= oparg + 1;
-            auto func_args = getStackSlot(0);
+            auto func_args = getStackSlot();
             auto ret = callSymbol<handle_CALL_FUNCTION>(func_args, asValue<Py_ssize_t>(oparg));
             do_PUSH(ret);
             break;
         }
         case CALL_FUNCTION_KW: {
             stack_depth -= oparg + 2;
-            auto func_args = getStackSlot(0);
+            auto func_args = getStackSlot();
             auto ret = callSymbol<handle_CALL_FUNCTION_KW>(func_args, asValue<Py_ssize_t>(oparg));
             do_PUSH(ret);
             break;
@@ -466,10 +484,10 @@ void CompileUnit::emitBlock(unsigned index) {
             break;
         }
         case CALL_METHOD: {
-            auto maybe_meth = do_PEAK(oparg + 2);
+            auto maybe_meth = fetchStackValue(oparg + 2);
             stack_depth -= oparg + 2;
             auto is_meth = builder.CreateICmpNE(maybe_meth, context.c_null);
-            auto func_args = builder.CreateSelect(is_meth, getStackSlot(0), getStackSlot(-1));
+            auto func_args = builder.CreateSelect(is_meth, getStackSlot(), getStackSlot(-1));
             auto nargs = builder.CreateSelect(is_meth,
                     asValue<Py_ssize_t>(oparg + 1), asValue<Py_ssize_t>(oparg));
             auto ret = callSymbol<handle_CALL_FUNCTION>(func_args, nargs);
@@ -526,7 +544,7 @@ void CompileUnit::emitBlock(unsigned index) {
             break;
         }
         case IMPORT_FROM: {
-            auto from = do_PEAK(1);
+            auto from = fetchStackValue(1);
             auto res = callSymbol<handle_IMPORT_FROM>(from, getName(oparg));
             do_PUSH(res);
             break;
@@ -576,7 +594,7 @@ void CompileUnit::emitBlock(unsigned index) {
         }
         case FOR_ITER: {
             // TODO: 不止那么简单还有异常情况
-            auto iter = do_PEAK(1);
+            auto iter = fetchStackValue(1);
             auto the_type = loadFieldValue(iter, &PyObject::ob_type, context.tbaa_obj_field);
             auto the_iternextfunc = loadFieldValue(the_type, &PyTypeObject::tp_iternext, context.tbaa_obj_field);
             auto next = callFunction(context.type<remove_pointer_t<iternextfunc>>(), the_iternextfunc, iter);
@@ -596,56 +614,56 @@ void CompileUnit::emitBlock(unsigned index) {
 
         case BUILD_STRING: {
             stack_depth -= oparg;
-            auto values = getStackSlot(0);
+            auto values = getStackSlot();
             auto str = callSymbol<handle_BUILD_STRING>(values, asValue<Py_ssize_t>(oparg));
             do_PUSH(str);
             break;
         }
         case BUILD_TUPLE: {
             stack_depth -= oparg;
-            auto values = getStackSlot(0);
+            auto values = getStackSlot();
             auto map = callSymbol<handle_BUILD_TUPLE>(values, asValue<Py_ssize_t>(oparg));
             do_PUSH(map);
             break;
         }
         case BUILD_LIST: {
             stack_depth -= oparg;
-            auto values = getStackSlot(0);
+            auto values = getStackSlot();
             auto map = callSymbol<handle_BUILD_LIST>(values, asValue<Py_ssize_t>(oparg));
             do_PUSH(map);
             break;
         }
         case BUILD_SET: {
             stack_depth -= oparg;
-            auto values = getStackSlot(0);
+            auto values = getStackSlot();
             auto map = callSymbol<handle_BUILD_SET>(values, asValue<Py_ssize_t>(oparg));
             do_PUSH(map);
             break;
         }
         case BUILD_MAP: {
             stack_depth -= 2 * oparg;
-            auto values = getStackSlot(0);
+            auto values = getStackSlot();
             auto map = callSymbol<handle_BUILD_MAP>(values, asValue<Py_ssize_t>(oparg));
             do_PUSH(map);
             break;
         }
         case BUILD_CONST_KEY_MAP: {
             stack_depth -= oparg + 1;
-            auto values = getStackSlot(0);
+            auto values = getStackSlot();
             auto map = callSymbol<handle_BUILD_CONST_KEY_MAP>(values, asValue<Py_ssize_t>(oparg));
             do_PUSH(map);
             break;
         }
         case LIST_APPEND: {
             auto value = do_POP();
-            auto list = do_PEAK(oparg);
+            auto list = fetchStackValue(oparg);
             callSymbol<handle_LIST_APPEND>(list, value);
             do_Py_DECREF(value);
             break;
         }
         case SET_ADD: {
             auto value = do_POP();
-            auto set = do_PEAK(oparg);
+            auto set = fetchStackValue(oparg);
             callSymbol<handle_SET_ADD>(set, value);
             do_Py_DECREF(value);
             break;
@@ -653,7 +671,7 @@ void CompileUnit::emitBlock(unsigned index) {
         case MAP_ADD: {
             auto value = do_POP();
             auto key = do_POP();
-            auto map = do_PEAK(oparg);
+            auto map = fetchStackValue(oparg);
             callSymbol<handle_MAP_ADD>(map, key, value);
             do_Py_DECREF(key);
             do_Py_DECREF(value);
@@ -661,29 +679,29 @@ void CompileUnit::emitBlock(unsigned index) {
         }
         case LIST_EXTEND: {
             auto iterable = do_POP();
-            auto list = do_PEAK(oparg);
+            auto list = fetchStackValue(oparg);
             callSymbol<handle_LIST_EXTEND>(list, iterable);
             do_Py_DECREF(iterable);
             break;
         }
         case SET_UPDATE: {
             auto iterable = do_POP();
-            auto set = do_PEAK(oparg);
+            auto set = fetchStackValue(oparg);
             callSymbol<handle_SET_UPDATE>(set, iterable);
             do_Py_DECREF(iterable);
             break;
         }
         case DICT_UPDATE: {
             auto update = do_POP();
-            auto dict = do_PEAK(oparg);
+            auto dict = fetchStackValue(oparg);
             callSymbol<handle_DICT_UPDATE>(dict, update);
             do_Py_DECREF(update);
             break;
         }
         case DICT_MERGE: {
             auto update = do_POP();
-            auto dict = do_PEAK(oparg);
-            auto callee = do_PEAK(oparg + 2);
+            auto dict = fetchStackValue(oparg);
+            auto callee = fetchStackValue(oparg + 2);
             callSymbol<handle_DICT_MERGE>(callee, dict, update);
             do_Py_DECREF(update);
             break;
@@ -805,16 +823,16 @@ void CompileUnit::emitBlock(unsigned index) {
                     builder.CreatePtrToInt(BlockAddress::get(function, py_finally_block.block), context.type<uintptr_t>()),
                     builder.CreatePtrToInt(BlockAddress::get(function, blocks[1].block), context.type<uintptr_t>())
             );
-            callSymbol<handle_SETUP_WITH>(frame_obj, getStackSlot(0),
+            callSymbol<handle_SETUP_WITH>(frame_obj, getStackSlot(),
                     builder.CreateIntCast(block_addr_diff, context.type<int>(), true));
             stack_depth += 1;
             break;
         }
         case WITH_EXCEPT_START: {
-            auto exc = do_PEAK(1);
-            auto val = do_PEAK(2);
-            auto tb = do_PEAK(3);
-            auto exit_func = do_PEAK(7);
+            auto exc = fetchStackValue(1);
+            auto val = fetchStackValue(2);
+            auto tb = fetchStackValue(3);
+            auto exit_func = fetchStackValue(7);
             auto res = callSymbol<handle_WITH_EXCEPT_START>(exc, val, tb, exit_func);
             do_PUSH(res);
             break;

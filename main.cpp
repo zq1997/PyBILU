@@ -114,6 +114,7 @@ PyObject *eval_func(PyThreadState *tstate, PyFrameObject *f, int throwflag) {
 
         if (handler > 0) {
             result = (*compiled_result)(&symbol_addresses[0], f, handler);
+            f->f_stackdepth = compiled_result->sp_map[f->f_lasti];
         } else {
             while (f->f_stackdepth) {
                 PyObject *v = f->f_valuestack[--f->f_stackdepth];
@@ -125,6 +126,7 @@ PyObject *eval_func(PyThreadState *tstate, PyFrameObject *f, int throwflag) {
     }
     tstate->cframe = prev_cframe;
     tstate->frame = f->f_back;
+    assert(result);
     return result;
 }
 
@@ -133,8 +135,6 @@ void freeExtra(void *result) {
     unloadCode(result_->mem_block);
     delete result_;
 }
-
-// void notifyCodeLoaded(const char *obj_file, size_t obj_file_size, void *loaded_addr) {}
 
 PyObject *apply(PyObject *, PyObject *maybe_func) {
     if (!PyFunction_Check(maybe_func)) {
