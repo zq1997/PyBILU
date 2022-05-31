@@ -79,7 +79,7 @@ void CompileUnit::emitBlock(unsigned index) {
 
         switch (opcode) {
         case EXTENDED_ARG: {
-            extended_oparg = oparg << EXTENDED_ARG_BITS;
+            extended_oparg = oparg << PyInstrPointer::extended_arg_shift;
             break;
         }
         case NOP: {

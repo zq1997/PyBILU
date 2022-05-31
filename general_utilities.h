@@ -6,6 +6,7 @@
 #include <type_traits>
 
 #include <Python.h>
+#include <opcode.h>
 
 struct PyObjectRef {
     PyObject *o;
@@ -140,5 +141,63 @@ public:
 
     auto operator[](size_t index) = delete;
 };
+
+
+class PyInstrPointer {
+    _Py_CODEUNIT *pointer;
+
+public:
+    static constexpr auto extended_arg_shift = 8;
+
+    explicit PyInstrPointer(PyCodeObject *py_code) :
+            pointer(reinterpret_cast<_Py_CODEUNIT *>(PyBytes_AS_STRING(py_code->co_code))) {}
+
+    explicit PyInstrPointer(_Py_CODEUNIT *pointer) : pointer(pointer) {}
+
+    auto opcode() const { return _Py_OPCODE(*pointer); }
+
+    auto oparg() const { return _Py_OPARG(*pointer); }
+
+    auto fullOparg(const PyInstrPointer &instr_begin) const {
+        auto p = pointer;
+        auto arg = _Py_OPARG(*p);
+        unsigned shift = 0;
+        while (p-- != instr_begin.pointer && _Py_OPCODE(*p) == EXTENDED_ARG) {
+            shift += extended_arg_shift;
+            arg |= _Py_OPARG(*p) << shift;
+        }
+        return arg;
+    }
+
+    auto operator*() const { return std::pair{opcode(), oparg()}; }
+
+    auto &operator++() {
+        ++pointer;
+        return *this;
+    }
+
+    auto &operator--() {
+        --pointer;
+        return *this;
+    }
+
+    auto operator++(int) { return PyInstrPointer(pointer++); }
+
+    auto operator--(int) { return PyInstrPointer(pointer--); }
+
+    auto operator<=>(const PyInstrPointer &other) const { return pointer <=> other.pointer; }
+
+    auto operator==(const PyInstrPointer &other) const { return pointer == other.pointer; }
+
+    auto operator+(ptrdiff_t offset) const { return PyInstrPointer{pointer + offset}; }
+
+    auto operator-(ptrdiff_t offset) const { return *this + (-offset); }
+
+    auto operator-(const PyInstrPointer &other) const { return pointer - other.pointer; }
+
+    auto operator[](ptrdiff_t offset) const { return *(*this + offset); }
+};
+
+// TODO: N-dim动态数组
 
 #endif

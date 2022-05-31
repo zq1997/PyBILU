@@ -1,4 +1,4 @@
-#include "shared_symbols.h"
+#include <iostream>
 
 #include <Python.h>
 
@@ -11,7 +11,9 @@
 #include <internal/pycore_pyerrors.h>
 #include <internal/pycore_abstract.h>
 #include <internal/pycore_interp.h>
-#include <iostream>
+
+#include "shared_symbols.h"
+#include "general_utilities.h"
 
 using namespace std;
 
@@ -25,7 +27,7 @@ using namespace std;
 static PyObject *const python_bool_values[]{Py_False, Py_True};
 static _Py_Identifier PyId___name__{"__name__", -1};
 
-[[clang::preserve_most]] void handle_dealloc(PyObject *obj) {
+void handle_dealloc(PyObject *obj) {
 #ifdef Py_TRACE_REFS
     _Py_ForgetReference(op);
 #endif
@@ -101,15 +103,10 @@ void raiseException() {
     auto tstate = _PyThreadState_GET();
     auto frame = tstate->frame;
     auto code = frame->f_code;
-    auto instr_array = reinterpret_cast<PyInstr *>(&PyBytes_AS_STRING(code->co_code));
-    auto i = frame->f_lasti;
-    auto opcode = _Py_OPCODE(instr_array[i]);
-    auto oparg = _Py_OPARG(instr_array[i]);
-    unsigned shift = 0;
-    while (i && _Py_OPCODE(instr_array[--i]) == EXTENDED_ARG) {
-        shift += EXTENDED_ARG_BITS;
-        oparg |= _Py_OPARG(instr_array[i]) << shift;
-    }
+    auto py_instr = PyInstrPointer(code);
+    auto current_instr = py_instr + frame->f_lasti;
+    auto opcode = current_instr.opcode();
+    auto oparg = current_instr.fullOparg(py_instr);
     if (opcode == LOAD_FAST || opcode == DELETE_FAST) {
         auto name = PyTuple_GET_ITEM(code->co_varnames, oparg);
         raiseUndefinedLocal(tstate, name);
@@ -128,7 +125,7 @@ void raiseException() {
     gotoErrorHandler(tstate);
 }
 
-PyObject *handle_LOAD_CLASSDEREF(PyFrameObject *f, PyOparg oparg) {
+PyObject *handle_LOAD_CLASSDEREF(PyFrameObject *f, Py_ssize_t oparg) {
     auto locals = f->f_locals;
     assert(locals);
     auto co = f->f_code;
@@ -490,7 +487,7 @@ static PyObject *handleBinary(PyObject *v, PyObject *w, T op_slot, Ts... more_op
     auto slots_w = type_w->tp_as_number;
     auto err_msg_slot = op_slot;
 
-    if constexpr(sizeof...(Ts)) {
+    if constexpr (sizeof...(Ts)) {
         static_assert(sizeof...(Ts) == 1);
         if (auto slot = slots_v ? slots_v->*op_slot : nullptr) {
             auto result = callSlotOfBinOp<is_ternary>(v, w, slot, err_msg_slot);

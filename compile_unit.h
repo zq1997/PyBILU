@@ -19,6 +19,7 @@
 #include "general_utilities.h"
 #include "translator.h"
 
+using PyOparg = decltype(_Py_OPCODE(std::declval<_Py_CODEUNIT>()));
 
 template <typename T>
 auto useName(const T &arg) {
@@ -269,59 +270,6 @@ public:
     };
 
     static TranslatedResult *emit(Translator &translator, PyObject *py_code);
-};
-
-class PyInstrPointer {
-    PyInstr *pointer;
-
-public:
-    explicit PyInstrPointer(PyCodeObject *py_code) :
-            pointer(reinterpret_cast<PyInstr *>(PyBytes_AS_STRING(py_code->co_code))) {}
-
-    explicit PyInstrPointer(PyInstr *pointer) : pointer(pointer) {}
-
-    auto opcode() const { return _Py_OPCODE(*pointer); }
-
-    auto oparg() const { return _Py_OPARG(*pointer); }
-
-    auto fullOparg(const PyInstrPointer &instr_begin) const {
-        auto p = pointer;
-        auto arg = _Py_OPARG(*p);
-        unsigned shift = 0;
-        while (p-- != instr_begin.pointer && _Py_OPCODE(*p) == EXTENDED_ARG) {
-            shift += EXTENDED_ARG_BITS;
-            arg |= _Py_OPARG(*p) << shift;
-        }
-        return arg;
-    }
-
-    auto operator*() const { return std::pair{opcode(), oparg()}; }
-
-    auto &operator++() {
-        ++pointer;
-        return *this;
-    }
-
-    auto &operator--() {
-        --pointer;
-        return *this;
-    }
-
-    auto operator++(int) { return PyInstrPointer(pointer++); }
-
-    auto operator--(int) { return PyInstrPointer(pointer--); }
-
-    auto operator<=>(const PyInstrPointer &other) const { return pointer <=> other.pointer; }
-
-    auto operator==(const PyInstrPointer &other) const { return pointer == other.pointer; }
-
-    auto operator+(ptrdiff_t offset) const { return PyInstrPointer{pointer + offset}; }
-
-    auto operator-(ptrdiff_t offset) const { return *this + (-offset); }
-
-    auto operator-(const PyInstrPointer &other) const { return pointer - other.pointer; }
-
-    auto operator[](ptrdiff_t offset) const { return *(*this + offset); }
 };
 
 #endif

@@ -15,18 +15,13 @@ struct ExtendedCFrame : CFrame {
     jmp_buf frame_jmp_buf;
 };
 
-using PyInstr = const _Py_CODEUNIT;
-using PyOpcode = decltype(_Py_OPCODE(PyInstr{}));
-using PyOparg = decltype(_Py_OPCODE(PyInstr{}));
-constexpr auto EXTENDED_ARG_BITS = 8;
-
-void handle_dealloc(PyObject *obj);
+void handle_dealloc(PyObject *obj) [[clang::preserve_most]];
 void handle_INCREF(PyObject *obj);
 void handle_DECREF(PyObject *obj);
 void handle_XDECREF(PyObject *obj);
 void raiseException();
 
-PyObject *handle_LOAD_CLASSDEREF(PyFrameObject *f, PyOparg oparg);
+PyObject *handle_LOAD_CLASSDEREF(PyFrameObject *f, Py_ssize_t oparg);
 PyObject *handle_LOAD_GLOBAL(PyFrameObject *f, PyObject *name);
 void handle_STORE_GLOBAL(PyFrameObject *f, PyObject *name, PyObject *value);
 void handle_DELETE_GLOBAL(PyFrameObject *f, PyObject *name);
@@ -261,6 +256,11 @@ struct Normalizer<T *> {
 
 template <typename Ret, typename... Args>
 struct Normalizer<Ret(Args...)> {
+    using type = NormalizedType<Ret>(NormalizedType<Args>...);
+};
+
+template <typename Ret, typename... Args>
+struct Normalizer<Ret(Args...) [[clang::preserve_most]]> {
     using type = NormalizedType<Ret>(NormalizedType<Args>...);
 };
 

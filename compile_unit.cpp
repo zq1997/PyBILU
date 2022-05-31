@@ -8,9 +8,8 @@ using namespace llvm;
 
 void DebugInfoBuilder::setFunction(llvm::IRBuilder<> &ir_builder, PyCodeObject *py_code, llvm::Function *function) {
     function->setName(PyStringAsString(py_code->co_name));
-    auto res = callDebugHelperFunction("get_save_prefix", reinterpret_cast<PyObject *>(py_code));
-
-    auto file = builder.createFile(PyStringAsString(res) + std::string{".pydis"}, "");
+    auto res = callDebugHelperFunction("get_pydis_path", reinterpret_cast<PyObject *>(py_code));
+    auto file = builder.createFile(PyStringAsString(res), "");
     builder.createCompileUnit(llvm::dwarf::DW_LANG_C, file, "", false, "", 0);
     sp = builder.createFunction(file, "", "", file, 1, builder.createSubroutineType({}), 1,
             llvm::DINode::FlagZero, llvm::DISubprogram::SPFlagDefinition);
@@ -93,7 +92,7 @@ void CompileUnit::translate() {
 }
 
 void CompileUnit::parseCFG() {
-    auto size = PyBytes_GET_SIZE(py_code->co_code) / sizeof(PyInstr);
+    auto size = PyBytes_GET_SIZE(py_code->co_code) / sizeof(_Py_CODEUNIT);
     vpc_to_stack_depth.reserve(size);
 
     BitArray is_boundary(size + 1);

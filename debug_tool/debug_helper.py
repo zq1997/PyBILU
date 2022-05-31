@@ -9,6 +9,10 @@ def get_save_prefix(co):
     return os.path.join(py_dir, '__pycache__', '%s.%s' % (py_file, co.co_name))
 
 
+def get_pydis_path(co):
+    return os.path.basename(get_save_prefix(co)) + '.pydis'
+
+
 def dump(co, ll, obj):
     assert os.path.isfile(co.co_filename)
     save_prefix = get_save_prefix(co)
@@ -39,7 +43,7 @@ OPNAME_WIDTH = max(len(x) for x in opname)
 
 
 def disassemble_code(co, file):
-    print('%s @ %r\n' % (co.co_name, os.path.normpath(co.co_filename)), file=file)
+    print('%s @ %r\n' % (co.co_name, os.path.basename(co.co_filename)), file=file)
     lastline = None
     linestarts = {}
     for start, end, line in co.co_lines():

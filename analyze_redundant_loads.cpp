@@ -67,7 +67,7 @@ void CompileUnit::analyzeRedundantLoads() {
     auto block_first_instr_index = current_block[-1].end;
 
     const PyInstrPointer py_instr{py_code};
-    unsigned code_instr_num = PyBytes_GET_SIZE(py_code->co_code) / sizeof(PyInstr);
+    unsigned code_instr_num = PyBytes_GET_SIZE(py_code->co_code) / sizeof(_Py_CODEUNIT);
     const auto until_finally = code_instr_num;
     constexpr decltype(until_finally) until_anytime = 0;
 
