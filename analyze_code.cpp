@@ -14,9 +14,7 @@ class ReversedStack {
     static constexpr auto until_forever = numeric_limits<T>::max();
 
 public:
-    explicit ReversedStack(ssize_t size) : size{size}, stack{new T[size * 2]}, sp{stack + size} {
-        reset();
-    }
+    explicit ReversedStack(ssize_t size) : size{size}, stack{new T[size * 2]}, sp{stack + size} {}
 
     ~ReversedStack() noexcept { delete[] stack; }
 
@@ -62,10 +60,6 @@ public:
 void CompileUnit::analyzeRedundantLoads() {
     ReversedStack<unsigned> stack(py_code->co_stacksize);
 
-    assert(block_num >= 1);
-    auto current_block = &blocks[block_num - 1];
-    auto block_first_instr_index = current_block[-1].end;
-
     const PyInstrPointer py_instr{py_code};
     unsigned code_instr_num = PyBytes_GET_SIZE(py_code->co_code) / sizeof(_Py_CODEUNIT);
     const auto until_finally = code_instr_num;
@@ -77,8 +71,23 @@ void CompileUnit::analyzeRedundantLoads() {
         locals[i] = until_finally;
     }
 
+    assert(block_num >= 1);
+    auto block = &blocks[block_num];
     for (auto index = code_instr_num;;) {
-        assert(index);
+        if (index == block[-1].end) {
+            if (!index) {
+                break;
+            }
+            --block;
+            block->locals_touched.reserve(py_code->co_nlocals);
+            block->locals_deleted.reserve(py_code->co_nlocals);
+            block->locals_ever_deleted.reserve(py_code->co_nlocals);
+            stack.reset();
+        }
+        auto &locals_touched = block->locals_touched;
+        auto &locals_deleted = block->locals_deleted;
+        auto &locals_ever_deleted = block->locals_ever_deleted;
+
         stack.setTimestamp(--index);
         auto instr = py_instr + index;
 
@@ -137,15 +146,26 @@ void CompileUnit::analyzeRedundantLoads() {
         case LOAD_CONST:
             redundant_loads.setIf(index, until_finally > stack.push());
             break;
-        case LOAD_FAST:
-            redundant_loads.setIf(index, locals[instr.fullOparg(py_instr)] > stack.push());
+        case LOAD_FAST: {
+            auto oparg = instr.fullOparg(py_instr);
+            redundant_loads.setIf(index, locals[oparg] > stack.push());
+            locals_touched.set(oparg);
             break;
-        case STORE_FAST:
-            locals[instr.fullOparg(py_instr)] = index;
+        }
+        case STORE_FAST: {
+            auto oparg = instr.fullOparg(py_instr);
+            locals[oparg] = index;
             stack.pop();
+            locals_touched.set(oparg);
             break;
-        case DELETE_FAST:
+        }
+        case DELETE_FAST: {
+            auto oparg = instr.fullOparg(py_instr);
+            locals_deleted.setIf(oparg, !locals_touched.get(oparg));
+            locals_ever_deleted.set(oparg);
+            locals_touched.set(oparg);
             break;
+        }
         case LOAD_DEREF:
         case LOAD_CLASSDEREF:
             stack.push();
@@ -416,13 +436,64 @@ void CompileUnit::analyzeRedundantLoads() {
         default:
             break;
         }
-        if (index == block_first_instr_index) {
-            if (index == 0) {
-                break;
+    }
+}
+
+void CompileUnit::analyzeLocalsDefinition() {
+    LimitedStack<unsigned> worklist{block_num};
+
+    blocks[0].in_worklist = false;
+    for (auto i : Range(block_num - 2, 2U)) {
+        auto &b = blocks[i];
+        b.in_worklist = true;
+        worklist.push(i);
+        b.locals_input.fill(py_code->co_nlocals, true);
+    }
+    blocks[1].locals_input.fill(py_code->co_nlocals);
+    blocks[1].in_worklist = true;
+    worklist.push(1);
+    for (auto i : Range(py_code->co_argcount + (py_code->co_flags & CO_VARARGS) + py_code->co_kwonlyargcount)) {
+        blocks[1].locals_input.set(i);
+    }
+
+    BitArray block_output(py_code->co_nlocals);
+    auto chunk_num = BitArray::chunkNumber(py_code->co_nlocals);
+
+    while (!worklist.empty()) {
+        auto &b = blocks[worklist.pop()];
+        b.in_worklist = false;
+
+        for (auto i : Range(chunk_num)) {
+            block_output.getChunk(i) = (b.locals_input.getChunk(i) & ~b.locals_touched.getChunk(i)) |
+                    (~b.locals_deleted.getChunk(i) & b.locals_touched.getChunk(i));
+        }
+
+        if (b.fall_through) {
+            bool any_update = false;
+            for (auto i : Range(chunk_num)) {
+                auto &chunk = (&b)[1].locals_input.getChunk(i);
+                auto old_chunk = chunk;
+                chunk = old_chunk & block_output.getChunk(i);
+                any_update |= chunk != old_chunk;
             }
-            --current_block;
-            block_first_instr_index = current_block[-1].end;
-            stack.reset();
+            if (any_update && !(&b)[1].in_worklist) {
+                (&b)[1].in_worklist = true;
+                worklist.push(&b + 1 - &blocks[0]);
+            }
+        }
+
+        if (b.has_branch) {
+            bool any_update = false;
+            for (auto i : Range(chunk_num)) {
+                auto &chunk = blocks[b.branch].locals_input.getChunk(i);
+                auto old_chunk = chunk;
+                chunk = old_chunk & block_output.getChunk(i);
+                any_update |= chunk != old_chunk;
+            }
+            if (any_update && !blocks[b.branch].in_worklist) {
+                blocks[b.branch].in_worklist = true;
+                worklist.push(b.branch);
+            }
         }
     }
 }

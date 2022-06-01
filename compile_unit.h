@@ -50,12 +50,29 @@ auto useName(const T &arg, const Ts &... more) {
 struct PyBasicBlock {
     unsigned end;
     llvm::BasicBlock *block;
-    decltype(PyFrameObject::f_stackdepth) initial_stack_height;
-    bool is_handler;
-    bool visited;
+    decltype(PyFrameObject::f_stackdepth) initial_stack_height{-1};
+    bool is_handler{false};
+    union {
+        bool in_worklist;
+        bool visited;
+    };
+    BitArray locals_touched;
+    BitArray locals_deleted;
+    union {
+        BitArray locals_ever_deleted{};
+        BitArray locals_input;
+    };
 
-    PyBasicBlock() = default;
+    unsigned branch;
+    // static constexpr auto branch_none = std::numeric_limits<decltype(branch)>::max();
+    bool has_branch;
+    bool fall_through;
+
+    PyBasicBlock() {};
     PyBasicBlock(const PyBasicBlock &) = delete;
+    ~PyBasicBlock() {
+        locals_input.~BitArray();
+    }
     auto operator=(const PyBasicBlock &) = delete;
 };
 
@@ -112,12 +129,13 @@ class CompileUnit {
 
     void parseCFG();
     void analyzeRedundantLoads();
+    void analyzeLocalsDefinition();
     void translate();
     void emitBlock(unsigned index);
     void emitRotN(PyOparg n);
 
     llvm::Value *do_GETLOCAL(PyOparg oparg);
-    void do_SETLOCAL(PyOparg oparg, llvm::Value *value);
+    void do_SETLOCAL(PyOparg oparg, llvm::Value *value, bool is_defined);
     llvm::Value *getName(int i);
     llvm::Value *getFreevar(int i);
     llvm::Value *getStackSlot(int i = 0);
@@ -157,6 +175,7 @@ class CompileUnit {
     void do_Py_XDECREF(llvm::Value *v);
 
     void pyJumpIF(unsigned offset, bool pop_if_jump, bool jump_cond);
+    unsigned findPyBlock(unsigned instr_offset);
     PyBasicBlock &findPyBlock(unsigned instr_offset, decltype(stack_depth) initial_stack_height);
     llvm::Value *getSymbol(size_t offset);
 

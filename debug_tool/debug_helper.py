@@ -10,7 +10,7 @@ def get_save_prefix(co):
 
 
 def get_pydis_path(co):
-    return os.path.basename(get_save_prefix(co)) + '.pydis'
+    return get_save_prefix(co) + '.pydis'
 
 
 def dump(co, ll, obj):

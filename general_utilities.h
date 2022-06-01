@@ -66,7 +66,7 @@ public:
         auto operator!=(const Iterator &o) const { return o.i != i; }
 
         auto &operator*() {
-            if constexpr(HasDereference<Iter>::value) {
+            if constexpr (HasDereference<Iter>::value) {
                 return *i;
             } else {
                 return i;
@@ -83,35 +83,64 @@ public:
     auto end() { return Iterator{to}; }
 };
 
-// TODO: 直接裸指针，省得一层unique_ptr
 template <typename T>
 class DynamicArray {
-    std::unique_ptr<T[]> data;
+    T *data{};
 
 public:
-    using ValueType = T;
-
     DynamicArray() = default;
 
-    DynamicArray(DynamicArray &&other) noexcept: data{std::move(other.data)} {};
+    DynamicArray(DynamicArray &&other) noexcept: data{other.data} {
+        other.data = nullptr;
+    };
 
     explicit DynamicArray(size_t size, bool init = false) : data{init ? new T[size]{} : new T[size]} {};
 
+    ~DynamicArray() {
+        if (data) {
+            delete[] data;
+        }
+    };
+
     void reserve(size_t size, bool init = false) {
-        data.reset(init ? new T[size]{} : new T[size]);
+        assert(!data);
+        data = init ? new T[size]{} : new T[size];
     }
 
-    auto &operator[](size_t index) { return data[index]; }
+    T &operator[](size_t index) { return data[index]; }
 
     const auto &operator[](size_t index) const { return data[index]; }
 
     auto &operator*() const { return data[0]; }
 };
 
-class BitArray : public DynamicArray<unsigned long> {
-    using Parent = DynamicArray<ValueType>;
+
+template <typename T>
+class LimitedStack {
+    DynamicArray<T> storage_space;
+    T *stack_pointer;
 public:
-    static constexpr auto BitsPerValue = CHAR_BIT * sizeof(ValueType);
+    explicit LimitedStack(size_t size) : storage_space{size}, stack_pointer(&storage_space[0]) {}
+
+    auto empty() {
+        return stack_pointer == &storage_space[0];
+    }
+
+    void push(const T &v) {
+        *stack_pointer++ = v;
+    }
+
+    auto pop() {
+        assert(!empty());
+        return *--stack_pointer;
+    }
+};
+
+class BitArray : public DynamicArray<uintmax_t> {
+    using ChunkType = uintmax_t;
+    using Parent = DynamicArray<ChunkType>;
+public:
+    static constexpr auto BitsPerValue = CHAR_BIT * sizeof(ChunkType);
 
     static auto chunkNumber(size_t size) { return size / BitsPerValue + !!(size % BitsPerValue); }
 
@@ -127,16 +156,24 @@ public:
 
     bool set(size_t index) {
         auto old = get(index);
-        getChunk(index / BitsPerValue) |= ValueType{1} << index % BitsPerValue;
+        getChunk(index / BitsPerValue) |= ChunkType{1} << index % BitsPerValue;
         return !old;
     }
 
+    void reset(size_t index) {
+        getChunk(index / BitsPerValue) &= ~(ChunkType{1} << index % BitsPerValue);
+    }
+
     void setIf(size_t index, bool cond) {
-        getChunk(index / BitsPerValue) |= ValueType{cond} << index % BitsPerValue;
+        getChunk(index / BitsPerValue) |= ChunkType{cond} << index % BitsPerValue;
     }
 
     bool get(size_t index) {
-        return getChunk(index / BitsPerValue) & (ValueType{1} << index % BitsPerValue);
+        return getChunk(index / BitsPerValue) & (ChunkType{1} << index % BitsPerValue);
+    }
+
+    void fill(size_t size, bool set = false) {
+        memset(&getChunk(0), set ? UCHAR_MAX : 0, chunkNumber(size) * sizeof(ChunkType));
     }
 
     auto operator[](size_t index) = delete;

@@ -37,17 +37,7 @@ void CompileUnit::translate() {
     // TODO: 重复了
     parseCFG();
     analyzeRedundantLoads();
-
-    blocks[0].block = createBlock("entry_block");
-    auto start = blocks[0].end;
-    for (auto &b : Range(block_num - 1, &blocks[1])) {
-        b.initial_stack_height = -1;
-        b.is_handler = false;
-        b.visited = false;
-        b.block = createBlock(useName("block.", start));
-        start = b.end;
-    }
-    blocks[1].initial_stack_height = 0;
+    analyzeLocalsDefinition();
 
     blocks[0].block->insertInto(function);
     builder.SetInsertPoint(blocks[0].block);
@@ -63,6 +53,7 @@ void CompileUnit::translate() {
 
     abstract_stack.reserve(py_code->co_stacksize);
     declarePendingBlock(1U, 0);
+    blocks[1].initial_stack_height = 0;
     while (!live_block_indices.empty()) {
         auto index = live_block_indices.pop_back_val();
         assert(index);
@@ -91,6 +82,46 @@ void CompileUnit::translate() {
     di_builder.finalize();
 }
 
+constexpr bool isTerminator(int opcode) {
+    switch (opcode) {
+    case RETURN_VALUE:
+    case RERAISE:
+    case RAISE_VARARGS:
+    case JUMP_ABSOLUTE:
+    case JUMP_FORWARD:
+        return true;
+    default:
+        return false;
+    }
+}
+
+constexpr bool isAbsoluteJmp(int opcode) {
+    switch (opcode) {
+    case JUMP_IF_TRUE_OR_POP:
+    case JUMP_IF_FALSE_OR_POP:
+    case POP_JUMP_IF_TRUE:
+    case POP_JUMP_IF_FALSE:
+    case JUMP_IF_NOT_EXC_MATCH:
+    case JUMP_ABSOLUTE:
+        return true;
+    default:
+        return false;
+    }
+}
+
+constexpr bool isRelativeJump(int opcode) {
+    switch (opcode) {
+    case FOR_ITER:
+    case SETUP_FINALLY:
+    case SETUP_WITH:
+    case SETUP_ASYNC_WITH:
+    case JUMP_FORWARD:
+        return true;
+    default:
+        return false;
+    }
+}
+
 void CompileUnit::parseCFG() {
     auto size = PyBytes_GET_SIZE(py_code->co_code) / sizeof(_Py_CODEUNIT);
     vpc_to_stack_depth.reserve(size);
@@ -101,26 +132,12 @@ void CompileUnit::parseCFG() {
     const PyInstrPointer py_instr{py_code};
     for (auto vpc : Range(size)) {
         auto instr = py_instr + vpc;
-        switch (instr.opcode()) {
-        case JUMP_FORWARD:
-        case FOR_ITER:
-        case SETUP_FINALLY:
-        case SETUP_WITH:
-        case SETUP_ASYNC_WITH:
-            block_num += is_boundary.set(vpc + 1);
-            block_num += is_boundary.set(vpc + 1 + instr.fullOparg(py_instr));
-            break;
-        case JUMP_ABSOLUTE:
-        case JUMP_IF_TRUE_OR_POP:
-        case JUMP_IF_FALSE_OR_POP:
-        case POP_JUMP_IF_TRUE:
-        case POP_JUMP_IF_FALSE:
-        case JUMP_IF_NOT_EXC_MATCH:
-            block_num += is_boundary.set(vpc + 1);
-            block_num += is_boundary.set(instr.fullOparg(py_instr));
-            break;
-        default:
-            break;
+        auto opcode = instr.opcode();
+        auto is_rel_jmp = isRelativeJump(opcode);
+        auto is_abs_jmp = isAbsoluteJmp(opcode);
+        if (is_rel_jmp || is_abs_jmp) {
+            auto dest = instr.fullOparg(py_instr) + (is_rel_jmp ? vpc + 1 : 0);
+            block_num += is_boundary.set(dest) + (!isTerminator(opcode) && is_boundary.set(vpc + 1));
         }
     }
 
@@ -129,16 +146,38 @@ void CompileUnit::parseCFG() {
 
     blocks.reserve(block_num);
     unsigned current_num = 0;
-    for (auto i : Range(BitArray::chunkNumber(size))) {
+    unsigned start;
+    for (auto i : Range(BitArray::chunkNumber(size + 1))) {
         unsigned j = 0;
         for (auto bits = is_boundary.getChunk(i); bits; bits >>= 1) {
             if (bits & 1) {
-                blocks[current_num++].end = i * BitArray::BitsPerValue + j;
+                auto &b = blocks[current_num++];
+                b.end = i * BitArray::BitsPerValue + j;
+                if (b.end) {
+                    b.block = createBlock(useName("block_for_instr_.", start));
+                    auto instr = py_instr + (b.end - 1);
+                    auto opcode = instr.opcode();
+                    auto is_rel_jmp = isRelativeJump(opcode);
+                    auto is_abs_jmp = isAbsoluteJmp(opcode);
+                    b.fall_through = !isTerminator(opcode);
+                    if ((b.has_branch = is_rel_jmp || is_abs_jmp)) {
+                        b.branch = instr.fullOparg(py_instr) + (is_rel_jmp ? b.end : 0);
+                    }
+                } else{
+                    b.block = createBlock(useName("entry_block"));
+                }
+                start = b.end;
             }
             j++;
         }
     }
     assert(current_num == block_num);
+
+    for (auto &b : Range(block_num - 1, &blocks[1])) {
+        if (b.has_branch) {
+            b.branch = findPyBlock(b.branch);
+        }
+    }
 }
 
 void CompileUnit::do_Py_INCREF(Value *py_obj) {
@@ -186,13 +225,17 @@ Value *CompileUnit::do_GETLOCAL(PyOparg oparg) {
     return loadValue<PyObject *>(slot, context.tbaa_frame_value, useName(varname));
 }
 
-void CompileUnit::do_SETLOCAL(PyOparg oparg, llvm::Value *value) {
+void CompileUnit::do_SETLOCAL(PyOparg oparg, llvm::Value *value, bool is_defined) {
     auto varname = PyTuple_GET_ITEM(py_code->co_varnames, oparg);
     auto offset = offsetof(PyFrameObject, f_localsplus) + sizeof(PyObject *) * oparg;
     auto slot = getPointer<char>(frame_obj, offset, useName("local.", varname, "."));
     auto old_value = loadValue<PyObject *>(slot, context.tbaa_frame_value, useName(varname, ".old", "."));
     storeValue<PyObject *>(value, slot, context.tbaa_frame_value);
-    do_Py_XDECREF(old_value);
+    if (is_defined) {
+        do_Py_DECREF(old_value);
+    } else {
+        do_Py_XDECREF(old_value);
+    }
 }
 
 Value *CompileUnit::getStackSlot(int i) {
@@ -236,7 +279,7 @@ void CompileUnit::do_PUSH(llvm::Value *value, bool really_pushed) {
 
 Value *CompileUnit::getName(int i) {
     PyObject *repr{};
-    if constexpr(debug_build) {
+    if constexpr (debug_build) {
         repr = PyTuple_GET_ITEM(py_code->co_names, i);
     }
     auto ptr = getPointer<PyObject *>(code_names, i);
@@ -246,7 +289,7 @@ Value *CompileUnit::getName(int i) {
 Value *CompileUnit::getFreevar(int i) {
     auto offset = offsetof(PyFrameObject, f_localsplus) + sizeof(PyObject *) * (py_code->co_nlocals + i);
     PyObject *name{};
-    if constexpr(debug_build) {
+    if constexpr (debug_build) {
         if (i < PyTuple_GET_SIZE(py_code->co_cellvars)) {
             name = PyTuple_GET_ITEM(py_code->co_cellvars, i);
         } else {
@@ -267,7 +310,7 @@ llvm::Value *CompileUnit::getSymbol(size_t offset) {
     return loadValue<void *>(ptr, context.tbaa_code_const, useName("sym.", name, "."));
 }
 
-PyBasicBlock &CompileUnit::findPyBlock(unsigned offset, decltype(stack_depth) initial_stack_height) {
+unsigned CompileUnit::findPyBlock(unsigned offset) {
     assert(block_num > 1);
     decltype(block_num) left = 0;
     auto right = block_num - 1;
@@ -279,11 +322,16 @@ PyBasicBlock &CompileUnit::findPyBlock(unsigned offset, decltype(stack_depth) in
         } else if (v > offset) {
             right = mid - 1;
         } else {
-            declarePendingBlock(mid + 1, initial_stack_height);
-            return blocks[mid + 1];
+            return mid + 1;
         }
     }
     Py_UNREACHABLE();
+}
+
+PyBasicBlock &CompileUnit::findPyBlock(unsigned offset, decltype(stack_depth) initial_stack_height) {
+    auto index = findPyBlock(offset);
+    declarePendingBlock(index, initial_stack_height);
+    return blocks[index];
 }
 
 void CompileUnit::pyJumpIF(unsigned offset, bool pop_if_jump, bool jump_cond) {
@@ -316,7 +364,7 @@ void CompileUnit::pyJumpIF(unsigned offset, bool pop_if_jump, bool jump_cond) {
 
 
 static void debugDumpObj(PyObject *py_code, Module &module, SmallVector<char> *obj_vec = nullptr) {
-    if constexpr(debug_build) {
+    if constexpr (debug_build) {
         SmallVector<char> ll_vec{};
         raw_svector_ostream os{ll_vec};
         module.print(os, nullptr);

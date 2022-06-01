@@ -57,6 +57,8 @@ void CompileUnit::emitBlock(unsigned index) {
     this_block.block->insertInto(function);
     builder.SetInsertPoint(this_block.block);
 
+    auto &defined_locals = this_block.locals_input;
+
     for (auto i : Range(stack_depth, 1)) {
         abstract_stack[abstract_stack_height - i]
                 = {loadValue<PyObject *>(getStackSlot(i), context.tbaa_frame_value), true};
@@ -133,7 +135,7 @@ void CompileUnit::emitBlock(unsigned index) {
         case LOAD_CONST: {
             // TODO: 添加non null属性
             PyObject *repr{};
-            if constexpr(debug_build) {
+            if constexpr (debug_build) {
                 repr = PyObject_Repr(PyTuple_GET_ITEM(py_code->co_consts, oparg));
                 if (!repr) {
                     throw std::runtime_error("cannot get const object repr");
@@ -141,7 +143,7 @@ void CompileUnit::emitBlock(unsigned index) {
             }
             auto ptr = getPointer<PyObject *>(code_consts, oparg);
             auto value = loadValue<PyObject *>(ptr, context.tbaa_code_const, useName(repr));
-            if constexpr(debug_build) {
+            if constexpr (debug_build) {
                 Py_DECREF(repr);
             }
             auto is_redundant = redundant_loads.get(vpc);
@@ -153,20 +155,24 @@ void CompileUnit::emitBlock(unsigned index) {
         }
         case LOAD_FAST: {
             auto value = do_GETLOCAL(oparg);
-            auto ok_block = appendBlock("LOAD_FAST.OK");
-            // TODO: goto error提取为一个函数来实现
-            builder.CreateCondBr(builder.CreateICmpNE(value, context.c_null), ok_block, error_block, context.likely_true);
-            builder.SetInsertPoint(ok_block);
+            if (!defined_locals.get(oparg)) {
+                auto ok_block = appendBlock("LOAD_FAST.OK");
+                // TODO: goto error提取为一个函数来实现
+                builder.CreateCondBr(builder.CreateICmpNE(value, context.c_null), ok_block, error_block, context.likely_true);
+                builder.SetInsertPoint(ok_block);
+            }
             auto is_redundant = redundant_loads.get(vpc);
             if (!is_redundant) {
                 do_Py_INCREF(value);
             }
             do_PUSH(value, !is_redundant);
+            defined_locals.set(oparg);
             break;
         }
         case STORE_FAST: {
             auto value = do_POPWithStolenRef();
-            do_SETLOCAL(oparg, value);
+            do_SETLOCAL(oparg, value, defined_locals.get(oparg));
+            defined_locals.set(oparg);
             break;
         }
         case DELETE_FAST: {
@@ -174,7 +180,8 @@ void CompileUnit::emitBlock(unsigned index) {
             auto ok_block = appendBlock("DELETE_FAST.OK");
             builder.CreateCondBr(builder.CreateICmpNE(value, context.c_null), ok_block, error_block, context.likely_true);
             builder.SetInsertPoint(ok_block);
-            do_SETLOCAL(oparg, context.c_null); // 可优化
+            do_SETLOCAL(oparg, context.c_null, true);
+            defined_locals.reset(oparg);
             break;
         }
         case LOAD_DEREF: {
