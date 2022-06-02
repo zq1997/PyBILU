@@ -22,7 +22,7 @@ public:
 
     void reset() {
         sp = stack + size;
-        for (auto i : Range(size)) {
+        for (auto i : IntRange(size)) {
             stack[i] = until_forever;
         }
     }
@@ -67,14 +67,19 @@ void CompileUnit::analyzeRedundantLoads() {
 
     redundant_loads.reserve(code_instr_num);
     DynamicArray<unsigned> locals(py_code->co_nlocals);
-    for (auto i : Range(py_code->co_nlocals)) {
+    for (auto i : IntRange(py_code->co_nlocals)) {
         locals[i] = until_finally;
     }
 
     assert(block_num >= 1);
     auto block = &blocks[block_num];
     for (auto index = code_instr_num;;) {
-        if (index == block[-1].end) {
+        if (index == block->start) {
+            if (block != &blocks[block_num]) {
+                block->locals_deleted.flipAll(py_code->co_nlocals);
+                BitArrayRefWithSize(block->locals_deleted, py_code->co_nlocals) &= block->locals_touched;
+                block->locals_touched.flipAll(py_code->co_nlocals);
+            }
             if (!index) {
                 break;
             }
@@ -440,60 +445,55 @@ void CompileUnit::analyzeRedundantLoads() {
 }
 
 void CompileUnit::analyzeLocalsDefinition() {
-    LimitedStack<unsigned> worklist{block_num};
+    auto &worklist = pending_block_indices;
+    worklist.reserve(block_num);
 
-    blocks[0].in_worklist = false;
-    for (auto i : Range(block_num - 2, 2U)) {
+    for (auto i : IntRange(1, block_num)) {
         auto &b = blocks[i];
         b.in_worklist = true;
         worklist.push(i);
         b.locals_input.fill(py_code->co_nlocals, true);
     }
-    blocks[1].locals_input.fill(py_code->co_nlocals);
-    blocks[1].in_worklist = true;
-    worklist.push(1);
-    for (auto i : Range(py_code->co_argcount + (py_code->co_flags & CO_VARARGS) + py_code->co_kwonlyargcount)) {
-        blocks[1].locals_input.set(i);
+    blocks[0].locals_input.fill(py_code->co_nlocals);
+    blocks[0].in_worklist = true;
+    worklist.push(0);
+
+    auto nargs = py_code->co_argcount + (py_code->co_flags & CO_VARARGS)
+            + py_code->co_kwonlyargcount + (py_code->co_flags & CO_VARKEYWORDS);
+    for (auto i : IntRange(nargs)) {
+        blocks[0].locals_input.set(i);
     }
 
     BitArray block_output(py_code->co_nlocals);
     auto chunk_num = BitArray::chunkNumber(py_code->co_nlocals);
+    auto update_successor = [&](unsigned index) {
+        auto &successor = blocks[index];
+        bool any_update = false;
+        for (auto i : IntRange(chunk_num)) {
+            auto &chunk = successor.locals_input.getChunk(i);
+            auto old_chunk = chunk;
+            chunk = old_chunk & block_output.getChunk(i);
+            any_update |= chunk != old_chunk;
+        }
+        if (any_update && !successor.in_worklist) {
+            successor.in_worklist = true;
+            worklist.push(index);
+        }
+    };
 
     while (!worklist.empty()) {
         auto &b = blocks[worklist.pop()];
         b.in_worklist = false;
-
-        for (auto i : Range(chunk_num)) {
-            block_output.getChunk(i) = (b.locals_input.getChunk(i) & ~b.locals_touched.getChunk(i)) |
-                    (~b.locals_deleted.getChunk(i) & b.locals_touched.getChunk(i));
+        for (auto i : IntRange(chunk_num)) {
+            // TODO: 名不副实
+            block_output.getChunk(i) = (b.locals_input.getChunk(i) & b.locals_touched.getChunk(i))
+                    | b.locals_deleted.getChunk(i);
         }
-
         if (b.fall_through) {
-            bool any_update = false;
-            for (auto i : Range(chunk_num)) {
-                auto &chunk = (&b)[1].locals_input.getChunk(i);
-                auto old_chunk = chunk;
-                chunk = old_chunk & block_output.getChunk(i);
-                any_update |= chunk != old_chunk;
-            }
-            if (any_update && !(&b)[1].in_worklist) {
-                (&b)[1].in_worklist = true;
-                worklist.push(&b + 1 - &blocks[0]);
-            }
+            update_successor(&b - &*blocks + 1);
         }
-
         if (b.has_branch) {
-            bool any_update = false;
-            for (auto i : Range(chunk_num)) {
-                auto &chunk = blocks[b.branch].locals_input.getChunk(i);
-                auto old_chunk = chunk;
-                chunk = old_chunk & block_output.getChunk(i);
-                any_update |= chunk != old_chunk;
-            }
-            if (any_update && !blocks[b.branch].in_worklist) {
-                blocks[b.branch].in_worklist = true;
-                worklist.push(b.branch);
-            }
+            update_successor(b.branch);
         }
     }
 }

@@ -48,7 +48,7 @@ auto useName(const T &arg, const Ts &... more) {
 }
 
 struct PyBasicBlock {
-    unsigned end;
+    unsigned start;
     llvm::BasicBlock *block;
     decltype(PyFrameObject::f_stackdepth) initial_stack_height{-1};
     bool is_handler{false};
@@ -70,10 +70,10 @@ struct PyBasicBlock {
 
     PyBasicBlock() {};
     PyBasicBlock(const PyBasicBlock &) = delete;
+
     ~PyBasicBlock() {
         locals_input.~BitArray();
     }
-    auto operator=(const PyBasicBlock &) = delete;
 };
 
 class DebugInfoBuilder {
@@ -90,9 +90,9 @@ public:
     void finalize() { builder.finalize(); }
 };
 
-class EmptyDebugInfoBuilder {
+class NullDebugInfoBuilder {
 public:
-    explicit EmptyDebugInfoBuilder(llvm::Module &module) {};
+    explicit NullDebugInfoBuilder(llvm::Module &module) {};
 
     void setFunction(llvm::IRBuilder<> &ir_builder, PyCodeObject *py_code, llvm::Function *function) {};
 
@@ -109,21 +109,23 @@ class CompileUnit {
     llvm::Argument *shared_symbols;
     llvm::Argument *frame_obj;
     llvm::Value *rt_lasti;
+    llvm::BasicBlock *entry_block;
     llvm::BasicBlock *error_block;
     llvm::Value *code_names;
     llvm::Value *code_consts;
 
     PyCodeObject *py_code;
-    BitArray redundant_loads;
-    llvm::SmallVector<unsigned> live_block_indices;
-    decltype(PyFrameObject::f_stackdepth) stack_depth;
     unsigned block_num;
-    DynamicArray<decltype(stack_depth)> vpc_to_stack_depth;
+    LimitedStack<unsigned> pending_block_indices;
     DynamicArray<PyBasicBlock> blocks;
-    DynamicArray<std::pair<llvm::Value *, bool>> abstract_stack;
-    decltype(stack_depth) abstract_stack_height;
+    BitArray redundant_loads;
 
-    [[no_unique_address]] std::conditional_t<debug_build, DebugInfoBuilder, EmptyDebugInfoBuilder> di_builder;
+    decltype(PyFrameObject::f_stackdepth) stack_height;
+    DynamicArray<decltype(stack_height)> vpc_to_stack_height;
+    DynamicArray<std::pair<llvm::Value *, bool>> abstract_stack;
+    decltype(stack_height) abstract_stack_height;
+
+    [[no_unique_address]] std::conditional_t<debug_build, DebugInfoBuilder, NullDebugInfoBuilder> di_builder;
 
     explicit CompileUnit(Context &context) : context{context}, di_builder{llvm_module} {};
 
@@ -144,8 +146,9 @@ class CompileUnit {
 
     class PoppedStackValue {
     public:
-        llvm::Value *value;
+        llvm::Value *const value;
         const bool really_pushed;
+        bool has_decref{false};
 
         PoppedStackValue(llvm::Value *value, bool really_pushed) : value{value}, really_pushed{really_pushed} {}
 
@@ -153,7 +156,7 @@ class CompileUnit {
 
         operator llvm::Value *() { return value; }
 
-        ~PoppedStackValue() { assert(!value); }
+        ~PoppedStackValue() { assert(has_decref); }
     };
 
     PoppedStackValue do_POP();
@@ -165,18 +168,18 @@ class CompileUnit {
     void do_Py_DECREF(llvm::Value *v);
 
     void do_Py_DECREF(PoppedStackValue &v) {
-        assert(v.value);
+        assert(!v.has_decref);
         if (v.really_pushed) {
-            do_Py_DECREF(static_cast<llvm::Value *>(v));
+            do_Py_DECREF(v.value);
         }
-        v.value = nullptr;
+        v.has_decref = true;
     }
 
     void do_Py_XDECREF(llvm::Value *v);
 
     void pyJumpIF(unsigned offset, bool pop_if_jump, bool jump_cond);
     unsigned findPyBlock(unsigned instr_offset);
-    PyBasicBlock &findPyBlock(unsigned instr_offset, decltype(stack_depth) initial_stack_height);
+    PyBasicBlock &findPyBlock(unsigned instr_offset, decltype(stack_height) initial_stack_height);
     llvm::Value *getSymbol(size_t offset);
 
     template <typename T>
@@ -267,14 +270,6 @@ class CompileUnit {
         do_PUSH(res);
         do_Py_DECREF(left);
         do_Py_DECREF(right);
-    }
-
-    void declarePendingBlock(unsigned index, decltype(stack_depth) initial_stack_height) {
-        if (!blocks[index].visited) {
-            blocks[index].visited = true;
-            live_block_indices.push_back(index);
-            blocks[index].initial_stack_height = initial_stack_height;
-        }
     }
 
 public:

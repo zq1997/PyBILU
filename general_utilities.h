@@ -12,7 +12,6 @@ struct PyObjectRef {
     PyObject *o;
 
     PyObjectRef(const PyObjectRef &) = delete;
-    auto operator=(const PyObjectRef &) = delete;
 
     PyObjectRef(PyObject *o) : o{o} {
         if (!o) {
@@ -42,41 +41,48 @@ inline PyObjectRef callDebugHelperFunction(const char *callee_name, const auto &
     return PyObject_Vectorcall(py_callee, &py_args[1], sizeof...(args) | PY_VECTORCALL_ARGUMENTS_OFFSET, nullptr);
 }
 
-template <typename T, typename = void>
-struct HasDereference : std::false_type {};
-template <typename T>
-struct HasDereference<T, std::void_t<decltype(*std::declval<T>())>> : std::true_type {};
-
-template <typename Size=size_t, typename Iter=Size>
-class Range {
-    static_assert(std::is_integral_v<Size>);
-    const Iter from;
-    const Iter to;
+template <typename T, auto DerefFunc>
+class RangeIterator {
+    T i;
 public:
-    class Iterator {
-        Iter i;
-    public:
-        explicit Iterator(const Iter &i_) : i{i_} {}
+    explicit RangeIterator(T i) : i{i} {}
 
-        auto &operator++() {
-            ++i;
-            return *this;
-        }
+    auto &operator++() {
+        ++i;
+        return *this;
+    }
 
-        auto operator!=(const Iterator &o) const { return o.i != i; }
+    auto operator!=(const RangeIterator &o) const { return o.i != i; }
 
-        auto &operator*() {
-            if constexpr (HasDereference<Iter>::value) {
-                return *i;
-            } else {
-                return i;
-            }
-        }
-    };
+    auto &operator*() const { return DerefFunc(i); }
+};
 
-    Range(Size n, Iter from) : from{from}, to{from + n} {}
+template <typename T1, typename T2 = T1>
+class IntRange {
+    using T = std::common_type_t<T1, T2>;
+    static_assert(std::is_integral_v<T>);
+    const T from;
+    const T to;
+    using Iterator = RangeIterator<T, [](auto &i) -> auto & { return i; }>;
 
-    explicit Range(Size n) : Range(n, Size{}) {}
+public:
+    IntRange(T1 from, T2 to) : from(from), to(to) {}
+
+    explicit IntRange(T1 n) : from{0}, to{n} {}
+
+    auto begin() { return Iterator{from}; }
+
+    auto end() { return Iterator{to}; }
+};
+
+template <typename T>
+class PtrRange {
+    static_assert(std::is_pointer_v<T>);
+    using Iterator = RangeIterator<T, [](auto &i) -> auto & { return *i; }>;
+    const T from;
+    const T to;
+public:
+    PtrRange(T base, size_t n) : from{base}, to{base + n} {}
 
     auto begin() { return Iterator{from}; }
 
@@ -107,11 +113,11 @@ public:
         data = init ? new T[size]{} : new T[size];
     }
 
+    T &operator*() { return data[0]; }
+
     T &operator[](size_t index) { return data[index]; }
 
     const auto &operator[](size_t index) const { return data[index]; }
-
-    auto &operator*() const { return data[0]; }
 };
 
 
@@ -120,7 +126,12 @@ class LimitedStack {
     DynamicArray<T> storage_space;
     T *stack_pointer;
 public:
-    explicit LimitedStack(size_t size) : storage_space{size}, stack_pointer(&storage_space[0]) {}
+    LimitedStack() = default;
+
+    void reserve(size_t size) {
+        storage_space.reserve(size);
+        stack_pointer = &storage_space[0];
+    }
 
     auto empty() {
         return stack_pointer == &storage_space[0];
@@ -150,6 +161,8 @@ public:
 
     auto &getChunk(size_t index) { return Parent::operator[](index); }
 
+    const auto &getChunk(size_t index) const { return Parent::operator[](index); }
+
     void reserve(size_t size) {
         Parent::reserve(chunkNumber(size), true);
     }
@@ -176,7 +189,81 @@ public:
         memset(&getChunk(0), set ? UCHAR_MAX : 0, chunkNumber(size) * sizeof(ChunkType));
     }
 
+    void flipAll(size_t size) {
+        for (auto i : IntRange(chunkNumber(size))) {
+            getChunk(i) = ~getChunk(i);
+        }
+    }
+
     auto operator[](size_t index) = delete;
+};
+
+template <size_t N>
+class ZipBitArrays {
+    using Arrays = std::array<BitArray *, N>;
+    Arrays arrays;
+    size_t chunk_num;
+
+    class Iterator {
+        Arrays &arrays;
+        size_t i;
+    public:
+        Iterator(Arrays &arrays, size_t i) : arrays(arrays), i(i) {}
+
+        auto &operator++() {
+            ++i;
+            return *this;
+        }
+
+        auto operator!=(const Iterator &o) const {
+            assert(&arrays == &o.arrays);
+            return o.i != i;
+        }
+
+        auto &operator*() const {
+            std::array<uintmax_t, N> result;
+            for (auto index : IntRange(N)) {
+                result[index] = arrays[index]->getChunk(i);
+            }
+            return result;
+        }
+    };
+
+public:
+    ZipBitArrays(size_t size, auto &... arrays) : arrays{&arrays...}, chunk_num(BitArray::chunkNumber(size)) {}
+
+    auto begin() { return Iterator{arrays, 0}; }
+
+    auto end() { return Iterator{arrays, chunk_num}; }
+};
+
+// // TODO: zip range
+// void zipBitArrayChunks(size_t size, auto arrays...) {
+//     for (auto i : IntRange(BitArray::chunkNumber(size))) {
+//
+//     }
+// }
+
+class BitArrayRefWithSize {
+    BitArray &bits;
+    const size_t chunk_num;
+
+public:
+    BitArrayRefWithSize(BitArray &bits, size_t size) : bits(bits), chunk_num(BitArray::chunkNumber(size)) {}
+
+    auto &operator&=(const BitArray &other) {
+        for (auto i : IntRange(chunk_num)) {
+            bits.getChunk(i) &= other.getChunk(i);
+        }
+        return *this;
+    }
+
+    auto &operator|=(const BitArray &other) {
+        for (auto i : IntRange(chunk_num)) {
+            bits.getChunk(i) |= other.getChunk(i);
+        }
+        return *this;
+    }
 };
 
 

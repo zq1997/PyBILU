@@ -10,7 +10,7 @@ using namespace llvm;
 void CompileUnit::emitRotN(PyOparg n) {
     auto [top_value, top_really_pushed] = abstract_stack[abstract_stack_height - 1];
     unsigned n_lift = 0;
-    for (auto i : Range(n - 1, 1)) {
+    for (auto i : IntRange(1, n)) {
         auto [_, really_pushed] = abstract_stack[abstract_stack_height - i]
                 = abstract_stack[abstract_stack_height - (i + 1)];
         n_lift += really_pushed;
@@ -23,7 +23,7 @@ void CompileUnit::emitRotN(PyOparg n) {
         auto top = loadValue<PyObject *>(dest_begin, context.tbaa_frame_value);
         if (n_lift <= 16 + 1) {
             auto dest = dest_begin;
-            for (auto i : Range(n_lift - 1, 1U)) {
+            for (auto i : IntRange(1U, n_lift - 1)) {
                 auto src = getStackSlot(i + 1);
                 auto value = loadValue<PyObject *>(src, context.tbaa_frame_value);
                 storeValue<PyObject *>(value, dest, context.tbaa_frame_value);
@@ -59,7 +59,7 @@ void CompileUnit::emitBlock(unsigned index) {
 
     auto &defined_locals = this_block.locals_input;
 
-    for (auto i : Range(stack_depth, 1)) {
+    for (auto i : IntRange(1, stack_height + 1)) {
         abstract_stack[abstract_stack_height - i]
                 = {loadValue<PyObject *>(getStackSlot(i), context.tbaa_frame_value), true};
     }
@@ -69,10 +69,10 @@ void CompileUnit::emitBlock(unsigned index) {
     const PyInstrPointer py_instr{py_code};
     PyOparg extended_oparg = 0;
 
-    for (auto vpc = blocks[index - 1].end; vpc != this_block.end; vpc++) {
+    for (auto vpc = this_block.start; vpc != blocks[index + 1].start; vpc++) {
         // 注意stack_height记录于此，这就意味着在调用”风险函数“之前不允许DECREF，否则可能DEC两次
         storeValue<decltype(PyFrameObject::f_lasti)>(asValue(vpc), rt_lasti, context.tbaa_frame_value);
-        vpc_to_stack_depth[vpc] = stack_depth;
+        vpc_to_stack_height[vpc] = stack_height;
         di_builder.setLocation(builder, vpc);
 
         auto [opcode, oparg] = py_instr[vpc];
@@ -259,7 +259,7 @@ void CompileUnit::emitBlock(unsigned index) {
         case LOAD_METHOD: {
             auto obj = do_POP();
             callSymbol<handle_LOAD_METHOD>(obj, getName(oparg), getStackSlot());
-            stack_depth += 2;
+            stack_height += 2;
             break;
         }
         case STORE_ATTR: {
@@ -461,14 +461,14 @@ void CompileUnit::emitBlock(unsigned index) {
         }
         case CALL_FUNCTION: {
             // func_args重命名
-            stack_depth -= oparg + 1;
+            stack_height -= oparg + 1;
             auto func_args = getStackSlot();
             auto ret = callSymbol<handle_CALL_FUNCTION>(func_args, asValue<Py_ssize_t>(oparg));
             do_PUSH(ret);
             break;
         }
         case CALL_FUNCTION_KW: {
-            stack_depth -= oparg + 2;
+            stack_height -= oparg + 2;
             auto func_args = getStackSlot();
             auto ret = callSymbol<handle_CALL_FUNCTION_KW>(func_args, asValue<Py_ssize_t>(oparg));
             do_PUSH(ret);
@@ -492,7 +492,7 @@ void CompileUnit::emitBlock(unsigned index) {
         }
         case CALL_METHOD: {
             auto maybe_meth = fetchStackValue(oparg + 2);
-            stack_depth -= oparg + 2;
+            stack_height -= oparg + 2;
             auto is_meth = builder.CreateICmpNE(maybe_meth, context.c_null);
             auto func_args = builder.CreateSelect(is_meth, getStackSlot(), getStackSlot(-1));
             auto nargs = builder.CreateSelect(is_meth,
@@ -564,14 +564,14 @@ void CompileUnit::emitBlock(unsigned index) {
         }
 
         case JUMP_FORWARD: {
-            auto &jmp_block = findPyBlock(vpc + 1 + oparg, stack_depth);
+            auto &jmp_block = findPyBlock(vpc + 1 + oparg, stack_height);
             builder.CreateBr(jmp_block.block);
             fall_through = false;
             break;
         }
         case JUMP_ABSOLUTE: {
             // TODO: 如果有，则不要设置，要校验
-            auto &jmp_block = findPyBlock(oparg, stack_depth);
+            auto &jmp_block = findPyBlock(oparg, stack_height);
             builder.CreateBr(jmp_block.block);
             fall_through = false;
             break;
@@ -610,7 +610,7 @@ void CompileUnit::emitBlock(unsigned index) {
             builder.CreateCondBr(builder.CreateICmpEQ(next, context.c_null), b_break, b_continue);
             // iteration should break
             builder.SetInsertPoint(b_break);
-            auto &break_target = findPyBlock(vpc + 1 + oparg, stack_depth - 1);
+            auto &break_target = findPyBlock(vpc + 1 + oparg, stack_height - 1);
             do_Py_DECREF(iter);
             builder.CreateBr(break_target.block);
             // iteration should continue
@@ -620,42 +620,42 @@ void CompileUnit::emitBlock(unsigned index) {
         }
 
         case BUILD_STRING: {
-            stack_depth -= oparg;
+            stack_height -= oparg;
             auto values = getStackSlot();
             auto str = callSymbol<handle_BUILD_STRING>(values, asValue<Py_ssize_t>(oparg));
             do_PUSH(str);
             break;
         }
         case BUILD_TUPLE: {
-            stack_depth -= oparg;
+            stack_height -= oparg;
             auto values = getStackSlot();
             auto map = callSymbol<handle_BUILD_TUPLE>(values, asValue<Py_ssize_t>(oparg));
             do_PUSH(map);
             break;
         }
         case BUILD_LIST: {
-            stack_depth -= oparg;
+            stack_height -= oparg;
             auto values = getStackSlot();
             auto map = callSymbol<handle_BUILD_LIST>(values, asValue<Py_ssize_t>(oparg));
             do_PUSH(map);
             break;
         }
         case BUILD_SET: {
-            stack_depth -= oparg;
+            stack_height -= oparg;
             auto values = getStackSlot();
             auto map = callSymbol<handle_BUILD_SET>(values, asValue<Py_ssize_t>(oparg));
             do_PUSH(map);
             break;
         }
         case BUILD_MAP: {
-            stack_depth -= 2 * oparg;
+            stack_height -= 2 * oparg;
             auto values = getStackSlot();
             auto map = callSymbol<handle_BUILD_MAP>(values, asValue<Py_ssize_t>(oparg));
             do_PUSH(map);
             break;
         }
         case BUILD_CONST_KEY_MAP: {
-            stack_depth -= oparg + 1;
+            stack_height -= oparg + 1;
             auto values = getStackSlot();
             auto map = callSymbol<handle_BUILD_CONST_KEY_MAP>(values, asValue<Py_ssize_t>(oparg));
             do_PUSH(map);
@@ -787,7 +787,7 @@ void CompileUnit::emitBlock(unsigned index) {
         }
 
         case SETUP_FINALLY: {
-            auto &py_finally_block = findPyBlock(vpc + 1 + oparg, stack_depth + 6);
+            auto &py_finally_block = findPyBlock(vpc + 1 + oparg, stack_height + 6);
             py_finally_block.is_handler = true;
             auto block_addr_diff = builder.CreateSub(
                     builder.CreatePtrToInt(BlockAddress::get(function, py_finally_block.block), context.type<uintptr_t>()),
@@ -796,7 +796,7 @@ void CompileUnit::emitBlock(unsigned index) {
             callSymbol<PyFrame_BlockSetup>(frame_obj,
                     asValue<int>(SETUP_FINALLY),
                     builder.CreateIntCast(block_addr_diff, context.type<int>(), true),
-                    asValue<int>(stack_depth));
+                    asValue<int>(stack_height));
             break;
         }
         case POP_BLOCK: {
@@ -813,7 +813,7 @@ void CompileUnit::emitBlock(unsigned index) {
             auto match = callSymbol<handle_JUMP_IF_NOT_EXC_MATCH>(left, right);
             do_Py_DECREF(left);
             do_Py_DECREF(right);
-            auto &jump_target = findPyBlock(oparg, stack_depth);
+            auto &jump_target = findPyBlock(oparg, stack_height);
             builder.CreateCondBr(match, blocks[index + 1].block, jump_target.block);
             break;
         }
@@ -824,7 +824,7 @@ void CompileUnit::emitBlock(unsigned index) {
             break;
         }
         case SETUP_WITH: {
-            auto &py_finally_block = findPyBlock(vpc + 1 + oparg, stack_depth - 1 + 7);
+            auto &py_finally_block = findPyBlock(vpc + 1 + oparg, stack_height - 1 + 7);
             py_finally_block.is_handler = true;
             auto block_addr_diff = builder.CreateSub(
                     builder.CreatePtrToInt(BlockAddress::get(function, py_finally_block.block), context.type<uintptr_t>()),
@@ -832,7 +832,7 @@ void CompileUnit::emitBlock(unsigned index) {
             );
             callSymbol<handle_SETUP_WITH>(frame_obj, getStackSlot(),
                     builder.CreateIntCast(block_addr_diff, context.type<int>(), true));
-            stack_depth += 1;
+            stack_height += 1;
             break;
         }
         case WITH_EXCEPT_START: {
@@ -892,6 +892,10 @@ void CompileUnit::emitBlock(unsigned index) {
     if (fall_through) {
         assert(!builder.GetInsertBlock()->getTerminator());
         builder.CreateBr(blocks[index + 1].block);
-        declarePendingBlock(index + 1, stack_depth);
+        if (!blocks[index + 1].visited) {
+            blocks[index + 1].visited = true;
+            pending_block_indices.push(index + 1);
+            blocks[index + 1].initial_stack_height = stack_height;
+        }
     }
 }

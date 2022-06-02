@@ -39,8 +39,9 @@ void CompileUnit::translate() {
     analyzeRedundantLoads();
     analyzeLocalsDefinition();
 
-    blocks[0].block->insertInto(function);
-    builder.SetInsertPoint(blocks[0].block);
+    entry_block = createBlock(useName("entry_block"));
+    entry_block->insertInto(function);
+    builder.SetInsertPoint(entry_block);
 
     auto code_obj = loadFieldValue(frame_obj, &PyFrameObject::f_code, context.tbaa_frame_value, useName("code"));
     auto names_tuple = loadFieldValue(code_obj, &PyCodeObject::co_names, context.tbaa_frame_value);
@@ -52,13 +53,13 @@ void CompileUnit::translate() {
     error_block = createBlock("raise_error");
 
     abstract_stack.reserve(py_code->co_stacksize);
-    declarePendingBlock(1U, 0);
-    blocks[1].initial_stack_height = 0;
-    while (!live_block_indices.empty()) {
-        auto index = live_block_indices.pop_back_val();
-        assert(index);
-        abstract_stack_height = stack_depth = blocks[index].initial_stack_height;
-        assert(stack_depth >= 0);
+    pending_block_indices.push(0);
+    blocks[0].visited = true;
+    blocks[0].initial_stack_height = 0;
+    while (!pending_block_indices.empty()) {
+        auto index = pending_block_indices.pop();
+        abstract_stack_height = stack_height = blocks[index].initial_stack_height;
+        assert(stack_height >= 0);
         emitBlock(index);
     }
 
@@ -68,12 +69,12 @@ void CompileUnit::translate() {
     builder.CreateUnreachable();
 
     // TODO: debug location有时候去除
-    builder.SetInsertPoint(blocks[0].block);
+    builder.SetInsertPoint(entry_block);
     auto indirect_br = builder.CreateIndirectBr(
-            builder.CreateInBoundsGEP(context.type<char>(), BlockAddress::get(blocks[1].block),
+            builder.CreateInBoundsGEP(context.type<char>(), BlockAddress::get(blocks[0].block),
                     function->getArg(2)));
-    blocks[1].is_handler = true;
-    for (auto &b : Range(block_num - 1, &blocks[1])) {
+    blocks[0].is_handler = true;
+    for (auto &b : PtrRange(&*blocks, block_num)) {
         if (b.is_handler) {
             indirect_br->addDestination(b.block);
         }
@@ -124,13 +125,13 @@ constexpr bool isRelativeJump(int opcode) {
 
 void CompileUnit::parseCFG() {
     auto size = PyBytes_GET_SIZE(py_code->co_code) / sizeof(_Py_CODEUNIT);
-    vpc_to_stack_depth.reserve(size);
+    vpc_to_stack_height.reserve(size);
 
     BitArray is_boundary(size + 1);
     block_num = 0;
 
     const PyInstrPointer py_instr{py_code};
-    for (auto vpc : Range(size)) {
+    for (auto vpc : IntRange(size)) {
         auto instr = py_instr + vpc;
         auto opcode = instr.opcode();
         auto is_rel_jmp = isRelativeJump(opcode);
@@ -141,39 +142,39 @@ void CompileUnit::parseCFG() {
         }
     }
 
-    block_num += is_boundary.set(0);
+    block_num -= is_boundary.get(0);
+    is_boundary.reset(0);
     block_num += is_boundary.set(size);
 
-    blocks.reserve(block_num);
+    blocks.reserve(block_num + 1);
+    blocks[block_num].start = size;
+
     unsigned current_num = 0;
-    unsigned start;
-    for (auto i : Range(BitArray::chunkNumber(size + 1))) {
+    unsigned start = 0;
+    for (auto i : IntRange(BitArray::chunkNumber(size + 1))) {
         unsigned j = 0;
         for (auto bits = is_boundary.getChunk(i); bits; bits >>= 1) {
             if (bits & 1) {
+                auto end = i * BitArray::BitsPerValue + j;
                 auto &b = blocks[current_num++];
-                b.end = i * BitArray::BitsPerValue + j;
-                if (b.end) {
-                    b.block = createBlock(useName("block_for_instr_.", start));
-                    auto instr = py_instr + (b.end - 1);
-                    auto opcode = instr.opcode();
-                    auto is_rel_jmp = isRelativeJump(opcode);
-                    auto is_abs_jmp = isAbsoluteJmp(opcode);
-                    b.fall_through = !isTerminator(opcode);
-                    if ((b.has_branch = is_rel_jmp || is_abs_jmp)) {
-                        b.branch = instr.fullOparg(py_instr) + (is_rel_jmp ? b.end : 0);
-                    }
-                } else{
-                    b.block = createBlock(useName("entry_block"));
+                b.start = start;
+                b.block = createBlock(useName("block_for_instr_.", start));
+                auto tail_instr = py_instr + (end - 1);
+                auto opcode = tail_instr.opcode();
+                auto is_rel_jmp = isRelativeJump(opcode);
+                auto is_abs_jmp = isAbsoluteJmp(opcode);
+                b.fall_through = !isTerminator(opcode);
+                if ((b.has_branch = is_rel_jmp || is_abs_jmp)) {
+                    b.branch = tail_instr.fullOparg(py_instr) + (is_rel_jmp ? end : 0);
                 }
-                start = b.end;
+                start = end;
             }
             j++;
         }
     }
     assert(current_num == block_num);
 
-    for (auto &b : Range(block_num - 1, &blocks[1])) {
+    for (auto &b : PtrRange(&*blocks, block_num)) {
         if (b.has_branch) {
             b.branch = findPyBlock(b.branch);
         }
@@ -239,8 +240,8 @@ void CompileUnit::do_SETLOCAL(PyOparg oparg, llvm::Value *value, bool is_defined
 }
 
 Value *CompileUnit::getStackSlot(int i) {
-    assert(stack_depth >= i);
-    auto offset = offsetof(PyFrameObject, f_localsplus) + sizeof(PyObject *) * (stack_depth - i +
+    assert(stack_height >= i);
+    auto offset = offsetof(PyFrameObject, f_localsplus) + sizeof(PyObject *) * (stack_height - i +
             py_code->co_nlocals +
             PyTuple_GET_SIZE(py_code->co_cellvars) +
             PyTuple_GET_SIZE(py_code->co_freevars)
@@ -255,14 +256,14 @@ Value *CompileUnit::fetchStackValue(int i) {
 
 CompileUnit::PoppedStackValue CompileUnit::do_POP() {
     auto [value, really_pushed] = abstract_stack[--abstract_stack_height];
-    stack_depth -= really_pushed;
+    stack_height -= really_pushed;
     return {value, really_pushed};
 }
 
 llvm::Value *CompileUnit::do_POPWithStolenRef() {
     auto [value, really_pushed] = abstract_stack[--abstract_stack_height];
     if (really_pushed) {
-        --stack_depth;
+        --stack_height;
     } else {
         do_Py_INCREF(value);
     }
@@ -273,7 +274,7 @@ void CompileUnit::do_PUSH(llvm::Value *value, bool really_pushed) {
     abstract_stack[abstract_stack_height++] = {value, really_pushed};
     if (really_pushed) {
         storeValue<PyObject *>(value, getStackSlot(), context.tbaa_frame_value);
-        stack_depth++;
+        stack_height++;
     }
 }
 
@@ -316,27 +317,31 @@ unsigned CompileUnit::findPyBlock(unsigned offset) {
     auto right = block_num - 1;
     while (left <= right) {
         auto mid = left + (right - left) / 2;
-        auto v = blocks[mid].end;
+        auto v = blocks[mid].start;
         if (v < offset) {
             left = mid + 1;
         } else if (v > offset) {
             right = mid - 1;
         } else {
-            return mid + 1;
+            return mid;
         }
     }
     Py_UNREACHABLE();
 }
 
-PyBasicBlock &CompileUnit::findPyBlock(unsigned offset, decltype(stack_depth) initial_stack_height) {
+PyBasicBlock &CompileUnit::findPyBlock(unsigned offset, decltype(stack_height) initial_stack_height) {
     auto index = findPyBlock(offset);
-    declarePendingBlock(index, initial_stack_height);
+    if (!blocks[index].visited) {
+        blocks[index].visited = true;
+        pending_block_indices.push(index);
+        blocks[index].initial_stack_height = initial_stack_height;
+    }
     return blocks[index];
 }
 
 void CompileUnit::pyJumpIF(unsigned offset, bool pop_if_jump, bool jump_cond) {
     auto fall_block = appendBlock("");
-    auto &jump_target = findPyBlock(offset, stack_depth - pop_if_jump);
+    auto &jump_target = findPyBlock(offset, stack_height - pop_if_jump);
 
     auto false_cmp_block = appendBlock("");
     auto slow_cmp_block = appendBlock("");
@@ -359,7 +364,7 @@ void CompileUnit::pyJumpIF(unsigned offset, bool pop_if_jump, bool jump_cond) {
     }
     builder.SetInsertPoint(fall_block);
     do_Py_DECREF(obj);
-    stack_depth--;
+    stack_height--;
 }
 
 
@@ -394,5 +399,5 @@ CompileUnit::TranslatedResult *CompileUnit::emit(Translator &translator, PyObjec
     // TODO: cout capcity
     notifyCodeLoaded(py_code, memory.base());
 
-    return new CompileUnit::TranslatedResult{memory, move(cu.vpc_to_stack_depth)};
+    return new CompileUnit::TranslatedResult{memory, move(cu.vpc_to_stack_height)};
 }
