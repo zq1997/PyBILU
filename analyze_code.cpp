@@ -76,9 +76,10 @@ void CompileUnit::analyzeRedundantLoads() {
     for (auto index = code_instr_num;;) {
         if (index == block->start) {
             if (block != &blocks[block_num]) {
-                block->locals_deleted.flipAll(py_code->co_nlocals);
-                BitArrayRefWithSize(block->locals_deleted, py_code->co_nlocals) &= block->locals_touched;
-                block->locals_touched.flipAll(py_code->co_nlocals);
+                for (auto [t, d] : BitArrayChunks(py_code->co_nlocals, block->locals_touched, block->locals_deleted)) {
+                    d = ~d & t;
+                    t = ~t;
+                }
             }
             if (!index) {
                 break;
@@ -465,15 +466,13 @@ void CompileUnit::analyzeLocalsDefinition() {
     }
 
     BitArray block_output(py_code->co_nlocals);
-    auto chunk_num = BitArray::chunkNumber(py_code->co_nlocals);
     auto update_successor = [&](unsigned index) {
         auto &successor = blocks[index];
         bool any_update = false;
-        for (auto i : IntRange(chunk_num)) {
-            auto &chunk = successor.locals_input.getChunk(i);
-            auto old_chunk = chunk;
-            chunk = old_chunk & block_output.getChunk(i);
-            any_update |= chunk != old_chunk;
+        for (auto [x, y] : BitArrayChunks(py_code->co_nlocals, block_output, successor.locals_input)) {
+            auto old_y = y;
+            y &= x;
+            any_update |= y != old_y;
         }
         if (any_update && !successor.in_worklist) {
             successor.in_worklist = true;
@@ -484,10 +483,9 @@ void CompileUnit::analyzeLocalsDefinition() {
     while (!worklist.empty()) {
         auto &b = blocks[worklist.pop()];
         b.in_worklist = false;
-        for (auto i : IntRange(chunk_num)) {
-            // TODO: 名不副实
-            block_output.getChunk(i) = (b.locals_input.getChunk(i) & b.locals_touched.getChunk(i))
-                    | b.locals_deleted.getChunk(i);
+        for (auto [i, o, mask, set] : BitArrayChunks(py_code->co_nlocals, b.locals_input, block_output,
+                b.locals_touched, b.locals_deleted)) {
+            o = (i & mask) | set;
         }
         if (b.fall_through) {
             update_successor(&b - &*blocks + 1);

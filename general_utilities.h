@@ -148,9 +148,10 @@ public:
 };
 
 class BitArray : public DynamicArray<uintmax_t> {
+public:
     using ChunkType = uintmax_t;
     using Parent = DynamicArray<ChunkType>;
-public:
+
     static constexpr auto BitsPerValue = CHAR_BIT * sizeof(ChunkType);
 
     static auto chunkNumber(size_t size) { return size / BitsPerValue + !!(size % BitsPerValue); }
@@ -189,26 +190,19 @@ public:
         memset(&getChunk(0), set ? UCHAR_MAX : 0, chunkNumber(size) * sizeof(ChunkType));
     }
 
-    void flipAll(size_t size) {
-        for (auto i : IntRange(chunkNumber(size))) {
-            getChunk(i) = ~getChunk(i);
-        }
-    }
-
     auto operator[](size_t index) = delete;
 };
 
-template <size_t N>
-class ZipBitArrays {
-    using Arrays = std::array<BitArray *, N>;
-    Arrays arrays;
+template <typename... Ts>
+class BitArrayChunks {
+    std::tuple<Ts &...> arrays;
     size_t chunk_num;
 
     class Iterator {
-        Arrays &arrays;
+        BitArrayChunks &zip_arrays;
         size_t i;
     public:
-        Iterator(Arrays &arrays, size_t i) : arrays(arrays), i(i) {}
+        Iterator(BitArrayChunks &zip_arrays, size_t i) : zip_arrays(zip_arrays), i(i) {}
 
         auto &operator++() {
             ++i;
@@ -216,54 +210,23 @@ class ZipBitArrays {
         }
 
         auto operator!=(const Iterator &o) const {
-            assert(&arrays == &o.arrays);
+            assert(&zip_arrays == &o.zip_arrays);
             return o.i != i;
         }
 
-        auto &operator*() const {
-            std::array<uintmax_t, N> result;
-            for (auto index : IntRange(N)) {
-                result[index] = arrays[index]->getChunk(i);
-            }
-            return result;
+        auto operator*() const {
+            return std::apply([&](Ts &... x) { return std::tie(x.getChunk(i)...); }, zip_arrays.arrays);
         }
+
+        explicit operator size_t() { return i; }
     };
 
 public:
-    ZipBitArrays(size_t size, auto &... arrays) : arrays{&arrays...}, chunk_num(BitArray::chunkNumber(size)) {}
+    BitArrayChunks(size_t size, Ts &... arrays) : arrays{arrays...}, chunk_num(BitArray::chunkNumber(size)) {}
 
-    auto begin() { return Iterator{arrays, 0}; }
+    auto begin() { return Iterator{*this, 0}; }
 
-    auto end() { return Iterator{arrays, chunk_num}; }
-};
-
-// // TODO: zip range
-// void zipBitArrayChunks(size_t size, auto arrays...) {
-//     for (auto i : IntRange(BitArray::chunkNumber(size))) {
-//
-//     }
-// }
-
-class BitArrayRefWithSize {
-    BitArray &bits;
-    const size_t chunk_num;
-
-public:
-    BitArrayRefWithSize(BitArray &bits, size_t size) : bits(bits), chunk_num(BitArray::chunkNumber(size)) {}
-
-    auto &operator&=(const BitArray &other) {
-        for (auto i : IntRange(chunk_num)) {
-            bits.getChunk(i) &= other.getChunk(i);
-        }
-        return *this;
-    }
-
-    auto &operator|=(const BitArray &other) {
-        for (auto i : IntRange(chunk_num)) {
-            bits.getChunk(i) |= other.getChunk(i);
-        }
-        return *this;
-    }
+    auto end() { return Iterator{*this, chunk_num}; }
 };
 
 
