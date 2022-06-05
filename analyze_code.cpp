@@ -4,6 +4,151 @@
 
 using namespace std;
 
+
+constexpr bool isTerminator(int opcode) {
+    switch (opcode) {
+    case RETURN_VALUE:
+    case RERAISE:
+    case RAISE_VARARGS:
+    case JUMP_ABSOLUTE:
+    case JUMP_FORWARD:
+        return true;
+    default:
+        return false;
+    }
+}
+
+constexpr bool isAbsoluteJmp(int opcode) {
+    switch (opcode) {
+    case JUMP_IF_TRUE_OR_POP:
+    case JUMP_IF_FALSE_OR_POP:
+    case POP_JUMP_IF_TRUE:
+    case POP_JUMP_IF_FALSE:
+    case JUMP_IF_NOT_EXC_MATCH:
+    case JUMP_ABSOLUTE:
+        return true;
+    default:
+        return false;
+    }
+}
+
+constexpr bool isRelativeJump(int opcode) {
+    switch (opcode) {
+    case FOR_ITER:
+    case JUMP_FORWARD:
+        return true;
+    default:
+        return false;
+    }
+}
+
+constexpr bool isTryBlockSetup(int opcode) {
+    switch (opcode) {
+    case SETUP_FINALLY:
+    case SETUP_WITH:
+    case SETUP_ASYNC_WITH:
+        return true;
+    default:
+        return false;
+    }
+}
+
+void CompileUnit::parseCFG() {
+    auto size = PyBytes_GET_SIZE(py_code->co_code) / sizeof(_Py_CODEUNIT);
+    vpc_to_stack_height.reserve(size);
+    redundant_loads.reserve(size, false);
+
+    BitArray is_boundary(size + 1);
+    block_num = 0;
+
+    const PyInstrPointer py_instr{py_code};
+    for (auto vpc : IntRange(size)) {
+        auto instr = py_instr + vpc;
+        auto opcode = instr.opcode();
+        if (opcode == POP_BLOCK) {
+            block_num += is_boundary.set(vpc + 1);
+        } else {
+            auto is_try_setup = isTryBlockSetup(opcode);
+            auto is_rel_jmp = isRelativeJump(opcode);
+            auto is_abs_jmp = isAbsoluteJmp(opcode);
+            try_block_num += is_try_setup;
+            if (is_try_setup || is_rel_jmp || is_abs_jmp) {
+                auto dest = instr.oparg(py_instr) + (is_abs_jmp ? 0 : vpc + 1);
+                block_num += is_boundary.set(dest) + (!isTerminator(opcode) && is_boundary.set(vpc + 1));
+            }
+        }
+    }
+
+    block_num -= is_boundary.get(0);
+    is_boundary.reset(0);
+    block_num += is_boundary.set(size);
+
+    blocks.reserve(block_num + 1 + try_block_num);
+    pending_block_indices.reserve(block_num + 1 + try_block_num);
+    blocks[block_num].start = size;
+
+    unsigned created_block_num = 0;
+    unsigned start = 0;
+    for (auto i : IntRange(BitArray::chunkNumber(size + 1))) {
+        unsigned j = 0;
+        for (auto bits = is_boundary.getChunk(i); bits; bits >>= 1) {
+            if (bits & 1) {
+                auto end = i * BitArray::BitsPerValue + j;
+                auto &b = blocks[created_block_num++];
+                b.start = start;
+                b.block = createBlock(useName("block_for_instr_.", start));
+                auto tail_instr = py_instr + (end - 1);
+                auto opcode = tail_instr.opcode();
+                if (opcode == POP_BLOCK) {
+                    b.fall_through = true;
+                    b.has_branch = false;
+                    b.try_block_enter = false;
+                    b.try_block_exit = true;
+                } else {
+                    b.fall_through = !isTerminator(opcode);
+                    auto is_try_setup = isTryBlockSetup(opcode);
+                    auto is_rel_jmp = isRelativeJump(opcode);
+                    auto is_abs_jmp = isAbsoluteJmp(opcode);
+                    if ((b.has_branch = is_try_setup || is_rel_jmp || is_abs_jmp)) {
+                        b.branch = tail_instr.oparg(py_instr) + (is_abs_jmp ? 0 : end);
+                    }
+                    b.try_block_enter = is_try_setup;
+                    b.try_block_exit = false;
+                }
+                start = end;
+            }
+            j++;
+        }
+    }
+    assert(created_block_num == block_num);
+
+    auto nlocals = py_code->co_nlocals;
+    auto exception_block_index = block_num + 1;
+    for (auto &b : PtrRange(&*blocks, block_num)) {
+        b.locals_keep.reserve(nlocals, false);
+        b.locals_set.reserve(nlocals, false);
+        b.locals_ever_deleted.reserve(nlocals, false);
+        if (b.has_branch) {
+            auto branch = findPyBlock(b.branch);
+            if (b.try_block_enter) {
+                b.branch = exception_block_index++;
+                auto &eb = blocks[b.branch];
+                eb.has_branch = true;
+                eb.fall_through = false;
+                eb.try_block_enter = false;
+                eb.try_block_exit = false;
+                eb.branch = branch;
+                eb.locals_keep.reserve(nlocals, true);
+                eb.locals_set.reserve(nlocals, false);
+                eb.locals_ever_deleted.reserve(nlocals, false);
+            } else {
+                b.branch = branch;
+            }
+        }
+    }
+    assert(exception_block_index == block_num + 1 + try_block_num);
+}
+
 template <typename T>
 class ReversedStack {
     ssize_t size;
@@ -65,7 +210,6 @@ void CompileUnit::analyzeRedundantLoads() {
     const auto until_finally = code_instr_num;
     constexpr decltype(until_finally) until_anytime = 0;
 
-    redundant_loads.reserve(code_instr_num);
     DynamicArray<unsigned> locals(py_code->co_nlocals);
     for (auto i : IntRange(py_code->co_nlocals)) {
         locals[i] = until_finally;
@@ -76,22 +220,19 @@ void CompileUnit::analyzeRedundantLoads() {
     for (auto index = code_instr_num;;) {
         if (index == block->start) {
             if (block != &blocks[block_num]) {
-                for (auto [t, d] : BitArrayChunks(py_code->co_nlocals, block->locals_touched, block->locals_deleted)) {
-                    d = ~d & t;
-                    t = ~t;
+                for (auto [k, s] : BitArrayChunks(py_code->co_nlocals, block->locals_keep, block->locals_set)) {
+                    s = ~s & k;
+                    k = ~k;
                 }
             }
             if (!index) {
                 break;
             }
             --block;
-            block->locals_touched.reserve(py_code->co_nlocals);
-            block->locals_deleted.reserve(py_code->co_nlocals);
-            block->locals_ever_deleted.reserve(py_code->co_nlocals);
             stack.reset();
         }
-        auto &locals_touched = block->locals_touched;
-        auto &locals_deleted = block->locals_deleted;
+        auto &locals_touched = block->locals_keep;
+        auto &locals_deleted = block->locals_set;
         auto &locals_ever_deleted = block->locals_ever_deleted;
 
         stack.setTimestamp(--index);
@@ -123,7 +264,7 @@ void CompileUnit::analyzeRedundantLoads() {
             break;
         }
         case ROT_N: {
-            auto n = instr.fullOparg(py_instr);
+            auto n = instr.oparg(py_instr);
             auto top = stack.set_peak(n);
             while (--n) {
                 stack.peak(n + 1, stack.set_peak(n));
@@ -153,20 +294,20 @@ void CompileUnit::analyzeRedundantLoads() {
             redundant_loads.setIf(index, until_finally > stack.push());
             break;
         case LOAD_FAST: {
-            auto oparg = instr.fullOparg(py_instr);
+            auto oparg = instr.oparg(py_instr);
             redundant_loads.setIf(index, locals[oparg] > stack.push());
             locals_touched.set(oparg);
             break;
         }
         case STORE_FAST: {
-            auto oparg = instr.fullOparg(py_instr);
+            auto oparg = instr.oparg(py_instr);
             locals[oparg] = index;
             stack.pop();
             locals_touched.set(oparg);
             break;
         }
         case DELETE_FAST: {
-            auto oparg = instr.fullOparg(py_instr);
+            auto oparg = instr.oparg(py_instr);
             locals_deleted.setIf(oparg, !locals_touched.get(oparg));
             locals_ever_deleted.set(oparg);
             locals_touched.set(oparg);
@@ -273,30 +414,30 @@ void CompileUnit::analyzeRedundantLoads() {
 
         case CALL_FUNCTION:
             stack.push();
-            stack.pop_n_consecutively(1 + instr.fullOparg(py_instr));
+            stack.pop_n_consecutively(1 + instr.oparg(py_instr));
             break;
         case CALL_FUNCTION_KW:
             stack.push();
-            stack.pop_n_consecutively(2 + instr.fullOparg(py_instr));
+            stack.pop_n_consecutively(2 + instr.oparg(py_instr));
             break;
         case CALL_FUNCTION_EX:
             stack.push();
             stack.pop();
             stack.pop();
-            if (instr.fullOparg(py_instr) & 1) {
+            if (instr.oparg(py_instr) & 1) {
                 stack.pop();
             }
             break;
         case CALL_METHOD:
             stack.push();
-            stack.pop_n_consecutively(2 + instr.fullOparg(py_instr));
+            stack.pop_n_consecutively(2 + instr.oparg(py_instr));
             break;
         case LOAD_CLOSURE:
             stack.push();
             break;
         case MAKE_FUNCTION: {
             stack.push();
-            auto oparg = instr.fullOparg(py_instr);
+            auto oparg = instr.oparg(py_instr);
             stack.pop_n_consecutively(2 + !!(oparg & 1) + !!(oparg & 2) + !!(oparg & 4) + !!(oparg & 8));
             break;
         }
@@ -338,15 +479,15 @@ void CompileUnit::analyzeRedundantLoads() {
         case BUILD_LIST:
         case BUILD_SET:
             stack.push();
-            stack.pop_n_consecutively(instr.fullOparg(py_instr));
+            stack.pop_n_consecutively(instr.oparg(py_instr));
             break;
         case BUILD_MAP:
             stack.push();
-            stack.pop_n_consecutively(2 * instr.fullOparg(py_instr));
+            stack.pop_n_consecutively(2 * instr.oparg(py_instr));
             break;
         case BUILD_CONST_KEY_MAP:
             stack.push();
-            stack.pop_n_consecutively(1 + instr.fullOparg(py_instr));
+            stack.pop_n_consecutively(1 + instr.oparg(py_instr));
             break;
         case LIST_APPEND:
         case SET_ADD:
@@ -370,17 +511,17 @@ void CompileUnit::analyzeRedundantLoads() {
         case FORMAT_VALUE:
             stack.push();
             stack.pop();
-            if ((instr.fullOparg(py_instr) & FVS_MASK) == FVS_HAVE_SPEC) {
+            if ((instr.oparg(py_instr) & FVS_MASK) == FVS_HAVE_SPEC) {
                 stack.pop();
             }
             break;
         case BUILD_STRING:
             stack.push();
-            stack.pop_n_consecutively(instr.fullOparg(py_instr));
+            stack.pop_n_consecutively(instr.oparg(py_instr));
             break;
 
         case UNPACK_SEQUENCE: {
-            auto n = instr.fullOparg(py_instr);
+            auto n = instr.oparg(py_instr);
             while (n--) {
                 stack.push();
             }
@@ -388,7 +529,7 @@ void CompileUnit::analyzeRedundantLoads() {
             break;
         }
         case UNPACK_EX: {
-            auto oparg = instr.fullOparg(py_instr);
+            auto oparg = instr.oparg(py_instr);
             auto n = (oparg & 0xff) + 1 + (oparg >> 8);
             while (n--) {
                 stack.push();
@@ -445,10 +586,51 @@ void CompileUnit::analyzeRedundantLoads() {
     }
 }
 
-void CompileUnit::analyzeLocalsDefinition() {
-    auto &worklist = pending_block_indices;
-    worklist.reserve(block_num);
+void collect_deleted_locals(BitArray &keep, PyBasicBlock blocks[], unsigned nested_try_depth, unsigned epoch, unsigned nlocals, unsigned i_b) {
+    auto &b = blocks[i_b];
+    if (b.try_block_epoch >= epoch) {
+        return;
+    }
+    b.try_block_epoch = epoch;
+    for (auto [k, d] : BitArrayChunks(nlocals, keep, b.locals_ever_deleted)) {
+        k &= ~d;
+    }
+    if (b.try_block_enter) {
+        collect_deleted_locals(keep, blocks, nested_try_depth + 1, epoch, nlocals, i_b + 1);
+        collect_deleted_locals(keep, blocks, nested_try_depth + 1, epoch, nlocals, blocks[b.branch].branch);
+        return;
+    }
+    if (b.try_block_exit) {
+        if (nested_try_depth == 1) {
+            return;
+        }
+        collect_deleted_locals(keep, blocks, nested_try_depth - 1, epoch, nlocals, i_b + 1);
+        return;
+    }
+    if (b.has_branch) {
+        collect_deleted_locals(keep, blocks, nested_try_depth, epoch, nlocals, b.branch);
+    }
+    if (b.fall_through) {
+        collect_deleted_locals(keep, blocks, nested_try_depth, epoch, nlocals, i_b + 1);
+    }
+}
 
+void CompileUnit::analyzeLocalsDefinition() {
+    unsigned epoch = 0;
+    for (auto &b : PtrRange(&blocks[0], block_num)) {
+        if (b.try_block_enter) {
+            collect_deleted_locals(blocks[b.branch].locals_keep, &blocks[0], 1, ++epoch, py_code->co_nlocals, &b - &blocks[0] + 1);
+        }
+    }
+    // dealWithTryBlocks(block_num, &blocks[0]);
+    auto &worklist = pending_block_indices;
+
+    for (auto i : IntRange(block_num + 1, block_num + 1 + try_block_num)) {
+        auto &b = blocks[i];
+        b.in_worklist = true;
+        worklist.push(i);
+        b.locals_input.fill(py_code->co_nlocals, true);
+    }
     for (auto i : IntRange(1, block_num)) {
         auto &b = blocks[i];
         b.in_worklist = true;
@@ -484,7 +666,7 @@ void CompileUnit::analyzeLocalsDefinition() {
         auto &b = blocks[worklist.pop()];
         b.in_worklist = false;
         for (auto [i, o, mask, set] : BitArrayChunks(py_code->co_nlocals, b.locals_input, block_output,
-                b.locals_touched, b.locals_deleted)) {
+                b.locals_keep, b.locals_set)) {
             o = (i & mask) | set;
         }
         if (b.fall_through) {
@@ -494,4 +676,18 @@ void CompileUnit::analyzeLocalsDefinition() {
             update_successor(b.branch);
         }
     }
+
+    for (auto i : IntRange(py_code->co_nlocals)) {
+        fprintf(stderr, "\t%s", PyUnicode_AsUTF8(PyTuple_GET_ITEM(py_code->co_varnames, i)));
+    }
+    for (auto &b : PtrRange(&blocks[0], block_num)) {
+        if (b.try_block_enter) {
+            b.branch = blocks[b.branch].branch;
+        }
+        fprintf(stderr, "\n%u", b.start);
+        for (auto i : IntRange(py_code->co_nlocals)) {
+            fprintf(stderr, b.locals_input.get(i) ? "\to" : "\tx");
+        }
+    }
+    fprintf(stderr, "\n");
 }

@@ -75,7 +75,8 @@ void CompileUnit::emitBlock(unsigned index) {
         vpc_to_stack_height[vpc] = stack_height;
         di_builder.setLocation(builder, vpc);
 
-        auto [opcode, oparg] = py_instr[vpc];
+        auto opcode = (py_instr + vpc).opcode();
+        auto oparg = (py_instr + vpc).rawOparg();
         oparg |= extended_oparg;
         extended_oparg = 0;
 
@@ -461,15 +462,13 @@ void CompileUnit::emitBlock(unsigned index) {
         }
         case CALL_FUNCTION: {
             // func_args重命名
-            stack_height -= oparg + 1;
-            auto func_args = getStackSlot();
+            auto func_args = do_POP_N(oparg + 1);
             auto ret = callSymbol<handle_CALL_FUNCTION>(func_args, asValue<Py_ssize_t>(oparg));
             do_PUSH(ret);
             break;
         }
         case CALL_FUNCTION_KW: {
-            stack_height -= oparg + 2;
-            auto func_args = getStackSlot();
+            auto func_args = do_POP_N(oparg + 2);
             auto ret = callSymbol<handle_CALL_FUNCTION_KW>(func_args, asValue<Py_ssize_t>(oparg));
             do_PUSH(ret);
             break;
@@ -492,9 +491,9 @@ void CompileUnit::emitBlock(unsigned index) {
         }
         case CALL_METHOD: {
             auto maybe_meth = fetchStackValue(oparg + 2);
-            stack_height -= oparg + 2;
+            auto func_args_if_meth = do_POP_N(oparg + 2);
             auto is_meth = builder.CreateICmpNE(maybe_meth, context.c_null);
-            auto func_args = builder.CreateSelect(is_meth, getStackSlot(), getStackSlot(-1));
+            auto func_args = builder.CreateSelect(is_meth, func_args_if_meth, getStackSlot(-1));
             auto nargs = builder.CreateSelect(is_meth,
                     asValue<Py_ssize_t>(oparg + 1), asValue<Py_ssize_t>(oparg));
             auto ret = callSymbol<handle_CALL_FUNCTION>(func_args, nargs);
@@ -620,43 +619,37 @@ void CompileUnit::emitBlock(unsigned index) {
         }
 
         case BUILD_STRING: {
-            stack_height -= oparg;
-            auto values = getStackSlot();
+            auto values = do_POP_N(oparg);
             auto str = callSymbol<handle_BUILD_STRING>(values, asValue<Py_ssize_t>(oparg));
             do_PUSH(str);
             break;
         }
         case BUILD_TUPLE: {
-            stack_height -= oparg;
-            auto values = getStackSlot();
+            auto values = do_POP_N(oparg);
             auto map = callSymbol<handle_BUILD_TUPLE>(values, asValue<Py_ssize_t>(oparg));
             do_PUSH(map);
             break;
         }
         case BUILD_LIST: {
-            stack_height -= oparg;
-            auto values = getStackSlot();
+            auto values = do_POP_N(oparg);
             auto map = callSymbol<handle_BUILD_LIST>(values, asValue<Py_ssize_t>(oparg));
             do_PUSH(map);
             break;
         }
         case BUILD_SET: {
-            stack_height -= oparg;
-            auto values = getStackSlot();
+            auto values = do_POP_N(oparg);
             auto map = callSymbol<handle_BUILD_SET>(values, asValue<Py_ssize_t>(oparg));
             do_PUSH(map);
             break;
         }
         case BUILD_MAP: {
-            stack_height -= 2 * oparg;
-            auto values = getStackSlot();
+            auto values = do_POP_N(2 * oparg);
             auto map = callSymbol<handle_BUILD_MAP>(values, asValue<Py_ssize_t>(oparg));
             do_PUSH(map);
             break;
         }
         case BUILD_CONST_KEY_MAP: {
-            stack_height -= oparg + 1;
-            auto values = getStackSlot();
+            auto values = do_POP_N(oparg + 1);
             auto map = callSymbol<handle_BUILD_CONST_KEY_MAP>(values, asValue<Py_ssize_t>(oparg));
             do_PUSH(map);
             break;

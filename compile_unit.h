@@ -54,19 +54,22 @@ struct PyBasicBlock {
     bool is_handler{false};
     union {
         bool in_worklist;
-        bool visited;
+        bool visited{false};
     };
-    BitArray locals_touched;
-    BitArray locals_deleted;
+    BitArray locals_keep;
+    BitArray locals_set;
     union {
         BitArray locals_ever_deleted{};
         BitArray locals_input;
     };
 
     unsigned branch;
+    bool has_branch{false};
+    bool fall_through{false};
+    bool try_block_enter{false};
+    bool try_block_exit{false};
+    unsigned try_block_epoch{0};
     // static constexpr auto branch_none = std::numeric_limits<decltype(branch)>::max();
-    bool has_branch;
-    bool fall_through;
 
     PyBasicBlock() {};
     PyBasicBlock(const PyBasicBlock &) = delete;
@@ -115,14 +118,15 @@ class CompileUnit {
     llvm::Value *code_consts;
 
     PyCodeObject *py_code;
-    unsigned block_num;
-    LimitedStack<unsigned> pending_block_indices;
-    DynamicArray<PyBasicBlock> blocks;
-    BitArray redundant_loads;
+    unsigned block_num{0};
+    unsigned try_block_num{0};
+    LimitedStack<unsigned> pending_block_indices{};
+    DynamicArray<PyBasicBlock> blocks{};
+    BitArray redundant_loads{};
 
     decltype(PyFrameObject::f_stackdepth) stack_height;
-    DynamicArray<decltype(stack_height)> vpc_to_stack_height;
-    DynamicArray<std::pair<llvm::Value *, bool>> abstract_stack;
+    DynamicArray<decltype(stack_height)> vpc_to_stack_height{};
+    DynamicArray<std::pair<llvm::Value *, bool>> abstract_stack{};
     decltype(stack_height) abstract_stack_height;
 
     [[no_unique_address]] std::conditional_t<debug_build, DebugInfoBuilder, NullDebugInfoBuilder> di_builder;
@@ -162,6 +166,15 @@ class CompileUnit {
     PoppedStackValue do_POP();
 
     llvm::Value *do_POPWithStolenRef();
+
+    llvm::Value *do_POP_N(PyOparg n) {
+        for (auto i : IntRange(n)) {
+            assert(abstract_stack[abstract_stack_height - 1 - i].first);
+        }
+        abstract_stack_height -= n;
+        stack_height -= n;
+        return getStackSlot();
+    }
 
     void do_Py_INCREF(llvm::Value *v);
 

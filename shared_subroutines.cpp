@@ -106,7 +106,7 @@ void raiseException() {
     auto py_instr = PyInstrPointer(code);
     auto current_instr = py_instr + frame->f_lasti;
     auto opcode = current_instr.opcode();
-    auto oparg = current_instr.fullOparg(py_instr);
+    auto oparg = current_instr.oparg(py_instr);
     if (opcode == LOAD_FAST || opcode == DELETE_FAST) {
         auto name = PyTuple_GET_ITEM(code->co_varnames, oparg);
         raiseUndefinedLocal(tstate, name);

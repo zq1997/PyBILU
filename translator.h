@@ -21,12 +21,6 @@
 #include "shared_symbols.h"
 #include "general_utilities.h"
 
-#ifdef NDEBUG
-constexpr auto debug_build = false;
-#else
-constexpr auto debug_build = true;
-#endif
-
 llvm::sys::MemoryBlock loadCode(llvm::SmallVector<char> &obj_vec);
 void unloadCode(llvm::sys::MemoryBlock &mem);
 

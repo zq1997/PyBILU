@@ -8,6 +8,14 @@
 #include <Python.h>
 #include <opcode.h>
 
+#ifdef NDEBUG
+constexpr auto debug_build = false;
+#define FOR_DEBUG(X)
+#else
+constexpr auto debug_build = true;
+#define FOR_DEBUG(X) X
+#endif
+
 struct PyObjectRef {
     PyObject *o;
 
@@ -92,6 +100,7 @@ public:
 template <typename T>
 class DynamicArray {
     T *data{};
+    FOR_DEBUG(size_t array_size;)
 
 public:
     DynamicArray() = default;
@@ -100,7 +109,7 @@ public:
         other.data = nullptr;
     };
 
-    explicit DynamicArray(size_t size, bool init = false) : data{init ? new T[size]{} : new T[size]} {};
+    explicit DynamicArray(size_t size) { reserve(size); };
 
     ~DynamicArray() {
         if (data) {
@@ -108,14 +117,18 @@ public:
         }
     };
 
-    void reserve(size_t size, bool init = false) {
+    void reserve(size_t size) {
         assert(!data);
-        data = init ? new T[size]{} : new T[size];
+        data = new T[size];
+        FOR_DEBUG(array_size = size;)
     }
 
     T &operator*() { return data[0]; }
 
-    T &operator[](size_t index) { return data[index]; }
+    T &operator[](size_t index) {
+        assert(index < array_size);
+        return data[index];
+    }
 
     const auto &operator[](size_t index) const { return data[index]; }
 };
@@ -158,14 +171,17 @@ public:
 
     BitArray() = default;
 
-    explicit BitArray(size_t size) : Parent(chunkNumber(size), true) {}
+    explicit BitArray(size_t size, bool fill_with = false) : Parent(chunkNumber(size)) {
+        fill(size, fill_with);
+    }
 
     auto &getChunk(size_t index) { return Parent::operator[](index); }
 
     const auto &getChunk(size_t index) const { return Parent::operator[](index); }
 
-    void reserve(size_t size) {
-        Parent::reserve(chunkNumber(size), true);
+    void reserve(size_t size, bool fill_with = false) {
+        Parent::reserve(chunkNumber(size));
+        fill(size, fill_with);
     }
 
     bool set(size_t index) {
@@ -186,8 +202,8 @@ public:
         return getChunk(index / BitsPerValue) & (ChunkType{1} << index % BitsPerValue);
     }
 
-    void fill(size_t size, bool set = false) {
-        memset(&getChunk(0), set ? UCHAR_MAX : 0, chunkNumber(size) * sizeof(ChunkType));
+    void fill(size_t size, bool fill_with = false) {
+        memset(&getChunk(0), fill_with ? UCHAR_MAX : 0, chunkNumber(size) * sizeof(ChunkType));
     }
 
     auto operator[](size_t index) = delete;
@@ -243,9 +259,9 @@ public:
 
     auto opcode() const { return _Py_OPCODE(*pointer); }
 
-    auto oparg() const { return _Py_OPARG(*pointer); }
+    auto rawOparg() const { return _Py_OPARG(*pointer); }
 
-    auto fullOparg(const PyInstrPointer &instr_begin) const {
+    auto oparg(const PyInstrPointer &instr_begin) const {
         auto p = pointer;
         auto arg = _Py_OPARG(*p);
         unsigned shift = 0;
@@ -256,33 +272,8 @@ public:
         return arg;
     }
 
-    auto operator*() const { return std::pair{opcode(), oparg()}; }
-
-    auto &operator++() {
-        ++pointer;
-        return *this;
-    }
-
-    auto &operator--() {
-        --pointer;
-        return *this;
-    }
-
-    auto operator++(int) { return PyInstrPointer(pointer++); }
-
-    auto operator--(int) { return PyInstrPointer(pointer--); }
-
-    auto operator<=>(const PyInstrPointer &other) const { return pointer <=> other.pointer; }
-
-    auto operator==(const PyInstrPointer &other) const { return pointer == other.pointer; }
 
     auto operator+(ptrdiff_t offset) const { return PyInstrPointer{pointer + offset}; }
-
-    auto operator-(ptrdiff_t offset) const { return *this + (-offset); }
-
-    auto operator-(const PyInstrPointer &other) const { return pointer - other.pointer; }
-
-    auto operator[](ptrdiff_t offset) const { return *(*this + offset); }
 };
 
 // TODO: N-dim动态数组
