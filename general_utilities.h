@@ -10,10 +10,10 @@
 
 #ifdef NDEBUG
 constexpr auto debug_build = false;
-#define FOR_DEBUG(X)
+#define IF_DEBUG(...)
 #else
 constexpr auto debug_build = true;
-#define FOR_DEBUG(X) X
+#define IF_DEBUG(...) __VA_ARGS__
 #endif
 
 struct PyObjectRef {
@@ -100,7 +100,7 @@ public:
 template <typename T>
 class DynamicArray {
     T *data{};
-    FOR_DEBUG(size_t array_size;)
+    IF_DEBUG(size_t array_size;)
 
 public:
     DynamicArray() = default;
@@ -120,7 +120,7 @@ public:
     void reserve(size_t size) {
         assert(!data);
         data = new T[size];
-        FOR_DEBUG(array_size = size;)
+        IF_DEBUG(array_size = size;)
     }
 
     T &operator*() { return data[0]; }

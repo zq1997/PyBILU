@@ -69,7 +69,9 @@ void CompileUnit::emitBlock(unsigned index) {
     const PyInstrPointer py_instr{py_code};
     PyOparg extended_oparg = 0;
 
-    for (auto vpc = this_block.start; vpc != blocks[index + 1].start; vpc++) {
+    auto end = index < block_num - 1 ? blocks[index + 1].start :
+            PyBytes_GET_SIZE(py_code->co_code) / sizeof(_Py_CODEUNIT);
+    for (auto vpc : IntRange(this_block.start, end)) {
         // 注意stack_height记录于此，这就意味着在调用”风险函数“之前不允许DECREF，否则可能DEC两次
         storeValue<decltype(PyFrameObject::f_lasti)>(asValue(vpc), rt_lasti, context.tbaa_frame_value);
         vpc_to_stack_height[vpc] = stack_height;

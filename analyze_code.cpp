@@ -83,9 +83,8 @@ void CompileUnit::parseCFG() {
     is_boundary.reset(0);
     block_num += is_boundary.set(size);
 
-    blocks.reserve(block_num + 1 + try_block_num);
-    pending_block_indices.reserve(block_num + 1 + try_block_num);
-    blocks[block_num].start = size;
+    blocks.reserve(block_num + try_block_num);
+    pending_block_indices.reserve(block_num + try_block_num);
 
     unsigned created_block_num = 0;
     unsigned start = 0;
@@ -123,7 +122,7 @@ void CompileUnit::parseCFG() {
     assert(created_block_num == block_num);
 
     auto nlocals = py_code->co_nlocals;
-    auto exception_block_index = block_num + 1;
+    auto exception_block_index = block_num;
     for (auto &b : PtrRange(&*blocks, block_num)) {
         b.locals_keep.reserve(nlocals, false);
         b.locals_set.reserve(nlocals, false);
@@ -146,7 +145,7 @@ void CompileUnit::parseCFG() {
             }
         }
     }
-    assert(exception_block_index == block_num + 1 + try_block_num);
+    assert(exception_block_index == block_num + try_block_num);
 }
 
 template <typename T>
@@ -159,7 +158,7 @@ class ReversedStack {
     static constexpr auto until_forever = numeric_limits<T>::max();
 
 public:
-    explicit ReversedStack(ssize_t size) : size{size}, stack{new T[size * 2]}, sp{stack + size} {}
+    explicit ReversedStack(ssize_t size) : size{size}, stack{new T[size * 2]} { reset(); }
 
     ~ReversedStack() noexcept { delete[] stack; }
 
@@ -215,28 +214,26 @@ void CompileUnit::analyzeRedundantLoads() {
         locals[i] = until_finally;
     }
 
-    assert(block_num >= 1);
-    auto block = &blocks[block_num];
-    for (auto index = code_instr_num;;) {
-        if (index == block->start) {
-            if (block != &blocks[block_num]) {
-                for (auto [k, s] : BitArrayChunks(py_code->co_nlocals, block->locals_keep, block->locals_set)) {
-                    s = ~s & k;
-                    k = ~k;
-                }
+    auto block = &blocks[block_num - 1];
+    for (auto timestamp = code_instr_num;;) {
+        if (timestamp == block->start) {
+            for (auto [k, s] : BitArrayChunks(py_code->co_nlocals, block->locals_keep, block->locals_set)) {
+                s = ~s & k;
+                k = ~k;
             }
-            if (!index) {
+            if (!timestamp) {
                 break;
             }
             --block;
             stack.reset();
         }
+
         auto &locals_touched = block->locals_keep;
         auto &locals_deleted = block->locals_set;
         auto &locals_ever_deleted = block->locals_ever_deleted;
 
-        stack.setTimestamp(--index);
-        auto instr = py_instr + index;
+        stack.setTimestamp(--timestamp);
+        auto instr = py_instr + timestamp;
 
         switch (instr.opcode()) {
         case EXTENDED_ARG:
@@ -291,17 +288,17 @@ void CompileUnit::analyzeRedundantLoads() {
             stack.pop(until_anytime);
             break;
         case LOAD_CONST:
-            redundant_loads.setIf(index, until_finally > stack.push());
+            redundant_loads.setIf(timestamp, until_finally > stack.push());
             break;
         case LOAD_FAST: {
             auto oparg = instr.oparg(py_instr);
-            redundant_loads.setIf(index, locals[oparg] > stack.push());
+            redundant_loads.setIf(timestamp, locals[oparg] > stack.push());
             locals_touched.set(oparg);
             break;
         }
         case STORE_FAST: {
             auto oparg = instr.oparg(py_instr);
-            locals[oparg] = index;
+            locals[oparg] = timestamp;
             stack.pop();
             locals_touched.set(oparg);
             break;
@@ -622,25 +619,18 @@ void CompileUnit::analyzeLocalsDefinition() {
             collect_deleted_locals(blocks[b.branch].locals_keep, &blocks[0], 1, ++epoch, py_code->co_nlocals, &b - &blocks[0] + 1);
         }
     }
-    // dealWithTryBlocks(block_num, &blocks[0]);
-    auto &worklist = pending_block_indices;
 
-    for (auto i : IntRange(block_num + 1, block_num + 1 + try_block_num)) {
+    PyBasicBlock *worklist_head = nullptr;
+    for (auto i : IntRange(1, block_num + try_block_num)) {
         auto &b = blocks[i];
-        b.in_worklist = true;
-        worklist.push(i);
+        b.worklist_next = worklist_head;
         b.locals_input.fill(py_code->co_nlocals, true);
+        worklist_head = &b;
     }
-    for (auto i : IntRange(1, block_num)) {
-        auto &b = blocks[i];
-        b.in_worklist = true;
-        worklist.push(i);
-        b.locals_input.fill(py_code->co_nlocals, true);
-    }
+
     blocks[0].locals_input.fill(py_code->co_nlocals);
-    blocks[0].in_worklist = true;
-    worklist.push(0);
-
+    blocks[0].worklist_next = worklist_head;
+    worklist_head = &blocks[0];
     auto nargs = py_code->co_argcount + (py_code->co_flags & CO_VARARGS)
             + py_code->co_kwonlyargcount + (py_code->co_flags & CO_VARKEYWORDS);
     for (auto i : IntRange(nargs)) {
@@ -648,6 +638,7 @@ void CompileUnit::analyzeLocalsDefinition() {
     }
 
     BitArray block_output(py_code->co_nlocals);
+    PyBasicBlock *const marked_as_not_in_worklist = &*blocks + (block_num + try_block_num);
     auto update_successor = [&](unsigned index) {
         auto &successor = blocks[index];
         bool any_update = false;
@@ -656,15 +647,16 @@ void CompileUnit::analyzeLocalsDefinition() {
             y &= x;
             any_update |= y != old_y;
         }
-        if (any_update && !successor.in_worklist) {
-            successor.in_worklist = true;
-            worklist.push(index);
+        if (any_update && successor.worklist_next == marked_as_not_in_worklist) {
+            successor.worklist_next = worklist_head;
+            worklist_head = &successor;
         }
     };
 
-    while (!worklist.empty()) {
-        auto &b = blocks[worklist.pop()];
-        b.in_worklist = false;
+    do {
+        auto &b = *worklist_head;
+        worklist_head = b.worklist_next;
+        b.worklist_next = marked_as_not_in_worklist;
         for (auto [i, o, mask, set] : BitArrayChunks(py_code->co_nlocals, b.locals_input, block_output,
                 b.locals_keep, b.locals_set)) {
             o = (i & mask) | set;
@@ -675,7 +667,7 @@ void CompileUnit::analyzeLocalsDefinition() {
         if (b.has_branch) {
             update_successor(b.branch);
         }
-    }
+    } while (worklist_head);
 
     for (auto i : IntRange(py_code->co_nlocals)) {
         fprintf(stderr, "\t%s", PyUnicode_AsUTF8(PyTuple_GET_ITEM(py_code->co_varnames, i)));

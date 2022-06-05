@@ -52,10 +52,8 @@ struct PyBasicBlock {
     llvm::BasicBlock *block;
     decltype(PyFrameObject::f_stackdepth) initial_stack_height{-1};
     bool is_handler{false};
-    union {
-        bool in_worklist;
-        bool visited{false};
-    };
+    PyBasicBlock *worklist_next;
+    bool visited{false};
     BitArray locals_keep;
     BitArray locals_set;
     union {
