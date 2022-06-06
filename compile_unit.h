@@ -51,23 +51,25 @@ struct PyBasicBlock {
     unsigned start;
     llvm::BasicBlock *block;
     decltype(PyFrameObject::f_stackdepth) initial_stack_height{-1};
-    bool is_handler{false};
-    PyBasicBlock *worklist_next;
-    bool visited{false};
-    BitArray locals_keep;
+    PyBasicBlock *worklist_prev;
+    BitArray locals_kept;
     BitArray locals_set;
     union {
         BitArray locals_ever_deleted{};
         BitArray locals_input;
     };
-
-    unsigned branch;
-    bool has_branch{false};
+    union {
+        unsigned _branch_offset;
+        PyBasicBlock *branch_block;
+    };
+    union {
+        PyBasicBlock *visited_eh_block{nullptr};
+        PyBasicBlock *eh_setup_block;
+    };
     bool fall_through{false};
-    bool try_block_enter{false};
-    bool try_block_exit{false};
-    unsigned try_block_epoch{0};
-    // static constexpr auto branch_none = std::numeric_limits<decltype(branch)>::max();
+    bool eh_body_enter{false};
+    bool eh_body_exit{false};
+    bool is_handler{false};
 
     PyBasicBlock() {};
     PyBasicBlock(const PyBasicBlock &) = delete;
@@ -75,6 +77,8 @@ struct PyBasicBlock {
     ~PyBasicBlock() {
         locals_input.~BitArray();
     }
+
+    PyBasicBlock &next() { return this[1]; }
 };
 
 class DebugInfoBuilder {
@@ -118,7 +122,8 @@ class CompileUnit {
     PyCodeObject *py_code;
     unsigned block_num{0};
     unsigned try_block_num{0};
-    LimitedStack<unsigned> pending_block_indices{};
+    PyBasicBlock *worklist_head;
+    // LimitedStack<unsigned> pending_block_indices{};
     DynamicArray<PyBasicBlock> blocks{};
     BitArray redundant_loads{};
 
@@ -135,7 +140,7 @@ class CompileUnit {
     void analyzeRedundantLoads();
     void analyzeLocalsDefinition();
     void translate();
-    void emitBlock(unsigned index);
+    void emitBlock(PyBasicBlock &this_block);
     void emitRotN(PyOparg n);
 
     llvm::Value *do_GETLOCAL(PyOparg oparg);
@@ -188,9 +193,9 @@ class CompileUnit {
 
     void do_Py_XDECREF(llvm::Value *v);
 
-    void pyJumpIF(unsigned offset, bool pop_if_jump, bool jump_cond);
+    void pyJumpIF(PyBasicBlock &current, bool pop_if_jump, bool jump_cond);
     unsigned findPyBlock(unsigned instr_offset);
-    PyBasicBlock &findPyBlock(unsigned instr_offset, decltype(stack_height) initial_stack_height);
+    PyBasicBlock &makeBranch(PyBasicBlock &current, unsigned initial_stack_height);
     llvm::Value *getSymbol(size_t offset);
 
     template <typename T>

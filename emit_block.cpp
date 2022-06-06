@@ -51,9 +51,7 @@ void CompileUnit::emitRotN(PyOparg n) {
     }
 }
 
-
-void CompileUnit::emitBlock(unsigned index) {
-    auto &this_block = blocks[index];
+void CompileUnit::emitBlock(PyBasicBlock &this_block) {
     this_block.block->insertInto(function);
     builder.SetInsertPoint(this_block.block);
 
@@ -64,12 +62,10 @@ void CompileUnit::emitBlock(unsigned index) {
                 = {loadValue<PyObject *>(getStackSlot(i), context.tbaa_frame_value), true};
     }
 
-    bool fall_through = true;
-
     const PyInstrPointer py_instr{py_code};
     PyOparg extended_oparg = 0;
 
-    auto end = index < block_num - 1 ? blocks[index + 1].start :
+    auto end = (&this_block - &*blocks) < block_num - 1 ? this_block.next().start :
             PyBytes_GET_SIZE(py_code->co_code) / sizeof(_Py_CODEUNIT);
     for (auto vpc : IntRange(this_block.start, end)) {
         // 注意stack_height记录于此，这就意味着在调用”风险函数“之前不允许DECREF，否则可能DEC两次
@@ -459,7 +455,6 @@ void CompileUnit::emitBlock(unsigned index) {
             auto retval = fetchStackValue(1);
             do_Py_INCREF(retval);
             builder.CreateRet(retval);
-            fall_through = false;
             break;
         }
         case CALL_FUNCTION: {
@@ -565,32 +560,27 @@ void CompileUnit::emitBlock(unsigned index) {
         }
 
         case JUMP_FORWARD: {
-            auto &jmp_block = findPyBlock(vpc + 1 + oparg, stack_height);
-            builder.CreateBr(jmp_block.block);
-            fall_through = false;
+            builder.CreateBr(makeBranch(this_block, stack_height).block);
             break;
         }
         case JUMP_ABSOLUTE: {
-            // TODO: 如果有，则不要设置，要校验
-            auto &jmp_block = findPyBlock(oparg, stack_height);
-            builder.CreateBr(jmp_block.block);
-            fall_through = false;
+            builder.CreateBr(makeBranch(this_block, stack_height).block);
             break;
         }
         case POP_JUMP_IF_TRUE: {
-            pyJumpIF(oparg, true, true);
+            pyJumpIF(this_block, true, true);
             break;
         }
         case POP_JUMP_IF_FALSE: {
-            pyJumpIF(oparg, true, false);
+            pyJumpIF(this_block, true, false);
             break;
         }
         case JUMP_IF_TRUE_OR_POP: {
-            pyJumpIF(oparg, false, true);
+            pyJumpIF(this_block, true, true);
             break;
         }
         case JUMP_IF_FALSE_OR_POP: {
-            pyJumpIF(oparg, false, false);
+            pyJumpIF(this_block, true, false);
             break;
         }
         case GET_ITER: {
@@ -611,9 +601,8 @@ void CompileUnit::emitBlock(unsigned index) {
             builder.CreateCondBr(builder.CreateICmpEQ(next, context.c_null), b_break, b_continue);
             // iteration should break
             builder.SetInsertPoint(b_break);
-            auto &break_target = findPyBlock(vpc + 1 + oparg, stack_height - 1);
             do_Py_DECREF(iter);
-            builder.CreateBr(break_target.block);
+            builder.CreateBr(makeBranch(this_block, stack_height - 1).block);
             // iteration should continue
             builder.SetInsertPoint(b_continue);
             do_PUSH(next);
@@ -782,11 +771,11 @@ void CompileUnit::emitBlock(unsigned index) {
         }
 
         case SETUP_FINALLY: {
-            auto &py_finally_block = findPyBlock(vpc + 1 + oparg, stack_height + 6);
+            auto &py_finally_block = makeBranch(this_block, stack_height + 6);
             py_finally_block.is_handler = true;
             auto block_addr_diff = builder.CreateSub(
                     builder.CreatePtrToInt(BlockAddress::get(function, py_finally_block.block), context.type<uintptr_t>()),
-                    builder.CreatePtrToInt(BlockAddress::get(function, blocks[1].block), context.type<uintptr_t>())
+                    builder.CreatePtrToInt(BlockAddress::get(function, blocks[0].block), context.type<uintptr_t>())
             );
             callSymbol<PyFrame_BlockSetup>(frame_obj,
                     asValue<int>(SETUP_FINALLY),
@@ -808,22 +797,20 @@ void CompileUnit::emitBlock(unsigned index) {
             auto match = callSymbol<handle_JUMP_IF_NOT_EXC_MATCH>(left, right);
             do_Py_DECREF(left);
             do_Py_DECREF(right);
-            auto &jump_target = findPyBlock(oparg, stack_height);
-            builder.CreateCondBr(match, blocks[index + 1].block, jump_target.block);
+            builder.CreateCondBr(match, this_block.next().block, makeBranch(this_block, stack_height).block);
             break;
         }
         case RERAISE: {
             callSymbol<handle_RERAISE, &Context::attr_noreturn>(frame_obj, asValue<bool>(oparg));
             builder.CreateUnreachable();
-            fall_through = false;
             break;
         }
         case SETUP_WITH: {
-            auto &py_finally_block = findPyBlock(vpc + 1 + oparg, stack_height - 1 + 7);
+            auto &py_finally_block = makeBranch(this_block, stack_height - 1 + 7);
             py_finally_block.is_handler = true;
             auto block_addr_diff = builder.CreateSub(
                     builder.CreatePtrToInt(BlockAddress::get(function, py_finally_block.block), context.type<uintptr_t>()),
-                    builder.CreatePtrToInt(BlockAddress::get(function, blocks[1].block), context.type<uintptr_t>())
+                    builder.CreatePtrToInt(BlockAddress::get(function, blocks[0].block), context.type<uintptr_t>())
             );
             callSymbol<handle_SETUP_WITH>(frame_obj, getStackSlot(),
                     builder.CreateIntCast(block_addr_diff, context.type<int>(), true));
@@ -884,13 +871,15 @@ void CompileUnit::emitBlock(unsigned index) {
             throw runtime_error("unexpected opcode");
         }
     }
-    if (fall_through) {
-        assert(!builder.GetInsertBlock()->getTerminator());
-        builder.CreateBr(blocks[index + 1].block);
-        if (!blocks[index + 1].visited) {
-            blocks[index + 1].visited = true;
-            pending_block_indices.push(index + 1);
-            blocks[index + 1].initial_stack_height = stack_height;
+    if (this_block.fall_through) {
+        auto fall_block = &this_block.next();
+        if (!builder.GetInsertBlock()->getTerminator()) {
+            builder.CreateBr(fall_block->block);
+        }
+        if (fall_block->worklist_prev == fall_block) {
+            fall_block->worklist_prev = worklist_head;
+            worklist_head = fall_block;
+            fall_block->initial_stack_height = stack_height;
         }
     }
 }

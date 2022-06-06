@@ -49,14 +49,14 @@ inline PyObjectRef callDebugHelperFunction(const char *callee_name, const auto &
     return PyObject_Vectorcall(py_callee, &py_args[1], sizeof...(args) | PY_VECTORCALL_ARGUMENTS_OFFSET, nullptr);
 }
 
-template <typename T, auto DerefFunc>
+template <typename T, auto DerefFunc, auto Delta = 1>
 class RangeIterator {
     T i;
 public:
     explicit RangeIterator(T i) : i{i} {}
 
     auto &operator++() {
-        ++i;
+        i += Delta;
         return *this;
     }
 
@@ -130,6 +130,11 @@ public:
         return data[index];
     }
 
+    T *getPointer(size_t index = 0) {
+        assert(index <= array_size);
+        return data + index;
+    }
+
     const auto &operator[](size_t index) const { return data[index]; }
 };
 
@@ -163,11 +168,10 @@ public:
 class BitArray : public DynamicArray<uintmax_t> {
 public:
     using ChunkType = uintmax_t;
+    static constexpr auto bits_per_chunk = CHAR_BIT * sizeof(ChunkType);
     using Parent = DynamicArray<ChunkType>;
 
-    static constexpr auto BitsPerValue = CHAR_BIT * sizeof(ChunkType);
-
-    static auto chunkNumber(size_t size) { return size / BitsPerValue + !!(size % BitsPerValue); }
+    static auto chunkNumber(size_t size) { return size / bits_per_chunk + !!(size % bits_per_chunk); }
 
     BitArray() = default;
 
@@ -186,20 +190,20 @@ public:
 
     bool set(size_t index) {
         auto old = get(index);
-        getChunk(index / BitsPerValue) |= ChunkType{1} << index % BitsPerValue;
+        getChunk(index / bits_per_chunk) |= ChunkType{1} << index % bits_per_chunk;
         return !old;
     }
 
     void reset(size_t index) {
-        getChunk(index / BitsPerValue) &= ~(ChunkType{1} << index % BitsPerValue);
+        getChunk(index / bits_per_chunk) &= ~(ChunkType{1} << index % bits_per_chunk);
     }
 
     void setIf(size_t index, bool cond) {
-        getChunk(index / BitsPerValue) |= ChunkType{cond} << index % BitsPerValue;
+        getChunk(index / bits_per_chunk) |= ChunkType{cond} << index % bits_per_chunk;
     }
 
     bool get(size_t index) {
-        return getChunk(index / BitsPerValue) & (ChunkType{1} << index % BitsPerValue);
+        return getChunk(index / bits_per_chunk) & (ChunkType{1} << index % bits_per_chunk);
     }
 
     void fill(size_t size, bool fill_with = false) {

@@ -53,15 +53,16 @@ void CompileUnit::translate() {
     error_block = createBlock("raise_error");
 
     abstract_stack.reserve(py_code->co_stacksize);
-    pending_block_indices.push(0);
-    blocks[0].visited = true;
+    worklist_head = &blocks[0];
+    blocks[0].worklist_prev = nullptr;
     blocks[0].initial_stack_height = 0;
-    while (!pending_block_indices.empty()) {
-        auto index = pending_block_indices.pop();
-        abstract_stack_height = stack_height = blocks[index].initial_stack_height;
+    do {
+        auto &b = *worklist_head;
+        worklist_head = b.worklist_prev;
+        abstract_stack_height = stack_height = b.initial_stack_height;
         assert(stack_height >= 0);
-        emitBlock(index);
-    }
+        emitBlock(b);
+    } while (worklist_head);
 
     error_block->insertInto(function);
     builder.SetInsertPoint(error_block);
@@ -231,23 +232,24 @@ unsigned CompileUnit::findPyBlock(unsigned offset) {
     Py_UNREACHABLE();
 }
 
-PyBasicBlock &CompileUnit::findPyBlock(unsigned offset, decltype(stack_height) initial_stack_height) {
-    auto index = findPyBlock(offset);
-    if (!blocks[index].visited) {
-        blocks[index].visited = true;
-        pending_block_indices.push(index);
-        blocks[index].initial_stack_height = initial_stack_height;
+PyBasicBlock &CompileUnit::makeBranch(PyBasicBlock &current, unsigned initial_stack_height) {
+    auto branch = current.branch_block;
+    assert(branch);
+    if (branch == branch->worklist_prev) {
+        branch->worklist_prev = worklist_head;
+        worklist_head = branch;
+        branch->initial_stack_height = initial_stack_height;
     }
-    return blocks[index];
+    return *branch;
 }
 
-void CompileUnit::pyJumpIF(unsigned offset, bool pop_if_jump, bool jump_cond) {
+void CompileUnit::pyJumpIF(PyBasicBlock &current, bool pop_if_jump, bool jump_cond) {
     auto fall_block = appendBlock("");
-    auto &jump_target = findPyBlock(offset, stack_height - pop_if_jump);
+    auto branch_block = makeBranch(current, stack_height - pop_if_jump).block;
 
     auto false_cmp_block = appendBlock("");
     auto slow_cmp_block = appendBlock("");
-    auto jump_block = pop_if_jump ? appendBlock("") : jump_target.block;
+    auto jump_block = pop_if_jump ? appendBlock("") : branch_block;
     auto true_block = jump_cond ? jump_block : fall_block;
     auto false_block = jump_cond ? fall_block : jump_block;
 
@@ -262,7 +264,7 @@ void CompileUnit::pyJumpIF(unsigned offset, bool pop_if_jump, bool jump_cond) {
     if (pop_if_jump) {
         builder.SetInsertPoint(jump_block);
         do_Py_DECREF(obj);
-        builder.CreateBr(jump_target.block);
+        builder.CreateBr(branch_block);
     }
     builder.SetInsertPoint(fall_block);
     do_Py_DECREF(obj);

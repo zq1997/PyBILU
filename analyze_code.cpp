@@ -54,15 +54,15 @@ constexpr bool isTryBlockSetup(int opcode) {
 }
 
 void CompileUnit::parseCFG() {
-    auto size = PyBytes_GET_SIZE(py_code->co_code) / sizeof(_Py_CODEUNIT);
-    vpc_to_stack_height.reserve(size);
-    redundant_loads.reserve(size, false);
+    auto py_instr_num = PyBytes_GET_SIZE(py_code->co_code) / sizeof(_Py_CODEUNIT);
+    vpc_to_stack_height.reserve(py_instr_num);
+    redundant_loads.reserve(py_instr_num, false);
 
-    BitArray is_boundary(size + 1);
+    BitArray is_boundary(py_instr_num + 1);
     block_num = 0;
 
     const PyInstrPointer py_instr{py_code};
-    for (auto vpc : IntRange(size)) {
+    for (auto vpc : IntRange(py_instr_num)) {
         auto instr = py_instr + vpc;
         auto opcode = instr.opcode();
         if (opcode == POP_BLOCK) {
@@ -81,18 +81,18 @@ void CompileUnit::parseCFG() {
 
     block_num -= is_boundary.get(0);
     is_boundary.reset(0);
-    block_num += is_boundary.set(size);
+    block_num += is_boundary.set(py_instr_num);
 
     blocks.reserve(block_num + try_block_num);
-    pending_block_indices.reserve(block_num + try_block_num);
+    // pending_block_indices.reserve(block_num + try_block_num);
 
     unsigned created_block_num = 0;
     unsigned start = 0;
-    for (auto i : IntRange(BitArray::chunkNumber(size + 1))) {
+    for (auto i : IntRange(BitArray::chunkNumber(py_instr_num + 1))) {
         unsigned j = 0;
         for (auto bits = is_boundary.getChunk(i); bits; bits >>= 1) {
             if (bits & 1) {
-                auto end = i * BitArray::BitsPerValue + j;
+                auto end = i * BitArray::bits_per_chunk + j;
                 auto &b = blocks[created_block_num++];
                 b.start = start;
                 b.block = createBlock(useName("block_for_instr_.", start));
@@ -100,19 +100,21 @@ void CompileUnit::parseCFG() {
                 auto opcode = tail_instr.opcode();
                 if (opcode == POP_BLOCK) {
                     b.fall_through = true;
-                    b.has_branch = false;
-                    b.try_block_enter = false;
-                    b.try_block_exit = true;
+                    b._branch_offset = py_instr_num;
+                    b.eh_body_enter = false;
+                    b.eh_body_exit = true;
                 } else {
                     b.fall_through = !isTerminator(opcode);
                     auto is_try_setup = isTryBlockSetup(opcode);
                     auto is_rel_jmp = isRelativeJump(opcode);
                     auto is_abs_jmp = isAbsoluteJmp(opcode);
-                    if ((b.has_branch = is_try_setup || is_rel_jmp || is_abs_jmp)) {
-                        b.branch = tail_instr.oparg(py_instr) + (is_abs_jmp ? 0 : end);
+                    if (is_try_setup || is_rel_jmp || is_abs_jmp) {
+                        b._branch_offset = tail_instr.oparg(py_instr) + (is_abs_jmp ? 0 : end);
+                    } else {
+                        b._branch_offset = py_instr_num;
                     }
-                    b.try_block_enter = is_try_setup;
-                    b.try_block_exit = false;
+                    b.eh_body_enter = is_try_setup;
+                    b.eh_body_exit = false;
                 }
                 start = end;
             }
@@ -124,25 +126,26 @@ void CompileUnit::parseCFG() {
     auto nlocals = py_code->co_nlocals;
     auto exception_block_index = block_num;
     for (auto &b : PtrRange(&*blocks, block_num)) {
-        b.locals_keep.reserve(nlocals, false);
+        b.locals_kept.reserve(nlocals, false);
         b.locals_set.reserve(nlocals, false);
         b.locals_ever_deleted.reserve(nlocals, false);
-        if (b.has_branch) {
-            auto branch = findPyBlock(b.branch);
-            if (b.try_block_enter) {
-                b.branch = exception_block_index++;
-                auto &eb = blocks[b.branch];
-                eb.has_branch = true;
+        if (b._branch_offset != py_instr_num) {
+            auto branch_block = &blocks[findPyBlock(b._branch_offset)];
+            if (b.eh_body_enter) {
+                auto &eb = *(b.branch_block = &blocks[exception_block_index++]);
                 eb.fall_through = false;
-                eb.try_block_enter = false;
-                eb.try_block_exit = false;
-                eb.branch = branch;
-                eb.locals_keep.reserve(nlocals, true);
+                eb.eh_body_enter = false;
+                eb.eh_body_exit = false;
+                eb.locals_kept.reserve(nlocals, true);
                 eb.locals_set.reserve(nlocals, false);
                 eb.locals_ever_deleted.reserve(nlocals, false);
+                eb.branch_block = branch_block;
+                eb.eh_setup_block = &b;
             } else {
-                b.branch = branch;
+                b.branch_block = branch_block;
             }
+        } else {
+            b.branch_block = nullptr;
         }
     }
     assert(exception_block_index == block_num + try_block_num);
@@ -217,7 +220,7 @@ void CompileUnit::analyzeRedundantLoads() {
     auto block = &blocks[block_num - 1];
     for (auto timestamp = code_instr_num;;) {
         if (timestamp == block->start) {
-            for (auto [k, s] : BitArrayChunks(py_code->co_nlocals, block->locals_keep, block->locals_set)) {
+            for (auto [k, s] : BitArrayChunks(py_code->co_nlocals, block->locals_kept, block->locals_set)) {
                 s = ~s & k;
                 k = ~k;
             }
@@ -228,7 +231,7 @@ void CompileUnit::analyzeRedundantLoads() {
             stack.reset();
         }
 
-        auto &locals_touched = block->locals_keep;
+        auto &locals_touched = block->locals_kept;
         auto &locals_deleted = block->locals_set;
         auto &locals_ever_deleted = block->locals_ever_deleted;
 
@@ -583,103 +586,85 @@ void CompileUnit::analyzeRedundantLoads() {
     }
 }
 
-void collect_deleted_locals(BitArray &keep, PyBasicBlock blocks[], unsigned nested_try_depth, unsigned epoch, unsigned nlocals, unsigned i_b) {
-    auto &b = blocks[i_b];
-    if (b.try_block_epoch >= epoch) {
+void analyzeEHBlock(PyBasicBlock &eb, unsigned nlocals, unsigned nesting_depth, PyBasicBlock &b) {
+    if (b.visited_eh_block == &eb) {
         return;
     }
-    b.try_block_epoch = epoch;
-    for (auto [k, d] : BitArrayChunks(nlocals, keep, b.locals_ever_deleted)) {
-        k &= ~d;
+    b.visited_eh_block = &eb;
+    for (auto [kept, deleted] : BitArrayChunks(nlocals, eb.locals_kept, b.locals_ever_deleted)) {
+        kept &= ~deleted;
     }
-    if (b.try_block_enter) {
-        collect_deleted_locals(keep, blocks, nested_try_depth + 1, epoch, nlocals, i_b + 1);
-        collect_deleted_locals(keep, blocks, nested_try_depth + 1, epoch, nlocals, blocks[b.branch].branch);
-        return;
+    if (b.branch_block) {
+        auto branch_block = b.eh_body_enter ? b.branch_block->branch_block : b.branch_block;
+        analyzeEHBlock(eb, nlocals, nesting_depth, *branch_block);
     }
-    if (b.try_block_exit) {
-        if (nested_try_depth == 1) {
-            return;
-        }
-        collect_deleted_locals(keep, blocks, nested_try_depth - 1, epoch, nlocals, i_b + 1);
-        return;
-    }
-    if (b.has_branch) {
-        collect_deleted_locals(keep, blocks, nested_try_depth, epoch, nlocals, b.branch);
-    }
-    if (b.fall_through) {
-        collect_deleted_locals(keep, blocks, nested_try_depth, epoch, nlocals, i_b + 1);
+    nesting_depth = nesting_depth + b.eh_body_enter - b.eh_body_exit;
+    if (b.fall_through && nesting_depth) {
+        analyzeEHBlock(eb, nlocals, nesting_depth, b.next());
     }
 }
 
 void CompileUnit::analyzeLocalsDefinition() {
-    unsigned epoch = 0;
-    for (auto &b : PtrRange(&blocks[0], block_num)) {
-        if (b.try_block_enter) {
-            collect_deleted_locals(blocks[b.branch].locals_keep, &blocks[0], 1, ++epoch, py_code->co_nlocals, &b - &blocks[0] + 1);
-        }
+    const auto nlocals = py_code->co_nlocals;
+
+    for (auto &eb : PtrRange(&blocks[block_num], try_block_num)) {
+        analyzeEHBlock(eb, nlocals, 1, eb.eh_setup_block->next());
     }
 
     PyBasicBlock *worklist_head = nullptr;
-    for (auto i : IntRange(1, block_num + try_block_num)) {
-        auto &b = blocks[i];
-        b.worklist_next = worklist_head;
-        b.locals_input.fill(py_code->co_nlocals, true);
-        worklist_head = &b;
+    auto &first_block = blocks[0];
+    for (auto b = blocks.getPointer(block_num + try_block_num); b-- != &first_block;) {
+        b->worklist_prev = worklist_head;
+        b->locals_input.fill(nlocals, true);
+        worklist_head = b;
     }
-
-    blocks[0].locals_input.fill(py_code->co_nlocals);
-    blocks[0].worklist_next = worklist_head;
-    worklist_head = &blocks[0];
     auto nargs = py_code->co_argcount + (py_code->co_flags & CO_VARARGS)
             + py_code->co_kwonlyargcount + (py_code->co_flags & CO_VARKEYWORDS);
-    for (auto i : IntRange(nargs)) {
-        blocks[0].locals_input.set(i);
+    for (auto [chunk] : BitArrayChunks(nlocals, first_block.locals_input)) {
+        chunk &= (BitArray::ChunkType{1} << nargs) - 1U;
+        nargs = nargs > BitArray::bits_per_chunk ? nargs - BitArray::bits_per_chunk : 0;
     }
 
-    BitArray block_output(py_code->co_nlocals);
-    PyBasicBlock *const marked_as_not_in_worklist = &*blocks + (block_num + try_block_num);
-    auto update_successor = [&](unsigned index) {
-        auto &successor = blocks[index];
-        bool any_update = false;
-        for (auto [x, y] : BitArrayChunks(py_code->co_nlocals, block_output, successor.locals_input)) {
-            auto old_y = y;
-            y &= x;
-            any_update |= y != old_y;
-        }
-        if (any_update && successor.worklist_next == marked_as_not_in_worklist) {
-            successor.worklist_next = worklist_head;
-            worklist_head = &successor;
-        }
-    };
+    BitArray block_output(nlocals);
 
     do {
         auto &b = *worklist_head;
-        worklist_head = b.worklist_next;
-        b.worklist_next = marked_as_not_in_worklist;
-        for (auto [i, o, mask, set] : BitArrayChunks(py_code->co_nlocals, b.locals_input, block_output,
-                b.locals_keep, b.locals_set)) {
-            o = (i & mask) | set;
+        worklist_head = b.worklist_prev;
+        b.worklist_prev = &b; // mark it as not in worklist by pointing to self
+        for (auto [input, output, kept, set] : BitArrayChunks(nlocals,
+                b.locals_input, block_output, b.locals_kept, b.locals_set)) {
+            output = (input & kept) | set;
         }
-        if (b.fall_through) {
-            update_successor(&b - &*blocks + 1);
-        }
-        if (b.has_branch) {
-            update_successor(b.branch);
+
+        for (auto successor : {b.branch_block, b.fall_through ? &b.next() : nullptr}) {
+            if (successor) {
+                bool any_update = false;
+                for (auto [x, y] : BitArrayChunks(nlocals, block_output, successor->locals_input)) {
+                    auto old_y = y;
+                    y &= x;
+                    any_update |= y != old_y;
+                }
+                if (any_update && successor->worklist_prev == successor) {
+                    successor->worklist_prev = worklist_head;
+                    worklist_head = successor;
+                }
+            }
         }
     } while (worklist_head);
 
-    for (auto i : IntRange(py_code->co_nlocals)) {
+    for (auto i : IntRange(nlocals)) {
         fprintf(stderr, "\t%s", PyUnicode_AsUTF8(PyTuple_GET_ITEM(py_code->co_varnames, i)));
     }
     for (auto &b : PtrRange(&blocks[0], block_num)) {
-        if (b.try_block_enter) {
-            b.branch = blocks[b.branch].branch;
-        }
         fprintf(stderr, "\n%u", b.start);
-        for (auto i : IntRange(py_code->co_nlocals)) {
+        for (auto i : IntRange(nlocals)) {
             fprintf(stderr, b.locals_input.get(i) ? "\to" : "\tx");
         }
     }
     fprintf(stderr, "\n");
+
+    for (auto &b : PtrRange(&blocks[block_num], try_block_num)) {
+        assert(b.eh_setup_block->branch_block == &b);
+        b.eh_setup_block->branch_block = b.branch_block;
+    }
 }
