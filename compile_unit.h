@@ -50,7 +50,7 @@ auto useName(const T &arg, const Ts &... more) {
 struct PyBasicBlock {
     unsigned end_index;
     llvm::BasicBlock *block;
-    PyBasicBlock *worklist_prev;
+    PyBasicBlock *worklist_link;
     BitArray locals_kept;
     BitArray locals_set;
     union {
@@ -129,7 +129,13 @@ class CompileUnit {
 
     decltype(PyFrameObject::f_stackdepth) stack_height;
     DynamicArray<decltype(stack_height)> vpc_to_stack_height{};
-    DynamicArray<std::pair<llvm::Value *, bool>> abstract_stack{};
+
+    struct StackValue {
+        llvm::Value *value;
+        bool really_pushed;
+    };
+
+    DynamicArray<StackValue> abstract_stack{};
     decltype(stack_height) abstract_stack_height;
 
     [[no_unique_address]] std::conditional_t<debug_build, DebugInfoBuilder, NullDebugInfoBuilder> di_builder;
@@ -150,11 +156,8 @@ class CompileUnit {
     llvm::Value *getStackSlot(int i = 0);
     void do_PUSH(llvm::Value *value, bool really_pushed = true);
 
-    struct FetchedStackValue {
-        llvm::Value *const value;
-        const bool really_pushed;
-
-        FetchedStackValue(llvm::Value *value, bool really_pushed) : value{value}, really_pushed{really_pushed} {}
+    struct FetchedStackValue : public StackValue {
+        explicit FetchedStackValue(const StackValue &v) : StackValue{v} {}
 
         FetchedStackValue(const FetchedStackValue &) = delete;
 
@@ -163,18 +166,16 @@ class CompileUnit {
 
     FetchedStackValue fetchStackValue(int i);
 
-    struct PoppedStackValue {
-        llvm::Value *const value;
-        const bool really_pushed;
+    struct PoppedStackValue : public StackValue {
         IF_DEBUG(bool has_decref{false};)
 
-        PoppedStackValue(llvm::Value *value, bool really_pushed) : value{value}, really_pushed{really_pushed} {}
+        explicit PoppedStackValue(const StackValue &v) : StackValue{v} {}
 
         PoppedStackValue(const PoppedStackValue &) = delete;
 
-        operator llvm::Value *() { return value; }
-
         ~PoppedStackValue() { assert(has_decref); }
+
+        operator llvm::Value *() { return value; }
     };
 
     PoppedStackValue do_POP();
@@ -183,7 +184,7 @@ class CompileUnit {
 
     llvm::Value *do_POP_N(PyOparg n) {
         for (auto i : IntRange(n)) {
-            assert(abstract_stack[abstract_stack_height - 1 - i].first);
+            assert(abstract_stack[abstract_stack_height - 1 - i].really_pushed);
         }
         abstract_stack_height -= n;
         stack_height -= n;
@@ -275,7 +276,7 @@ class CompileUnit {
     llvm::CallInst *callSymbol(auto &&... args) {
         auto type = context.type<std::remove_reference_t<decltype(Symbol)>>();
         auto callee = getSymbol(searchSymbol<Symbol>());
-        auto call = callFunction<Attr>(type, callee, args...);
+        auto call = callFunction<Attr>(type, callee, static_cast<llvm::Value *>(args)...);
         if constexpr (Attr == &Context::attr_refcnt_call) {
             call->setCallingConv(llvm::CallingConv::PreserveMost);
         }

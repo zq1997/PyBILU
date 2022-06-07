@@ -84,7 +84,7 @@ void CompileUnit::parseCFG() {
         auto instr = py_instr + vpc;
         auto opcode = instr.opcode();
         if (opcode == POP_BLOCK) {
-            block_num += is_boundary.set(vpc + 1);
+            block_num += is_boundary.checkAndSet(vpc + 1);
         } else {
             auto is_try_setup = isTryBlockSetup(opcode);
             auto is_rel_jmp = isRelativeJump(opcode);
@@ -92,14 +92,15 @@ void CompileUnit::parseCFG() {
             try_block_num += is_try_setup;
             if (is_try_setup || is_rel_jmp || is_abs_jmp) {
                 auto dest = instr.oparg(py_instr) + (is_abs_jmp ? 0 : vpc + 1);
-                block_num += is_boundary.set(dest) + (!isTerminator(opcode) && is_boundary.set(vpc + 1));
+                block_num += is_boundary.checkAndSet(dest);
+                block_num += !isTerminator(opcode) && is_boundary.checkAndSet(vpc + 1);
             }
         }
     }
 
+    block_num += is_boundary.checkAndSet(py_instr_num);
     block_num -= is_boundary.get(0);
     is_boundary.reset(0);
-    block_num += is_boundary.set(py_instr_num);
 
     blocks.reserve(block_num + try_block_num);
 
@@ -117,7 +118,6 @@ void CompileUnit::parseCFG() {
                 if (opcode == POP_BLOCK) {
                     b.fall_through = true;
                     b._branch_offset = py_instr_num;
-                    b.eh_body_enter = false;
                     b.eh_body_exit = true;
                 } else {
                     b.fall_through = !isTerminator(opcode);
@@ -130,7 +130,6 @@ void CompileUnit::parseCFG() {
                         b._branch_offset = py_instr_num;
                     }
                     b.eh_body_enter = is_try_setup;
-                    b.eh_body_exit = false;
                 }
                 start_index = b.end_index;
             }
@@ -139,6 +138,7 @@ void CompileUnit::parseCFG() {
     }
     assert(created_block_num == block_num);
 
+    blocks[0].is_handler = true;
     auto nlocals = py_code->co_nlocals;
     auto exception_block_index = block_num;
     for (auto &b : PtrRange(&*blocks, block_num)) {
@@ -148,10 +148,8 @@ void CompileUnit::parseCFG() {
         if (b._branch_offset != py_instr_num) {
             auto branch_block = findPyBlock(blocks.getPointer(), block_num, b._branch_offset);
             if (b.eh_body_enter) {
+                branch_block->is_handler = true;
                 auto &eb = *(b.branch = &blocks[exception_block_index++]);
-                eb.fall_through = false;
-                eb.eh_body_enter = false;
-                eb.eh_body_exit = false;
                 eb.locals_kept.reserve(nlocals, true);
                 eb.locals_set.reserve(nlocals, false);
                 eb.locals_ever_deleted.reserve(nlocals, false);
@@ -220,18 +218,16 @@ public:
 };
 
 
-// TODO： 或许这里可以顺便分析出delta_stack_height，后面可以直接利用
 void CompileUnit::doIntraBlockAnalysis() {
     ReversedStack<unsigned> stack(py_code->co_stacksize);
 
     const PyInstrPointer py_instr{py_code};
-    unsigned code_instr_num = PyBytes_GET_SIZE(py_code->co_code) / sizeof(_Py_CODEUNIT);
-    const auto until_finally = code_instr_num;
-    constexpr decltype(until_finally) until_anytime = 0;
+    unsigned code_instr_num = blocks[block_num - 1].end_index;
+    constexpr unsigned until_anytime = 0;
 
     DynamicArray<unsigned> locals(py_code->co_nlocals);
     for (auto i : IntRange(py_code->co_nlocals)) {
-        locals[i] = until_finally;
+        locals[i] = code_instr_num;
     }
 
     auto block = &blocks[block_num - 1];
@@ -311,7 +307,7 @@ void CompileUnit::doIntraBlockAnalysis() {
             stack.pop(until_anytime);
             break;
         case LOAD_CONST:
-            redundant_loads.setIf(vpc, until_finally > stack.push());
+            redundant_loads.setIf(vpc, code_instr_num > stack.push());
             break;
         case LOAD_FAST: {
             auto oparg = instr.oparg(py_instr);
@@ -648,7 +644,7 @@ void CompileUnit::doInterBlockAnalysis() {
     PyBasicBlock *worklist_head = nullptr;
     auto &first_block = blocks[0];
     for (auto b = blocks.getPointer(block_num + try_block_num); b-- != &first_block;) {
-        b->worklist_prev = worklist_head;
+        b->worklist_link = worklist_head;
         b->locals_input.fill(nlocals, true);
         worklist_head = b;
     }
@@ -663,8 +659,8 @@ void CompileUnit::doInterBlockAnalysis() {
 
     do {
         auto &b = *worklist_head;
-        worklist_head = b.worklist_prev;
-        b.worklist_prev = &b; // mark it as not in worklist by pointing to self
+        worklist_head = b.worklist_link;
+        b.worklist_link = &b; // mark it as not in worklist by pointing to self
         for (auto [input, output, kept, set] : BitArrayChunks(nlocals,
                 b.locals_input, block_output, b.locals_kept, b.locals_set)) {
             output = (input & kept) | set;
@@ -678,8 +674,8 @@ void CompileUnit::doInterBlockAnalysis() {
                     y &= x;
                     any_update |= y != old_y;
                 }
-                if (any_update && successor->worklist_prev == successor) {
-                    successor->worklist_prev = worklist_head;
+                if (any_update && successor->worklist_link == successor) {
+                    successor->worklist_link = worklist_head;
                     worklist_head = successor;
                 }
             }
@@ -695,8 +691,8 @@ void CompileUnit::doInterBlockAnalysis() {
     worklist_head->initial_stack_height = 0;
     do {
         auto &b = *worklist_head;
-        worklist_head = b.worklist_prev;
-        b.worklist_prev = nullptr; // mark it as visited by pointing to nullptr
+        worklist_head = b.worklist_link;
+        b.worklist_link = nullptr; // mark it as visited by pointing to nullptr
 
         for (auto [successor, difference] : std::initializer_list<std::tuple<PyBasicBlock *, int>>{
                 {b.branch, b.branch_stack_difference},
@@ -705,9 +701,9 @@ void CompileUnit::doInterBlockAnalysis() {
             if (successor) {
                 auto height = b.initial_stack_height + b.stack_effect + difference;
                 assert(0 <= height && height <= py_code->co_stacksize);
-                if (successor->worklist_prev == successor) {
+                if (successor->worklist_link == successor) {
                     successor->initial_stack_height = height;
-                    successor->worklist_prev = worklist_head;
+                    successor->worklist_link = worklist_head;
                     worklist_head = successor;
                 } else {
                     assert(successor->initial_stack_height == height);

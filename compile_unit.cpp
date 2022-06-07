@@ -68,7 +68,6 @@ void CompileUnit::translate() {
     auto indirect_br = builder.CreateIndirectBr(
             builder.CreateInBoundsGEP(context.type<char>(), BlockAddress::get(blocks[0].block),
                     function->getArg(2)));
-    blocks[0].is_handler = true;
     for (auto &b : PtrRange(&*blocks, block_num)) {
         if (b.is_handler) {
             indirect_br->addDestination(b.block);
@@ -147,24 +146,22 @@ Value *CompileUnit::getStackSlot(int i) {
 }
 
 CompileUnit::FetchedStackValue CompileUnit::fetchStackValue(int i) {
-    auto &v = abstract_stack[abstract_stack_height - i];
-    return {v.first, v.second};
+    return FetchedStackValue{abstract_stack[abstract_stack_height - i]};
 }
 
 CompileUnit::PoppedStackValue CompileUnit::do_POP() {
-    auto [value, really_pushed] = abstract_stack[--abstract_stack_height];
-    stack_height -= really_pushed;
-    return {value, really_pushed};
+    auto v = abstract_stack[--abstract_stack_height];
+    stack_height -= v.really_pushed;
+    return PoppedStackValue{v};
 }
 
 llvm::Value *CompileUnit::do_POPWithStolenRef() {
-    auto [value, really_pushed] = abstract_stack[--abstract_stack_height];
-    if (really_pushed) {
-        --stack_height;
-    } else {
-        do_Py_INCREF(value);
+    auto &v = abstract_stack[--abstract_stack_height];
+    stack_height -= v.really_pushed;
+    if (!v.really_pushed) {
+        do_Py_INCREF(v.value);
     }
-    return value;
+    return v.value;
 }
 
 void CompileUnit::do_PUSH(llvm::Value *value, bool really_pushed) {

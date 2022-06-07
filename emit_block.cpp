@@ -8,16 +8,15 @@ using namespace std;
 using namespace llvm;
 
 void CompileUnit::emitRotN(PyOparg n) {
-    auto [top_value, top_really_pushed] = abstract_stack[abstract_stack_height - 1];
+    auto &abs_top = abstract_stack[abstract_stack_height - 1];
     unsigned n_lift = 0;
     for (auto i : IntRange(1, n)) {
-        auto [_, really_pushed] = abstract_stack[abstract_stack_height - i]
-                = abstract_stack[abstract_stack_height - (i + 1)];
-        n_lift += really_pushed;
+        auto v = abstract_stack[abstract_stack_height - i] = abstract_stack[abstract_stack_height - (i + 1)];
+        n_lift += v.really_pushed;
     }
-    abstract_stack[abstract_stack_height - n] = {top_value, top_really_pushed};
+    abstract_stack[abstract_stack_height - n] = abs_top;
 
-    if (top_really_pushed && n_lift) {
+    if (abs_top.really_pushed && n_lift) {
         auto dest_begin = getStackSlot(1);
         auto dest_end = getStackSlot(n);
         auto top = loadValue<PyObject *>(dest_begin, context.tbaa_frame_value);
@@ -102,26 +101,26 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
             break;
         }
         case DUP_TOP: {
-            auto [top, top_really_pushed] = abstract_stack[abstract_stack_height - 1];
-            abstract_stack[abstract_stack_height++] = {top, top_really_pushed};
-            if (top_really_pushed) {
-                do_Py_INCREF(top);
-                do_PUSH(top);
+            auto top = abstract_stack[abstract_stack_height - 1];
+            abstract_stack[abstract_stack_height++] = top;
+            if (top.really_pushed) {
+                do_Py_INCREF(top.value);
+                do_PUSH(top.value);
             }
             break;
         }
         case DUP_TOP_TWO: {
-            auto [second, second_really_pushed] = abstract_stack[abstract_stack_height - 2];
-            auto [top, top_really_pushed] = abstract_stack[abstract_stack_height - 1];
-            abstract_stack[abstract_stack_height++] = {second, second_really_pushed};
-            abstract_stack[abstract_stack_height++] = {top, top_really_pushed};
-            if (second_really_pushed) {
-                do_Py_INCREF(second);
-                do_PUSH(second);
+            auto second = abstract_stack[abstract_stack_height - 2];
+            auto top = abstract_stack[abstract_stack_height - 1];
+            abstract_stack[abstract_stack_height++] = second;
+            abstract_stack[abstract_stack_height++] = top;
+            if (second.really_pushed) {
+                do_Py_INCREF(second.value);
+                do_PUSH(second.value);
             }
-            if (top_really_pushed) {
-                do_Py_INCREF(top);
-                do_PUSH(top);
+            if (top.really_pushed) {
+                do_Py_INCREF(top.value);
+                do_PUSH(top.value);
             }
             break;
         }
@@ -771,7 +770,6 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
 
         case SETUP_FINALLY: {
             auto &py_finally_block = *this_block.branch;
-            py_finally_block.is_handler = true;
             auto block_addr_diff = builder.CreateSub(
                     builder.CreatePtrToInt(BlockAddress::get(function, py_finally_block.block), context.type<uintptr_t>()),
                     builder.CreatePtrToInt(BlockAddress::get(function, blocks[0].block), context.type<uintptr_t>())
@@ -807,7 +805,6 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
         }
         case SETUP_WITH: {
             auto &py_finally_block = *this_block.branch;
-            py_finally_block.is_handler = true;
             auto block_addr_diff = builder.CreateSub(
                     builder.CreatePtrToInt(BlockAddress::get(function, py_finally_block.block), context.type<uintptr_t>()),
                     builder.CreatePtrToInt(BlockAddress::get(function, blocks[0].block), context.type<uintptr_t>())

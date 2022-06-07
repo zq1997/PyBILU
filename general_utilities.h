@@ -49,29 +49,27 @@ inline PyObjectRef callDebugHelperFunction(const char *callee_name, const auto &
     return PyObject_Vectorcall(py_callee, &py_args[1], sizeof...(args) | PY_VECTORCALL_ARGUMENTS_OFFSET, nullptr);
 }
 
-template <typename T, auto DerefFunc, auto Delta = 1>
-class RangeIterator {
-    T i;
-public:
-    explicit RangeIterator(T i) : i{i} {}
-
-    auto &operator++() {
-        i += Delta;
-        return *this;
-    }
-
-    auto operator!=(const RangeIterator &o) const { return o.i != i; }
-
-    auto &operator*() const { return DerefFunc(i); }
-};
-
 template <typename T1, typename T2 = T1>
 class IntRange {
     using T = std::common_type_t<T1, T2>;
     static_assert(std::is_integral_v<T>);
     const T from;
     const T to;
-    using Iterator = RangeIterator<T, [](auto &i) -> auto & { return i; }>;
+
+    class Iterator {
+        T i;
+    public:
+        explicit Iterator(T i) : i{i} {}
+
+        auto &operator++() {
+            i += 1;
+            return *this;
+        }
+
+        auto operator!=(const Iterator &o) const { return o.i != i; }
+
+        auto &operator*() const { return i; }
+    };
 
 public:
     IntRange(T1 from, T2 to) : from(from), to(to) {}
@@ -86,9 +84,23 @@ public:
 template <typename T>
 class PtrRange {
     static_assert(std::is_pointer_v<T>);
-    using Iterator = RangeIterator<T, [](auto &i) -> auto & { return *i; }>;
     const T from;
     const T to;
+
+    class Iterator {
+        T i;
+    public:
+        explicit Iterator(T i) : i{i} {}
+
+        auto &operator++() {
+            i += 1;
+            return *this;
+        }
+
+        auto operator!=(const Iterator &o) const { return o.i != i; }
+
+        auto &operator*() const { return *i; }
+    };
 public:
     PtrRange(T base, size_t n) : from{base}, to{base + n} {}
 
@@ -188,10 +200,12 @@ public:
         fill(size, fill_with);
     }
 
-    bool set(size_t index) {
-        auto old = get(index);
-        getChunk(index / bits_per_chunk) |= ChunkType{1} << index % bits_per_chunk;
-        return !old;
+    bool checkAndSet(size_t index) {
+        auto &chunk = getChunk(index / bits_per_chunk);
+        auto tester = ChunkType{1} << index % bits_per_chunk;
+        bool newly_set = !(chunk & tester);
+        chunk |= tester;
+        return newly_set;
     }
 
     void reset(size_t index) {
@@ -200,6 +214,10 @@ public:
 
     void setIf(size_t index, bool cond) {
         getChunk(index / bits_per_chunk) |= ChunkType{cond} << index % bits_per_chunk;
+    }
+
+    void set(size_t index) {
+        setIf(index, true);
     }
 
     bool get(size_t index) {
