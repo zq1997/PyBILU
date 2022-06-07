@@ -65,9 +65,8 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
     const PyInstrPointer py_instr{py_code};
     PyOparg extended_oparg = 0;
 
-    auto end = (&this_block - &*blocks) < block_num - 1 ? this_block.next().start :
-            PyBytes_GET_SIZE(py_code->co_code) / sizeof(_Py_CODEUNIT);
-    for (auto vpc : IntRange(this_block.start, end)) {
+    auto start_index = &this_block == blocks.getPointer() ? 0 : (&this_block)[-1].end_index;
+    for (auto vpc : IntRange(start_index, this_block.end_index)) {
         // 注意stack_height记录于此，这就意味着在调用”风险函数“之前不允许DECREF，否则可能DEC两次
         storeValue<decltype(PyFrameObject::f_lasti)>(asValue(vpc), rt_lasti, context.tbaa_frame_value);
         vpc_to_stack_height[vpc] = stack_height;
@@ -560,11 +559,11 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
         }
 
         case JUMP_FORWARD: {
-            builder.CreateBr(makeBranch(this_block, stack_height).block);
+            builder.CreateBr(this_block.branch->block);
             break;
         }
         case JUMP_ABSOLUTE: {
-            builder.CreateBr(makeBranch(this_block, stack_height).block);
+            builder.CreateBr(this_block.branch->block);
             break;
         }
         case POP_JUMP_IF_TRUE: {
@@ -596,16 +595,15 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
             auto the_type = loadFieldValue(iter, &PyObject::ob_type, context.tbaa_obj_field);
             auto the_iternextfunc = loadFieldValue(the_type, &PyTypeObject::tp_iternext, context.tbaa_obj_field);
             auto next = callFunction(context.type<remove_pointer_t<iternextfunc>>(), the_iternextfunc, iter);
-            auto b_continue = appendBlock("FOR_ITER.continue");
+            do_PUSH(next);
             auto b_break = appendBlock("FOR_ITER.break");
-            builder.CreateCondBr(builder.CreateICmpEQ(next, context.c_null), b_break, b_continue);
+            builder.CreateCondBr(builder.CreateICmpEQ(next, context.c_null), b_break, this_block.next().block);
             // iteration should break
             builder.SetInsertPoint(b_break);
-            do_Py_DECREF(iter);
-            builder.CreateBr(makeBranch(this_block, stack_height - 1).block);
-            // iteration should continue
-            builder.SetInsertPoint(b_continue);
-            do_PUSH(next);
+            auto null_next = do_POP();
+            IF_DEBUG(null_next.has_decref = true;)
+            do_Py_DECREF(do_POP());
+            builder.CreateBr(this_block.branch->block);
             break;
         }
 
@@ -771,7 +769,7 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
         }
 
         case SETUP_FINALLY: {
-            auto &py_finally_block = makeBranch(this_block, stack_height + 6);
+            auto &py_finally_block = *this_block.branch;
             py_finally_block.is_handler = true;
             auto block_addr_diff = builder.CreateSub(
                     builder.CreatePtrToInt(BlockAddress::get(function, py_finally_block.block), context.type<uintptr_t>()),
@@ -781,6 +779,7 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
                     asValue<int>(SETUP_FINALLY),
                     builder.CreateIntCast(block_addr_diff, context.type<int>(), true),
                     asValue<int>(stack_height));
+            builder.CreateBr(this_block.next().block);
             break;
         }
         case POP_BLOCK: {
@@ -797,7 +796,7 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
             auto match = callSymbol<handle_JUMP_IF_NOT_EXC_MATCH>(left, right);
             do_Py_DECREF(left);
             do_Py_DECREF(right);
-            builder.CreateCondBr(match, this_block.next().block, makeBranch(this_block, stack_height).block);
+            builder.CreateCondBr(match, this_block.next().block, this_block.branch->block);
             break;
         }
         case RERAISE: {
@@ -806,7 +805,7 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
             break;
         }
         case SETUP_WITH: {
-            auto &py_finally_block = makeBranch(this_block, stack_height - 1 + 7);
+            auto &py_finally_block = *this_block.branch;
             py_finally_block.is_handler = true;
             auto block_addr_diff = builder.CreateSub(
                     builder.CreatePtrToInt(BlockAddress::get(function, py_finally_block.block), context.type<uintptr_t>()),
@@ -815,6 +814,7 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
             callSymbol<handle_SETUP_WITH>(frame_obj, getStackSlot(),
                     builder.CreateIntCast(block_addr_diff, context.type<int>(), true));
             stack_height += 1;
+            builder.CreateBr(this_block.next().block);
             break;
         }
         case WITH_EXCEPT_START: {
@@ -871,15 +871,8 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
             throw runtime_error("unexpected opcode");
         }
     }
-    if (this_block.fall_through) {
-        auto fall_block = &this_block.next();
-        if (!builder.GetInsertBlock()->getTerminator()) {
-            builder.CreateBr(fall_block->block);
-        }
-        if (fall_block->worklist_prev == fall_block) {
-            fall_block->worklist_prev = worklist_head;
-            worklist_head = fall_block;
-            fall_block->initial_stack_height = stack_height;
-        }
+    if (this_block.fall_through && !this_block.branch) {
+        assert(!builder.GetInsertBlock()->getTerminator());
+        builder.CreateBr(this_block.next().block);
     }
 }

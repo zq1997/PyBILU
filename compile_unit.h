@@ -48,9 +48,8 @@ auto useName(const T &arg, const Ts &... more) {
 }
 
 struct PyBasicBlock {
-    unsigned start;
+    unsigned end_index;
     llvm::BasicBlock *block;
-    decltype(PyFrameObject::f_stackdepth) initial_stack_height{-1};
     PyBasicBlock *worklist_prev;
     BitArray locals_kept;
     BitArray locals_set;
@@ -60,12 +59,15 @@ struct PyBasicBlock {
     };
     union {
         unsigned _branch_offset;
-        PyBasicBlock *branch_block;
+        PyBasicBlock *branch;
     };
     union {
         PyBasicBlock *visited_eh_block{nullptr};
         PyBasicBlock *eh_setup_block;
     };
+    int initial_stack_height;
+    int stack_effect;
+    int branch_stack_difference;
     bool fall_through{false};
     bool eh_body_enter{false};
     bool eh_body_exit{false};
@@ -122,8 +124,6 @@ class CompileUnit {
     PyCodeObject *py_code;
     unsigned block_num{0};
     unsigned try_block_num{0};
-    PyBasicBlock *worklist_head;
-    // LimitedStack<unsigned> pending_block_indices{};
     DynamicArray<PyBasicBlock> blocks{};
     BitArray redundant_loads{};
 
@@ -137,8 +137,8 @@ class CompileUnit {
     explicit CompileUnit(Context &context) : context{context}, di_builder{llvm_module} {};
 
     void parseCFG();
-    void analyzeRedundantLoads();
-    void analyzeLocalsDefinition();
+    void doIntraBlockAnalysis();
+    void doInterBlockAnalysis();
     void translate();
     void emitBlock(PyBasicBlock &this_block);
     void emitRotN(PyOparg n);
@@ -148,14 +148,25 @@ class CompileUnit {
     llvm::Value *getName(int i);
     llvm::Value *getFreevar(int i);
     llvm::Value *getStackSlot(int i = 0);
-    llvm::Value *fetchStackValue(int i);
     void do_PUSH(llvm::Value *value, bool really_pushed = true);
 
-    class PoppedStackValue {
-    public:
+    struct FetchedStackValue {
         llvm::Value *const value;
         const bool really_pushed;
-        bool has_decref{false};
+
+        FetchedStackValue(llvm::Value *value, bool really_pushed) : value{value}, really_pushed{really_pushed} {}
+
+        FetchedStackValue(const FetchedStackValue &) = delete;
+
+        operator llvm::Value *() { return value; }
+    };
+
+    FetchedStackValue fetchStackValue(int i);
+
+    struct PoppedStackValue {
+        llvm::Value *const value;
+        const bool really_pushed;
+        IF_DEBUG(bool has_decref{false};)
 
         PoppedStackValue(llvm::Value *value, bool really_pushed) : value{value}, really_pushed{really_pushed} {}
 
@@ -183,19 +194,20 @@ class CompileUnit {
 
     void do_Py_DECREF(llvm::Value *v);
 
+    void do_Py_DECREF(FetchedStackValue &v) = delete;
+
     void do_Py_DECREF(PoppedStackValue &v) {
-        assert(!v.has_decref);
         if (v.really_pushed) {
             do_Py_DECREF(v.value);
         }
-        v.has_decref = true;
+        IF_DEBUG(v.has_decref = true;)
     }
 
     void do_Py_XDECREF(llvm::Value *v);
 
+    // TODO: FetchedStackValue等其他要不要实现INCREF和XDECREF
+
     void pyJumpIF(PyBasicBlock &current, bool pop_if_jump, bool jump_cond);
-    unsigned findPyBlock(unsigned instr_offset);
-    PyBasicBlock &makeBranch(PyBasicBlock &current, unsigned initial_stack_height);
     llvm::Value *getSymbol(size_t offset);
 
     template <typename T>

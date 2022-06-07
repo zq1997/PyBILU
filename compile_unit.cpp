@@ -36,8 +36,8 @@ void CompileUnit::translate() {
 
     // TODO: 重复了
     parseCFG();
-    analyzeRedundantLoads();
-    analyzeLocalsDefinition();
+    doIntraBlockAnalysis();
+    doInterBlockAnalysis();
 
     entry_block = createBlock(useName("entry_block"));
     entry_block->insertInto(function);
@@ -53,16 +53,10 @@ void CompileUnit::translate() {
     error_block = createBlock("raise_error");
 
     abstract_stack.reserve(py_code->co_stacksize);
-    worklist_head = &blocks[0];
-    blocks[0].worklist_prev = nullptr;
-    blocks[0].initial_stack_height = 0;
-    do {
-        auto &b = *worklist_head;
-        worklist_head = b.worklist_prev;
+    for (auto &b : PtrRange(&blocks[0], block_num)) {
         abstract_stack_height = stack_height = b.initial_stack_height;
-        assert(stack_height >= 0);
         emitBlock(b);
-    } while (worklist_head);
+    }
 
     error_block->insertInto(function);
     builder.SetInsertPoint(error_block);
@@ -152,9 +146,9 @@ Value *CompileUnit::getStackSlot(int i) {
     return getPointer<char>(frame_obj, offset, useName("stack.", i, "."));
 }
 
-Value *CompileUnit::fetchStackValue(int i) {
-    auto [value, _] = abstract_stack[abstract_stack_height - i];
-    return value;
+CompileUnit::FetchedStackValue CompileUnit::fetchStackValue(int i) {
+    auto &v = abstract_stack[abstract_stack_height - i];
+    return {v.first, v.second};
 }
 
 CompileUnit::PoppedStackValue CompileUnit::do_POP() {
@@ -214,38 +208,11 @@ llvm::Value *CompileUnit::getSymbol(size_t offset) {
     return loadValue<void *>(ptr, context.tbaa_code_const, useName("sym.", name, "."));
 }
 
-unsigned CompileUnit::findPyBlock(unsigned offset) {
-    assert(block_num > 1);
-    decltype(block_num) left = 0;
-    auto right = block_num - 1;
-    while (left <= right) {
-        auto mid = left + (right - left) / 2;
-        auto v = blocks[mid].start;
-        if (v < offset) {
-            left = mid + 1;
-        } else if (v > offset) {
-            right = mid - 1;
-        } else {
-            return mid;
-        }
-    }
-    Py_UNREACHABLE();
-}
-
-PyBasicBlock &CompileUnit::makeBranch(PyBasicBlock &current, unsigned initial_stack_height) {
-    auto branch = current.branch_block;
-    assert(branch);
-    if (branch == branch->worklist_prev) {
-        branch->worklist_prev = worklist_head;
-        worklist_head = branch;
-        branch->initial_stack_height = initial_stack_height;
-    }
-    return *branch;
-}
-
 void CompileUnit::pyJumpIF(PyBasicBlock &current, bool pop_if_jump, bool jump_cond) {
+    auto cond = fetchStackValue(1);
+
     auto fall_block = appendBlock("");
-    auto branch_block = makeBranch(current, stack_height - pop_if_jump).block;
+    auto branch_block = current.branch->block;
 
     auto false_cmp_block = appendBlock("");
     auto slow_cmp_block = appendBlock("");
@@ -253,22 +220,23 @@ void CompileUnit::pyJumpIF(PyBasicBlock &current, bool pop_if_jump, bool jump_co
     auto true_block = jump_cond ? jump_block : fall_block;
     auto false_block = jump_cond ? fall_block : jump_block;
 
-    auto obj = fetchStackValue(1);
     auto py_true = getSymbol(searchSymbol<_Py_TrueStruct>());
-    builder.CreateCondBr(builder.CreateICmpEQ(obj, py_true), true_block, false_cmp_block);
+    builder.CreateCondBr(builder.CreateICmpEQ(cond, py_true), true_block, false_cmp_block);
     builder.SetInsertPoint(false_cmp_block);
     auto py_false = getSymbol(searchSymbol<_Py_FalseStruct>());
-    builder.CreateCondBr(builder.CreateICmpEQ(obj, py_false), false_block, slow_cmp_block);
+    builder.CreateCondBr(builder.CreateICmpEQ(cond, py_false), false_block, slow_cmp_block);
     builder.SetInsertPoint(slow_cmp_block);
-    builder.CreateCondBr(callSymbol<castPyObjectToBool>(obj), true_block, false_block);
+    builder.CreateCondBr(callSymbol<castPyObjectToBool>(cond), true_block, false_block);
     if (pop_if_jump) {
         builder.SetInsertPoint(jump_block);
-        do_Py_DECREF(obj);
+        if (cond.really_pushed) {
+            do_Py_DECREF(cond.value);
+        }
         builder.CreateBr(branch_block);
     }
     builder.SetInsertPoint(fall_block);
-    do_Py_DECREF(obj);
-    stack_height--;
+    do_Py_DECREF(do_POP());
+    builder.CreateBr(current.next().block);
 }
 
 

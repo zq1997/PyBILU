@@ -20,10 +20,10 @@ constexpr bool isTerminator(int opcode) {
 
 constexpr bool isAbsoluteJmp(int opcode) {
     switch (opcode) {
-    case JUMP_IF_TRUE_OR_POP:
-    case JUMP_IF_FALSE_OR_POP:
     case POP_JUMP_IF_TRUE:
     case POP_JUMP_IF_FALSE:
+    case JUMP_IF_TRUE_OR_POP:
+    case JUMP_IF_FALSE_OR_POP:
     case JUMP_IF_NOT_EXC_MATCH:
     case JUMP_ABSOLUTE:
         return true;
@@ -51,6 +51,24 @@ constexpr bool isTryBlockSetup(int opcode) {
     default:
         return false;
     }
+}
+
+auto *findPyBlock(PyBasicBlock *blocks, unsigned block_num, unsigned offset) {
+    auto left = &blocks[0];
+    auto right = &blocks[block_num - 2];
+    while (left <= right) {
+        auto mid = left + (right - left) / 2;
+        auto v = mid->end_index;
+        if (v < offset) {
+            left = mid + 1;
+        } else if (v > offset) {
+            right = mid - 1;
+        } else {
+            return mid + 1;
+        }
+    }
+    assert(offset == 0);
+    return &blocks[0];
 }
 
 void CompileUnit::parseCFG() {
@@ -84,19 +102,17 @@ void CompileUnit::parseCFG() {
     block_num += is_boundary.set(py_instr_num);
 
     blocks.reserve(block_num + try_block_num);
-    // pending_block_indices.reserve(block_num + try_block_num);
 
     unsigned created_block_num = 0;
-    unsigned start = 0;
+    unsigned start_index = 0;
     for (auto i : IntRange(BitArray::chunkNumber(py_instr_num + 1))) {
         unsigned j = 0;
         for (auto bits = is_boundary.getChunk(i); bits; bits >>= 1) {
             if (bits & 1) {
-                auto end = i * BitArray::bits_per_chunk + j;
                 auto &b = blocks[created_block_num++];
-                b.start = start;
-                b.block = createBlock(useName("block_for_instr_.", start));
-                auto tail_instr = py_instr + (end - 1);
+                b.end_index = i * BitArray::bits_per_chunk + j;
+                b.block = createBlock(useName("block_for_instr_.", start_index));
+                auto tail_instr = py_instr + (b.end_index - 1);
                 auto opcode = tail_instr.opcode();
                 if (opcode == POP_BLOCK) {
                     b.fall_through = true;
@@ -109,14 +125,14 @@ void CompileUnit::parseCFG() {
                     auto is_rel_jmp = isRelativeJump(opcode);
                     auto is_abs_jmp = isAbsoluteJmp(opcode);
                     if (is_try_setup || is_rel_jmp || is_abs_jmp) {
-                        b._branch_offset = tail_instr.oparg(py_instr) + (is_abs_jmp ? 0 : end);
+                        b._branch_offset = tail_instr.oparg(py_instr) + (is_abs_jmp ? 0 : b.end_index);
                     } else {
                         b._branch_offset = py_instr_num;
                     }
                     b.eh_body_enter = is_try_setup;
                     b.eh_body_exit = false;
                 }
-                start = end;
+                start_index = b.end_index;
             }
             j++;
         }
@@ -130,22 +146,22 @@ void CompileUnit::parseCFG() {
         b.locals_set.reserve(nlocals, false);
         b.locals_ever_deleted.reserve(nlocals, false);
         if (b._branch_offset != py_instr_num) {
-            auto branch_block = &blocks[findPyBlock(b._branch_offset)];
+            auto branch_block = findPyBlock(blocks.getPointer(), block_num, b._branch_offset);
             if (b.eh_body_enter) {
-                auto &eb = *(b.branch_block = &blocks[exception_block_index++]);
+                auto &eb = *(b.branch = &blocks[exception_block_index++]);
                 eb.fall_through = false;
                 eb.eh_body_enter = false;
                 eb.eh_body_exit = false;
                 eb.locals_kept.reserve(nlocals, true);
                 eb.locals_set.reserve(nlocals, false);
                 eb.locals_ever_deleted.reserve(nlocals, false);
-                eb.branch_block = branch_block;
+                eb.branch = branch_block;
                 eb.eh_setup_block = &b;
             } else {
-                b.branch_block = branch_block;
+                b.branch = branch_block;
             }
         } else {
-            b.branch_block = nullptr;
+            b.branch = nullptr;
         }
     }
     assert(exception_block_index == block_num + try_block_num);
@@ -157,15 +173,17 @@ class ReversedStack {
     T *const stack;
     T *sp;
     T until_now;
+public:
 
     static constexpr auto until_forever = numeric_limits<T>::max();
 
-public:
     explicit ReversedStack(ssize_t size) : size{size}, stack{new T[size * 2]} { reset(); }
 
     ~ReversedStack() noexcept { delete[] stack; }
 
     void setTimestamp(T t) { until_now = t; }
+
+    int height() { return (stack + size) - sp; }
 
     void reset() {
         sp = stack + size;
@@ -173,7 +191,6 @@ public:
             stack[i] = until_forever;
         }
     }
-
 
     void peak(int i, T timestamp) {
         sp[-i] = timestamp;
@@ -204,7 +221,7 @@ public:
 
 
 // TODO： 或许这里可以顺便分析出delta_stack_height，后面可以直接利用
-void CompileUnit::analyzeRedundantLoads() {
+void CompileUnit::doIntraBlockAnalysis() {
     ReversedStack<unsigned> stack(py_code->co_stacksize);
 
     const PyInstrPointer py_instr{py_code};
@@ -218,16 +235,19 @@ void CompileUnit::analyzeRedundantLoads() {
     }
 
     auto block = &blocks[block_num - 1];
-    for (auto timestamp = code_instr_num;;) {
-        if (timestamp == block->start) {
+    auto stop_at_vpc = block == blocks.getPointer() ? 0 : block[-1].end_index;
+    for (auto vpc = code_instr_num;;) {
+        if (vpc == stop_at_vpc) {
             for (auto [k, s] : BitArrayChunks(py_code->co_nlocals, block->locals_kept, block->locals_set)) {
                 s = ~s & k;
                 k = ~k;
             }
-            if (!timestamp) {
+            block->stack_effect = stack.height();
+            if (!vpc) {
                 break;
             }
             --block;
+            stop_at_vpc = block == blocks.getPointer() ? 0 : block[-1].end_index;
             stack.reset();
         }
 
@@ -235,8 +255,8 @@ void CompileUnit::analyzeRedundantLoads() {
         auto &locals_deleted = block->locals_set;
         auto &locals_ever_deleted = block->locals_ever_deleted;
 
-        stack.setTimestamp(--timestamp);
-        auto instr = py_instr + timestamp;
+        stack.setTimestamp(--vpc);
+        auto instr = py_instr + vpc;
 
         switch (instr.opcode()) {
         case EXTENDED_ARG:
@@ -291,17 +311,17 @@ void CompileUnit::analyzeRedundantLoads() {
             stack.pop(until_anytime);
             break;
         case LOAD_CONST:
-            redundant_loads.setIf(timestamp, until_finally > stack.push());
+            redundant_loads.setIf(vpc, until_finally > stack.push());
             break;
         case LOAD_FAST: {
             auto oparg = instr.oparg(py_instr);
-            redundant_loads.setIf(timestamp, locals[oparg] > stack.push());
+            redundant_loads.setIf(vpc, locals[oparg] > stack.push());
             locals_touched.set(oparg);
             break;
         }
         case STORE_FAST: {
             auto oparg = instr.oparg(py_instr);
-            locals[oparg] = timestamp;
+            locals[oparg] = vpc;
             stack.pop();
             locals_touched.set(oparg);
             break;
@@ -459,19 +479,24 @@ void CompileUnit::analyzeRedundantLoads() {
 
         case JUMP_FORWARD:
         case JUMP_ABSOLUTE:
+            block->branch_stack_difference = 0;
             break;
         case POP_JUMP_IF_TRUE:
         case POP_JUMP_IF_FALSE:
+            block->branch_stack_difference = 0;
             stack.pop();
             break;
         case JUMP_IF_TRUE_OR_POP:
         case JUMP_IF_FALSE_OR_POP:
+            block->branch_stack_difference = 1;
+            stack.pop(stack.until_forever);
             break;
         case GET_ITER:
             stack.push();
             stack.pop();
             break;
         case FOR_ITER:
+            block->branch_stack_difference = -1;
             stack.push();
             break;
 
@@ -553,15 +578,23 @@ void CompileUnit::analyzeRedundantLoads() {
             break;
 
         case SETUP_FINALLY:
+            block->branch_stack_difference = 6;
+            break;
         case POP_BLOCK:
+            break;
         case POP_EXCEPT:
+            stack.pop();
+            stack.pop();
+            stack.pop();
             break;
         case JUMP_IF_NOT_EXC_MATCH:
+            block->branch_stack_difference = 0;
             stack.pop();
             stack.pop();
             break;
         case RERAISE:
         case SETUP_WITH:
+            block->branch_stack_difference = 5;
             stack.push();
             stack.push();
             stack.pop();
@@ -581,6 +614,7 @@ void CompileUnit::analyzeRedundantLoads() {
         case SETUP_ASYNC_WITH:
         case BEFORE_ASYNC_WITH:
         default:
+            throw runtime_error("尚未实现");
             break;
         }
     }
@@ -594,8 +628,8 @@ void analyzeEHBlock(PyBasicBlock &eb, unsigned nlocals, unsigned nesting_depth, 
     for (auto [kept, deleted] : BitArrayChunks(nlocals, eb.locals_kept, b.locals_ever_deleted)) {
         kept &= ~deleted;
     }
-    if (b.branch_block) {
-        auto branch_block = b.eh_body_enter ? b.branch_block->branch_block : b.branch_block;
+    if (b.branch) {
+        auto branch_block = b.eh_body_enter ? b.branch->branch : b.branch;
         analyzeEHBlock(eb, nlocals, nesting_depth, *branch_block);
     }
     nesting_depth = nesting_depth + b.eh_body_enter - b.eh_body_exit;
@@ -604,7 +638,7 @@ void analyzeEHBlock(PyBasicBlock &eb, unsigned nlocals, unsigned nesting_depth, 
     }
 }
 
-void CompileUnit::analyzeLocalsDefinition() {
+void CompileUnit::doInterBlockAnalysis() {
     const auto nlocals = py_code->co_nlocals;
 
     for (auto &eb : PtrRange(&blocks[block_num], try_block_num)) {
@@ -636,7 +670,7 @@ void CompileUnit::analyzeLocalsDefinition() {
             output = (input & kept) | set;
         }
 
-        for (auto successor : {b.branch_block, b.fall_through ? &b.next() : nullptr}) {
+        for (auto successor : {b.branch, b.fall_through ? &b.next() : nullptr}) {
             if (successor) {
                 bool any_update = false;
                 for (auto [x, y] : BitArrayChunks(nlocals, block_output, successor->locals_input)) {
@@ -652,19 +686,46 @@ void CompileUnit::analyzeLocalsDefinition() {
         }
     } while (worklist_head);
 
-    for (auto i : IntRange(nlocals)) {
-        fprintf(stderr, "\t%s", PyUnicode_AsUTF8(PyTuple_GET_ITEM(py_code->co_varnames, i)));
-    }
-    for (auto &b : PtrRange(&blocks[0], block_num)) {
-        fprintf(stderr, "\n%u", b.start);
-        for (auto i : IntRange(nlocals)) {
-            fprintf(stderr, b.locals_input.get(i) ? "\to" : "\tx");
-        }
-    }
-    fprintf(stderr, "\n");
-
     for (auto &b : PtrRange(&blocks[block_num], try_block_num)) {
-        assert(b.eh_setup_block->branch_block == &b);
-        b.eh_setup_block->branch_block = b.branch_block;
+        assert(b.eh_setup_block->branch == &b);
+        b.eh_setup_block->branch = b.branch;
     }
+
+    worklist_head = &blocks[0];
+    worklist_head->initial_stack_height = 0;
+    do {
+        auto &b = *worklist_head;
+        worklist_head = b.worklist_prev;
+        b.worklist_prev = nullptr; // mark it as visited by pointing to nullptr
+
+        for (auto [successor, difference] : std::initializer_list<std::tuple<PyBasicBlock *, int>>{
+                {b.branch, b.branch_stack_difference},
+                {b.fall_through ? &b.next() : nullptr, 0}
+        }) {
+            if (successor) {
+                auto height = b.initial_stack_height + b.stack_effect + difference;
+                assert(0 <= height && height < py_code->co_stacksize);
+                if (successor->worklist_prev == successor) {
+                    successor->initial_stack_height = height;
+                    successor->worklist_prev = worklist_head;
+                    worklist_head = successor;
+                } else {
+                    assert(successor->initial_stack_height == height);
+                }
+            }
+        }
+    } while (worklist_head);
+
+    // for (auto i : IntRange(nlocals)) {
+    //     fprintf(stderr, "\t%s", PyUnicode_AsUTF8(PyTuple_GET_ITEM(py_code->co_varnames, i)));
+    // }
+    // unsigned start_index = 0;
+    // for (auto &b : PtrRange(&blocks[0], block_num)) {
+    //     fprintf(stderr, "\n%u->%u", start_index, b.end_index);
+    //     for (auto i : IntRange(nlocals)) {
+    //         fprintf(stderr, b.locals_input.get(i) ? "\to" : "\tx");
+    //     }
+    //     start_index = b.end_index;
+    // }
+    // fprintf(stderr, "\n");
 }

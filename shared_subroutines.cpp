@@ -1348,6 +1348,7 @@ void handle_RERAISE(PyFrameObject *f, bool restore_lasti) {
 }
 
 void handle_SETUP_WITH(PyFrameObject *f, PyObject **sp, int handler) {
+    // TODO：考虑到load消除可能有问题
     static _Py_Identifier PyId___enter__{"__enter__", -1};
     static _Py_Identifier PyId___exit__{"__exit__", -1};
 
