@@ -602,7 +602,8 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
             builder.SetInsertPoint(b_break);
             auto null_next = do_POP();
             IF_DEBUG(null_next.has_decref = true;)
-            do_Py_DECREF(do_POP());
+            auto poped_iter = do_POP();
+            do_Py_DECREF(poped_iter);
             builder.CreateBr(this_block.branch->block);
             break;
         }

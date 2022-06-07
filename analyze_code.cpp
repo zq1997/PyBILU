@@ -496,7 +496,7 @@ void CompileUnit::doIntraBlockAnalysis() {
             stack.pop();
             break;
         case FOR_ITER:
-            block->branch_stack_difference = -1;
+            block->branch_stack_difference = -2;
             stack.push();
             break;
 
@@ -641,7 +641,7 @@ void analyzeEHBlock(PyBasicBlock &eb, unsigned nlocals, unsigned nesting_depth, 
 void CompileUnit::doInterBlockAnalysis() {
     const auto nlocals = py_code->co_nlocals;
 
-    for (auto &eb : PtrRange(&blocks[block_num], try_block_num)) {
+    for (auto &eb : PtrRange(blocks.getPointer(block_num), try_block_num)) {
         analyzeEHBlock(eb, nlocals, 1, eb.eh_setup_block->next());
     }
 
@@ -686,7 +686,7 @@ void CompileUnit::doInterBlockAnalysis() {
         }
     } while (worklist_head);
 
-    for (auto &b : PtrRange(&blocks[block_num], try_block_num)) {
+    for (auto &b : PtrRange(blocks.getPointer(block_num), try_block_num)) {
         assert(b.eh_setup_block->branch == &b);
         b.eh_setup_block->branch = b.branch;
     }
@@ -704,7 +704,7 @@ void CompileUnit::doInterBlockAnalysis() {
         }) {
             if (successor) {
                 auto height = b.initial_stack_height + b.stack_effect + difference;
-                assert(0 <= height && height < py_code->co_stacksize);
+                assert(0 <= height && height <= py_code->co_stacksize);
                 if (successor->worklist_prev == successor) {
                     successor->initial_stack_height = height;
                     successor->worklist_prev = worklist_head;
