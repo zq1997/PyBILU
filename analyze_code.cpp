@@ -361,7 +361,7 @@ void CompileUnit::doIntraBlockAnalysis() {
         case LOAD_METHOD:
             stack.push();
             stack.push();
-            stack.pop();
+            stack.pop(stack.until_forever);
             break;
         case STORE_ATTR:
             stack.pop();
@@ -432,6 +432,10 @@ void CompileUnit::doIntraBlockAnalysis() {
             stack.push();
             stack.pop_n_consecutively(1 + instr.oparg(py_instr));
             break;
+        case CALL_METHOD:
+            stack.push();
+            stack.pop_n_consecutively(2 + instr.oparg(py_instr));
+            break;
         case CALL_FUNCTION_KW:
             stack.push();
             stack.pop_n_consecutively(2 + instr.oparg(py_instr));
@@ -443,10 +447,6 @@ void CompileUnit::doIntraBlockAnalysis() {
             if (instr.oparg(py_instr) & 1) {
                 stack.pop();
             }
-            break;
-        case CALL_METHOD:
-            stack.push();
-            stack.pop_n_consecutively(2 + instr.oparg(py_instr));
             break;
         case LOAD_CLOSURE:
             stack.push();

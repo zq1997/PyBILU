@@ -29,7 +29,7 @@ PyObject *handle_LOAD_NAME(PyFrameObject *f, PyObject *name);
 void handle_STORE_NAME(PyFrameObject *f, PyObject *name, PyObject *value);
 void handle_DELETE_NAME(PyFrameObject *f, PyObject *name);
 PyObject *handle_LOAD_ATTR(PyObject *owner, PyObject *name);
-void handle_LOAD_METHOD(PyObject *obj, PyObject *name, PyObject **sp);
+void handle_LOAD_METHOD(PyObject *name, PyObject **sp);
 void handle_STORE_ATTR(PyObject *owner, PyObject *name, PyObject *value);
 PyObject *handle_BINARY_SUBSCR(PyObject *container, PyObject *sub);
 void handle_STORE_SUBSCR(PyObject *container, PyObject *sub, PyObject *value);
@@ -69,6 +69,7 @@ PyObject *handle_COMPARE_OP(PyObject *v, PyObject *w, int op);
 bool handle_CONTAINS_OP(PyObject *container, PyObject *value);
 
 PyObject *handle_CALL_FUNCTION(PyObject **func_args, Py_ssize_t nargs);
+PyObject *handle_CALL_METHOD(PyObject **func_args, Py_ssize_t nargs);
 PyObject *handle_CALL_FUNCTION_KW(PyObject **func_args, Py_ssize_t nargs);
 PyObject *handle_CALL_FUNCTION_EX(PyObject *func, PyObject *args, PyObject *kwargs);
 PyObject *handle_LOAD_BUILD_CLASS(PyObject *f);
@@ -161,6 +162,7 @@ constexpr std::tuple external_symbols{
         ENTRY(handle_CONTAINS_OP),
 
         ENTRY(handle_CALL_FUNCTION),
+        ENTRY(handle_CALL_METHOD),
         ENTRY(handle_CALL_FUNCTION_KW),
         ENTRY(handle_CALL_FUNCTION_EX),
         ENTRY(PyFunction_NewWithQualName),

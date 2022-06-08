@@ -261,9 +261,11 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
             break;
         }
         case LOAD_METHOD: {
-            auto obj = do_POP();
-            callSymbol<handle_LOAD_METHOD>(obj, getName(oparg), getStackSlot());
-            stack_height += 2;
+            callSymbol<handle_LOAD_METHOD>(getName(oparg), getStackSlot(1));
+            stack_height += 1;
+            abstract_stack_height += 1;
+            abstract_stack[abstract_stack_height - 1] = {nullptr, true};
+            abstract_stack[abstract_stack_height - 2] = {nullptr, true};
             break;
         }
         case STORE_ATTR: {
@@ -463,9 +465,14 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
             break;
         }
         case CALL_FUNCTION: {
-            // func_args重命名
             auto func_args = do_POP_N(oparg + 1);
             auto ret = callSymbol<handle_CALL_FUNCTION>(func_args, asValue<Py_ssize_t>(oparg));
+            do_PUSH(ret);
+            break;
+        }
+        case CALL_METHOD: {
+            auto func_args = do_POP_N(oparg + 2);
+            auto ret = callSymbol<handle_CALL_METHOD>(func_args, asValue<Py_ssize_t>(oparg));
             do_PUSH(ret);
             break;
         }
@@ -489,17 +496,6 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
             }
             do_Py_DECREF(args);
             do_Py_DECREF(callable);
-            break;
-        }
-        case CALL_METHOD: {
-            auto maybe_meth = fetchStackValue(oparg + 2);
-            auto func_args_if_meth = do_POP_N(oparg + 2);
-            auto is_meth = builder.CreateICmpNE(maybe_meth, context.c_null);
-            auto func_args = builder.CreateSelect(is_meth, func_args_if_meth, getStackSlot(-1));
-            auto nargs = builder.CreateSelect(is_meth,
-                    asValue<Py_ssize_t>(oparg + 1), asValue<Py_ssize_t>(oparg));
-            auto ret = callSymbol<handle_CALL_FUNCTION>(func_args, nargs);
-            do_PUSH(ret);
             break;
         }
         case LOAD_CLOSURE: {

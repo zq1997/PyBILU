@@ -293,7 +293,14 @@ PyObject *handle_LOAD_ATTR(PyObject *owner, PyObject *name) {
     return value;
 }
 
-void handle_LOAD_METHOD(PyObject *obj, PyObject *name, PyObject **sp) {
+static PyObject mark_as_not_method{
+        _PyObject_EXTRA_INIT
+        1,
+        &_PyNone_Type
+};
+
+void handle_LOAD_METHOD(PyObject *name, PyObject **sp) {
+    PyObject *obj = sp[0];
     PyObject *meth = nullptr;
     int meth_found = _PyObject_GetMethod(obj, name, &meth);
     gotoErrorHandler(!meth);
@@ -301,7 +308,8 @@ void handle_LOAD_METHOD(PyObject *obj, PyObject *name, PyObject **sp) {
         sp[0] = meth;
         sp[1] = obj;
     } else {
-        sp[0] = nullptr;
+        Py_INCREF(&mark_as_not_method);
+        sp[0] = &mark_as_not_method;
         sp[1] = meth;
         Py_DECREF(obj);
     }
@@ -836,8 +844,8 @@ PyObject *handle_GET_ITER(PyObject *o) {
     }
 }
 
-PyObject *handle_CALL_FUNCTION(PyObject **func_args, Py_ssize_t nargs) {
-    auto ret = PyObject_Vectorcall(*func_args, func_args + 1, nargs | PY_VECTORCALL_ARGUMENTS_OFFSET, nullptr);
+static auto makeFunctionCall(PyObject *func_args[], Py_ssize_t nargs, Py_ssize_t decref, PyObject *kwnames = nullptr) {
+    auto ret = PyObject_Vectorcall(func_args[0], func_args + 1, nargs | PY_VECTORCALL_ARGUMENTS_OFFSET, kwnames);
     gotoErrorHandler(!ret);
     do {
         Py_DECREF(func_args[nargs]);
@@ -845,16 +853,22 @@ PyObject *handle_CALL_FUNCTION(PyObject **func_args, Py_ssize_t nargs) {
     return ret;
 }
 
-PyObject *handle_CALL_FUNCTION_KW(PyObject **func_args, Py_ssize_t nargs) {
-    auto i = nargs + 1;
-    auto kwargs = func_args[i];
-    nargs -= PyTuple_GET_SIZE(kwargs);
-    auto ret = PyObject_Vectorcall(*func_args, func_args + 1, nargs | PY_VECTORCALL_ARGUMENTS_OFFSET, kwargs);
-    gotoErrorHandler(!ret);
-    do {
-        Py_DECREF(func_args[i]);
-    } while (i--);
+PyObject *handle_CALL_FUNCTION(PyObject **func_args, Py_ssize_t nargs) {
+    return makeFunctionCall(func_args, nargs, nargs);
+}
+
+PyObject *handle_CALL_METHOD(PyObject **func_args, Py_ssize_t nargs) {
+    bool is_meth = func_args[0] != &mark_as_not_method;
+    func_args += !is_meth;
+    nargs += is_meth;
+    auto ret = makeFunctionCall(func_args, nargs, nargs);
+    _Py_SET_REFCNT(&mark_as_not_method, _Py_REFCNT(&mark_as_not_method) - !is_meth);
     return ret;
+}
+
+PyObject *handle_CALL_FUNCTION_KW(PyObject **func_args, Py_ssize_t nargs) {
+    auto kwargs = func_args[nargs + 1];
+    return makeFunctionCall(func_args, nargs - PyTuple_GET_SIZE(kwargs), nargs + 1, kwargs);
 }
 
 static void formatFunctionCallError(PyThreadState *tstate, PyObject *func, const char *error, auto... args) {
@@ -894,7 +908,7 @@ void handle_FOR_ITER() {
         if (!_PyErr_ExceptionMatches(tstate, PyExc_StopIteration)) {
             gotoErrorHandler(tstate);
         }
-        // TODO: support trace
+        // maybe we should support trace
         _PyErr_Clear(tstate);
     }
 }
