@@ -149,8 +149,7 @@ class CompileUnit {
     void emitBlock(PyBasicBlock &this_block);
     void emitRotN(PyOparg n);
 
-    llvm::Value *do_GETLOCAL(PyOparg oparg);
-    void do_SETLOCAL(PyOparg oparg, llvm::Value *value, bool is_defined);
+    std::pair<llvm::Value *, llvm::Value *> do_GETLOCAL(PyOparg oparg);
     llvm::Value *getName(int i);
     llvm::Value *getFreevar(int i);
     llvm::Value *getStackSlot(int i = 0);
@@ -180,7 +179,7 @@ class CompileUnit {
 
     PoppedStackValue do_POP();
 
-    llvm::Value *do_POPWithStolenRef();
+    void popAndSave(llvm::Value *slot, llvm::MDNode *tbaa_node);
 
     llvm::Value *do_POP_N(PyOparg n) {
         for (auto i : IntRange(n)) {

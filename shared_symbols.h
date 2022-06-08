@@ -77,6 +77,10 @@ PyObject *handle_IMPORT_NAME(PyFrameObject *f, PyObject *name, PyObject *fromlis
 PyObject *handle_IMPORT_FROM(PyObject *from, PyObject *name);
 void handle_IMPORT_STAR(PyFrameObject *f, PyObject *from);
 
+PyObject *handle_GET_ITER(PyObject *o);
+void handle_FOR_ITER();
+
+PyObject *handle_BUILD_STRING(PyObject **arr, Py_ssize_t num);
 PyObject *handle_BUILD_TUPLE(PyObject **arr, Py_ssize_t num);
 PyObject *handle_BUILD_LIST(PyObject **arr, Py_ssize_t num);
 PyObject *handle_BUILD_SET(PyObject **arr, Py_ssize_t num);
@@ -92,7 +96,6 @@ void handle_DICT_MERGE(PyObject *func, PyObject *dict, PyObject *update);
 PyObject *handle_LIST_TO_TUPLE(PyObject *list);
 
 PyObject *handle_FORMAT_VALUE(PyObject *value, PyObject *fmt_spec, int which_conversion);
-PyObject *handle_BUILD_STRING(PyObject **arr, Py_ssize_t num);
 
 void handle_POP_EXCEPT(PyFrameObject *f);
 bool handle_JUMP_IF_NOT_EXC_MATCH(PyObject *left, PyObject *right);
@@ -101,7 +104,6 @@ void handle_SETUP_WITH(PyFrameObject *f, PyObject **sp, int handler);
 PyObject *handle_WITH_EXCEPT_START(PyObject *exc, PyObject *val, PyObject *tb, PyObject *exit_func);
 
 bool castPyObjectToBool(PyObject *o);
-PyObject *handle_GET_ITER(PyObject *o);
 
 #define ENTRY(X) std::pair{&(X), #X}
 
@@ -168,6 +170,9 @@ constexpr std::tuple external_symbols{
         ENTRY(handle_IMPORT_FROM),
         ENTRY(handle_IMPORT_STAR),
 
+        ENTRY(handle_GET_ITER),
+        ENTRY(handle_FOR_ITER),
+
         ENTRY(handle_BUILD_STRING),
         ENTRY(handle_BUILD_TUPLE),
         ENTRY(handle_BUILD_LIST),
@@ -194,8 +199,6 @@ constexpr std::tuple external_symbols{
         ENTRY(handle_WITH_EXCEPT_START),
 
         ENTRY(castPyObjectToBool),
-
-        ENTRY(handle_GET_ITER),
 
         ENTRY(_Py_FalseStruct),
         ENTRY(_Py_TrueStruct)

@@ -151,7 +151,7 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
             break;
         }
         case LOAD_FAST: {
-            auto value = do_GETLOCAL(oparg);
+            auto [_, value] = do_GETLOCAL(oparg);
             if (!defined_locals.get(oparg)) {
                 auto ok_block = appendBlock("LOAD_FAST.OK");
                 // TODO: goto error提取为一个函数来实现
@@ -167,17 +167,25 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
             break;
         }
         case STORE_FAST: {
-            auto value = do_POPWithStolenRef();
-            do_SETLOCAL(oparg, value, defined_locals.get(oparg));
+            auto [slot, old_value] = do_GETLOCAL(oparg);
+            popAndSave(slot, context.tbaa_frame_value);
+            if (!defined_locals.get(oparg)) {
+                do_Py_XDECREF(old_value);
+            } else {
+                do_Py_DECREF(old_value);
+            }
             defined_locals.set(oparg);
             break;
         }
         case DELETE_FAST: {
-            auto value = do_GETLOCAL(oparg);
-            auto ok_block = appendBlock("DELETE_FAST.OK");
-            builder.CreateCondBr(builder.CreateICmpNE(value, context.c_null), ok_block, error_block, context.likely_true);
-            builder.SetInsertPoint(ok_block);
-            do_SETLOCAL(oparg, context.c_null, true);
+            auto [slot, value] = do_GETLOCAL(oparg);
+            if (!defined_locals.get(oparg)) {
+                auto ok_block = appendBlock("DELETE_FAST.OK");
+                builder.CreateCondBr(builder.CreateICmpNE(value, context.c_null), ok_block, error_block, context.likely_true);
+                builder.SetInsertPoint(ok_block);
+            }
+            storeValue<PyObject *>(context.c_null, slot, context.tbaa_frame_value);
+            do_Py_DECREF(value);
             defined_locals.reset(oparg);
             break;
         }
@@ -200,8 +208,7 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
             auto cell = getFreevar(oparg);
             auto cell_slot = getPointer(cell, &PyCellObject::ob_ref);
             auto old_value = loadValue<PyObject *>(cell_slot, context.tbaa_obj_field);
-            auto value = do_POPWithStolenRef();
-            storeValue<PyObject *>(value, cell_slot, context.tbaa_obj_field);
+            popAndSave(cell_slot, context.tbaa_obj_field);
             do_Py_XDECREF(old_value);
             break;
         }
@@ -511,16 +518,16 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
             builder.SetInsertPoint(ok_block);
             // TODO: 一个新的tbaa
             if (oparg & 8) {
-                storeFiledValue(do_POPWithStolenRef(), py_func, &PyFunctionObject::func_closure, context.tbaa_refcnt);
+                popAndSave(getPointer(py_func, &PyFunctionObject::func_closure), context.tbaa_obj_field);
             }
             if (oparg & 4) {
-                storeFiledValue(do_POPWithStolenRef(), py_func, &PyFunctionObject::func_annotations, context.tbaa_refcnt);
+                popAndSave(getPointer(py_func, &PyFunctionObject::func_annotations), context.tbaa_obj_field);
             }
             if (oparg & 2) {
-                storeFiledValue(do_POPWithStolenRef(), py_func, &PyFunctionObject::func_kwdefaults, context.tbaa_refcnt);
+                popAndSave(getPointer(py_func, &PyFunctionObject::func_kwdefaults), context.tbaa_obj_field);
             }
             if (oparg & 1) {
-                storeFiledValue(do_POPWithStolenRef(), py_func, &PyFunctionObject::func_defaults, context.tbaa_refcnt);
+                popAndSave(getPointer(py_func, &PyFunctionObject::func_defaults), context.tbaa_obj_field);
             }
             do_PUSH(py_func);
             do_Py_DECREF(codeobj);
@@ -599,10 +606,8 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
             builder.CreateCondBr(builder.CreateICmpEQ(next, context.c_null), b_break, this_block.next().block);
             // iteration should break
             builder.SetInsertPoint(b_break);
-            auto null_next = do_POP();
-            IF_DEBUG(null_next.has_decref = true;)
-            auto poped_iter = do_POP();
-            do_Py_DECREF(poped_iter);
+            callSymbol<handle_FOR_ITER>();
+            do_Py_DECREF(iter.value);
             builder.CreateBr(this_block.branch->block);
             break;
         }

@@ -888,6 +888,17 @@ PyObject *handle_CALL_FUNCTION_EX(PyObject *func, PyObject *args, PyObject *kwar
     return ret;
 }
 
+void handle_FOR_ITER() {
+    auto tstate = _PyThreadState_GET();
+    if (_PyErr_Occurred(tstate)) {
+        if (!_PyErr_ExceptionMatches(tstate, PyExc_StopIteration)) {
+            gotoErrorHandler(tstate);
+        }
+        // TODO: support trace
+        _PyErr_Clear(tstate);
+    }
+}
+
 PyObject *handle_BUILD_STRING(PyObject **arr, Py_ssize_t num) {
     auto str = PyUnicode_New(0, 0);
     gotoErrorHandler(!str);

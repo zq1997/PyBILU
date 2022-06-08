@@ -115,24 +115,12 @@ void CompileUnit::do_Py_XDECREF(Value *py_obj) {
     builder.SetInsertPoint(b_end);
 }
 
-Value *CompileUnit::do_GETLOCAL(PyOparg oparg) {
+std::pair<llvm::Value *, llvm::Value *> CompileUnit::do_GETLOCAL(PyOparg oparg) {
     auto varname = PyTuple_GET_ITEM(py_code->co_varnames, oparg);
     auto offset = offsetof(PyFrameObject, f_localsplus) + sizeof(PyObject *) * oparg;
     auto slot = getPointer<char>(frame_obj, offset, useName("local.", varname, "."));
-    return loadValue<PyObject *>(slot, context.tbaa_frame_value, useName(varname));
-}
-
-void CompileUnit::do_SETLOCAL(PyOparg oparg, llvm::Value *value, bool is_defined) {
-    auto varname = PyTuple_GET_ITEM(py_code->co_varnames, oparg);
-    auto offset = offsetof(PyFrameObject, f_localsplus) + sizeof(PyObject *) * oparg;
-    auto slot = getPointer<char>(frame_obj, offset, useName("local.", varname, "."));
-    auto old_value = loadValue<PyObject *>(slot, context.tbaa_frame_value, useName(varname, ".old", "."));
-    storeValue<PyObject *>(value, slot, context.tbaa_frame_value);
-    if (is_defined) {
-        do_Py_DECREF(old_value);
-    } else {
-        do_Py_XDECREF(old_value);
-    }
+    auto value = loadValue<PyObject *>(slot, context.tbaa_frame_value, useName(varname));
+    return {slot, value};
 }
 
 Value *CompileUnit::getStackSlot(int i) {
@@ -155,13 +143,13 @@ CompileUnit::PoppedStackValue CompileUnit::do_POP() {
     return PoppedStackValue{v};
 }
 
-llvm::Value *CompileUnit::do_POPWithStolenRef() {
+void CompileUnit::popAndSave(llvm::Value *slot, llvm::MDNode *tbaa_node) {
     auto &v = abstract_stack[--abstract_stack_height];
     stack_height -= v.really_pushed;
     if (!v.really_pushed) {
         do_Py_INCREF(v.value);
     }
-    return v.value;
+    storeValue<PyObject *>(v.value, slot, tbaa_node);
 }
 
 void CompileUnit::do_PUSH(llvm::Value *value, bool really_pushed) {
