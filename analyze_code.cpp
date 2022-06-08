@@ -141,7 +141,7 @@ void CompileUnit::parseCFG() {
     blocks[0].is_handler = true;
     auto nlocals = py_code->co_nlocals;
     auto exception_block_index = block_num;
-    for (auto &b : PtrRange(&*blocks, block_num)) {
+    for (auto &b : PtrRange(blocks.getPointer(), block_num)) {
         b.locals_kept.reserve(nlocals, false);
         b.locals_set.reserve(nlocals, false);
         b.locals_ever_deleted.reserve(nlocals, false);

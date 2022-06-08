@@ -66,11 +66,11 @@ void CompileUnit::translate() {
     // TODO: debug location有时候去除
     builder.SetInsertPoint(entry_block);
     auto indirect_br = builder.CreateIndirectBr(
-            builder.CreateInBoundsGEP(context.type<char>(), BlockAddress::get(blocks[0].block),
+            builder.CreateInBoundsGEP(context.type<char>(), BlockAddress::get(blocks[0]),
                     function->getArg(2)));
-    for (auto &b : PtrRange(&*blocks, block_num)) {
+    for (auto &b : PtrRange(blocks.getPointer(), block_num)) {
         if (b.is_handler) {
-            indirect_br->addDestination(b.block);
+            indirect_br->addDestination(b);
         }
     }
 
@@ -190,38 +190,37 @@ llvm::Value *CompileUnit::getSymbol(size_t offset) {
         name = symbol_names[offset];
     }
     auto ptr = getPointer<void *>(shared_symbols, offset, useName("sym.", offset, "."));
-    return loadValue<void *>(ptr, context.tbaa_code_const, useName("sym.", name, "."));
+    return loadValue<void *>(ptr, context.tbaa_symbols, useName("sym.", name, "."));
 }
 
 void CompileUnit::pyJumpIF(PyBasicBlock &current, bool pop_if_jump, bool jump_cond) {
-    auto cond = fetchStackValue(1);
+    auto cond_obj = do_POP();
 
-    auto fall_block = appendBlock("");
-    auto branch_block = current.branch->block;
-
-    auto false_cmp_block = appendBlock("");
+    auto fall_block = cond_obj.really_pushed ? appendBlock("") : current.next();
+    auto jump_block = cond_obj.really_pushed && pop_if_jump ? appendBlock("") : *current.branch;
+    auto fast_cmp_block = appendBlock("");
     auto slow_cmp_block = appendBlock("");
-    auto jump_block = pop_if_jump ? appendBlock("") : branch_block;
     auto true_block = jump_cond ? jump_block : fall_block;
     auto false_block = jump_cond ? fall_block : jump_block;
 
     auto py_true = getSymbol(searchSymbol<_Py_TrueStruct>());
-    builder.CreateCondBr(builder.CreateICmpEQ(cond, py_true), true_block, false_cmp_block);
-    builder.SetInsertPoint(false_cmp_block);
+    builder.CreateCondBr(builder.CreateICmpEQ(cond_obj, py_true), true_block, fast_cmp_block);
+    builder.SetInsertPoint(fast_cmp_block);
     auto py_false = getSymbol(searchSymbol<_Py_FalseStruct>());
-    builder.CreateCondBr(builder.CreateICmpEQ(cond, py_false), false_block, slow_cmp_block);
+    builder.CreateCondBr(builder.CreateICmpEQ(cond_obj, py_false), false_block, slow_cmp_block, context.likely_true);
     builder.SetInsertPoint(slow_cmp_block);
-    builder.CreateCondBr(callSymbol<castPyObjectToBool>(cond), true_block, false_block);
-    if (pop_if_jump) {
-        builder.SetInsertPoint(jump_block);
-        if (cond.really_pushed) {
-            do_Py_DECREF(cond.value);
+    builder.CreateCondBr(callSymbol<castPyObjectToBool>(cond_obj), true_block, false_block);
+
+    if (cond_obj.really_pushed) {
+        if (pop_if_jump) {
+            builder.SetInsertPoint(jump_block);
+            do_Py_DECREF(cond_obj);
+            builder.CreateBr(*current.branch);
         }
-        builder.CreateBr(branch_block);
+        builder.SetInsertPoint(fall_block);
+        do_Py_DECREF(cond_obj);
+        builder.CreateBr(current.next());
     }
-    builder.SetInsertPoint(fall_block);
-    do_Py_DECREF(do_POP());
-    builder.CreateBr(current.next().block);
 }
 
 

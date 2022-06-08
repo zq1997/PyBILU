@@ -80,6 +80,8 @@ struct PyBasicBlock {
         locals_input.~BitArray();
     }
 
+    operator llvm::BasicBlock *() { return block; }
+
     PyBasicBlock &next() { return this[1]; }
 };
 
@@ -182,11 +184,11 @@ class CompileUnit {
     void popAndSave(llvm::Value *slot, llvm::MDNode *tbaa_node);
 
     llvm::Value *do_POP_N(PyOparg n) {
-        for (auto i : IntRange(n)) {
-            assert(abstract_stack[abstract_stack_height - 1 - i].really_pushed);
-        }
         abstract_stack_height -= n;
         stack_height -= n;
+        for ([[maybe_unused]] auto &v : PtrRange(abstract_stack.getPointer(abstract_stack_height), n)) {
+            assert(v.really_pushed);
+        }
         return getStackSlot();
     }
 

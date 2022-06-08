@@ -49,7 +49,12 @@ void unloadCode(sys::MemoryBlock &mem) {
 }
 
 Compiler::Compiler() {
-    throwIf(LLVMInitializeNativeTarget() || LLVMInitializeNativeAsmPrinter(), "initialization failed");
+    static bool initialized = false;
+    if (!initialized) {
+        throwIf(LLVMInitializeNativeTarget(), "LLVMInitializeNativeTarget() failed");
+        throwIf(LLVMInitializeNativeAsmPrinter(), "LLVMInitializeNativeAsmPrinter() failed");
+        initialized = true;
+    }
 
     auto triple = sys::getProcessTriple();
     SubtargetFeatures features;
@@ -73,7 +78,7 @@ Compiler::Compiler() {
     ));
     throwIf(!machine, "cannot create TargetMachine");
 
-    PassBuilder pb{&*machine};
+    PassBuilder pb{machine.get()};
     pb.registerModuleAnalyses(opt_MAM);
     pb.registerCGSCCAnalyses(opt_CGAM);
     pb.registerFunctionAnalyses(opt_FAM);
@@ -103,6 +108,7 @@ Context::Context(const DataLayout &dl) :
     tbaa_obj_field = createTBAA("object field");
     tbaa_frame_value = createTBAA("frame value");
     tbaa_code_const = createTBAA("code const", true);
+    tbaa_symbols = createTBAA("symbols", true);
 
     auto attr_builder = AttrBuilder(llvm_context);
     attr_builder

@@ -59,6 +59,7 @@ public:
     llvm::MDNode *tbaa_obj_field;
     llvm::MDNode *tbaa_frame_value;
     llvm::MDNode *tbaa_code_const;
+    llvm::MDNode *tbaa_symbols;
     llvm::AttributeList attr_refcnt_call;
     llvm::AttributeList attr_noreturn;
     llvm::AttributeList attr_default_call;

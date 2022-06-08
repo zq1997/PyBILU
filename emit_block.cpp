@@ -52,7 +52,7 @@ void CompileUnit::emitRotN(PyOparg n) {
 
 void CompileUnit::emitBlock(PyBasicBlock &this_block) {
     this_block.block->insertInto(function);
-    builder.SetInsertPoint(this_block.block);
+    builder.SetInsertPoint(this_block);
 
     auto &defined_locals = this_block.locals_input;
 
@@ -565,11 +565,11 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
         }
 
         case JUMP_FORWARD: {
-            builder.CreateBr(this_block.branch->block);
+            builder.CreateBr(*this_block.branch);
             break;
         }
         case JUMP_ABSOLUTE: {
-            builder.CreateBr(this_block.branch->block);
+            builder.CreateBr(*this_block.branch);
             break;
         }
         case POP_JUMP_IF_TRUE: {
@@ -603,12 +603,12 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
             auto next = callFunction(context.type<remove_pointer_t<iternextfunc>>(), the_iternextfunc, iter);
             do_PUSH(next);
             auto b_break = appendBlock("FOR_ITER.break");
-            builder.CreateCondBr(builder.CreateICmpEQ(next, context.c_null), b_break, this_block.next().block);
+            builder.CreateCondBr(builder.CreateICmpEQ(next, context.c_null), b_break, this_block.next());
             // iteration should break
             builder.SetInsertPoint(b_break);
             callSymbol<handle_FOR_ITER>();
             do_Py_DECREF(iter.value);
-            builder.CreateBr(this_block.branch->block);
+            builder.CreateBr(*this_block.branch);
             break;
         }
 
@@ -776,14 +776,14 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
         case SETUP_FINALLY: {
             auto &py_finally_block = *this_block.branch;
             auto block_addr_diff = builder.CreateSub(
-                    builder.CreatePtrToInt(BlockAddress::get(function, py_finally_block.block), context.type<uintptr_t>()),
-                    builder.CreatePtrToInt(BlockAddress::get(function, blocks[0].block), context.type<uintptr_t>())
+                    builder.CreatePtrToInt(BlockAddress::get(function, py_finally_block), context.type<uintptr_t>()),
+                    builder.CreatePtrToInt(BlockAddress::get(function, blocks[0]), context.type<uintptr_t>())
             );
             callSymbol<PyFrame_BlockSetup>(frame_obj,
                     asValue<int>(SETUP_FINALLY),
                     builder.CreateIntCast(block_addr_diff, context.type<int>(), true),
                     asValue<int>(stack_height));
-            builder.CreateBr(this_block.next().block);
+            builder.CreateBr(this_block.next());
             break;
         }
         case POP_BLOCK: {
@@ -800,7 +800,7 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
             auto match = callSymbol<handle_JUMP_IF_NOT_EXC_MATCH>(left, right);
             do_Py_DECREF(left);
             do_Py_DECREF(right);
-            builder.CreateCondBr(match, this_block.next().block, this_block.branch->block);
+            builder.CreateCondBr(match, this_block.next(), *this_block.branch);
             break;
         }
         case RERAISE: {
@@ -811,13 +811,13 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
         case SETUP_WITH: {
             auto &py_finally_block = *this_block.branch;
             auto block_addr_diff = builder.CreateSub(
-                    builder.CreatePtrToInt(BlockAddress::get(function, py_finally_block.block), context.type<uintptr_t>()),
-                    builder.CreatePtrToInt(BlockAddress::get(function, blocks[0].block), context.type<uintptr_t>())
+                    builder.CreatePtrToInt(BlockAddress::get(function, py_finally_block), context.type<uintptr_t>()),
+                    builder.CreatePtrToInt(BlockAddress::get(function, blocks[0]), context.type<uintptr_t>())
             );
             callSymbol<handle_SETUP_WITH>(frame_obj, getStackSlot(),
                     builder.CreateIntCast(block_addr_diff, context.type<int>(), true));
             stack_height += 1;
-            builder.CreateBr(this_block.next().block);
+            builder.CreateBr(this_block.next());
             break;
         }
         case WITH_EXCEPT_START: {
@@ -876,6 +876,6 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
     }
     if (this_block.fall_through && !this_block.branch) {
         assert(!builder.GetInsertBlock()->getTerminator());
-        builder.CreateBr(this_block.next().block);
+        builder.CreateBr(this_block.next());
     }
 }
