@@ -111,6 +111,7 @@ public:
 
 template <typename T>
 class DynamicArray {
+protected:
     T *data{};
     IF_DEBUG(size_t array_size;)
 
@@ -201,7 +202,7 @@ public:
     }
 
     bool checkAndSet(size_t index) {
-        auto &chunk = getChunk(index / bits_per_chunk);
+        auto &chunk = data[index / bits_per_chunk];
         auto tester = ChunkType{1} << index % bits_per_chunk;
         bool newly_set = !(chunk & tester);
         chunk |= tester;
@@ -209,11 +210,11 @@ public:
     }
 
     void reset(size_t index) {
-        getChunk(index / bits_per_chunk) &= ~(ChunkType{1} << index % bits_per_chunk);
+        data[index / bits_per_chunk] &= ~(ChunkType{1} << index % bits_per_chunk);
     }
 
     void setIf(size_t index, bool cond) {
-        getChunk(index / bits_per_chunk) |= ChunkType{cond} << index % bits_per_chunk;
+        data[index / bits_per_chunk] |= ChunkType{cond} << index % bits_per_chunk;
     }
 
     void set(size_t index) {
@@ -221,11 +222,11 @@ public:
     }
 
     bool get(size_t index) {
-        return getChunk(index / bits_per_chunk) & (ChunkType{1} << index % bits_per_chunk);
+        return data[index / bits_per_chunk] & (ChunkType{1} << index % bits_per_chunk);
     }
 
     void fill(size_t size, bool fill_with = false) {
-        memset(&getChunk(0), fill_with ? UCHAR_MAX : 0, chunkNumber(size) * sizeof(ChunkType));
+        memset(data, fill_with ? UCHAR_MAX : 0, chunkNumber(size) * sizeof(ChunkType));
     }
 
     auto operator[](size_t index) = delete;

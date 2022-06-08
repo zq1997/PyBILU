@@ -143,13 +143,17 @@ CompileUnit::PoppedStackValue CompileUnit::do_POP() {
     return PoppedStackValue{v};
 }
 
-void CompileUnit::popAndSave(llvm::Value *slot, llvm::MDNode *tbaa_node) {
+Value *CompileUnit::do_POP_with_newref() {
     auto &v = abstract_stack[--abstract_stack_height];
     stack_height -= v.really_pushed;
     if (!v.really_pushed) {
         do_Py_INCREF(v.value);
     }
-    storeValue<PyObject *>(v.value, slot, tbaa_node);
+    return v.value;
+}
+
+void CompileUnit::popAndSave(llvm::Value *slot, llvm::MDNode *tbaa_node) {
+    storeValue<PyObject *>(do_POP_with_newref(), slot, tbaa_node);
 }
 
 void CompileUnit::do_PUSH(llvm::Value *value, bool really_pushed) {

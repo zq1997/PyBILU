@@ -104,6 +104,8 @@ void handle_RERAISE(PyFrameObject *f, bool restore_lasti);
 void handle_SETUP_WITH(PyFrameObject *f, PyObject **sp, int handler);
 PyObject *handle_WITH_EXCEPT_START(PyObject *exc, PyObject *val, PyObject *tb, PyObject *exit_func);
 
+PyObject *handle_YIELD_VALUE(PyObject *retval);
+
 bool castPyObjectToBool(PyObject *o);
 
 #define ENTRY(X) std::pair{&(X), #X}
@@ -200,10 +202,13 @@ constexpr std::tuple external_symbols{
         ENTRY(handle_SETUP_WITH),
         ENTRY(handle_WITH_EXCEPT_START),
 
+        ENTRY(handle_YIELD_VALUE),
+
         ENTRY(castPyObjectToBool),
 
         ENTRY(_Py_FalseStruct),
-        ENTRY(_Py_TrueStruct)
+        ENTRY(_Py_TrueStruct),
+        ENTRY(_Py_NoneStruct)
 };
 
 constexpr auto external_symbol_count = std::tuple_size_v<decltype(external_symbols)>;
@@ -231,7 +236,7 @@ constexpr auto searchSymbol() {
 
 extern const std::array<const char *, external_symbol_count> symbol_names;
 extern const std::array<void *, external_symbol_count> symbol_addresses;
-using CompiledFunction = PyObject *(void *const[], PyFrameObject *, ptrdiff_t);
+using CompiledFunction = PyObject *(void *const[], PyFrameObject *, ptrdiff_t, ptrdiff_t *);
 
 template <typename T, typename = void>
 struct Normalizer;

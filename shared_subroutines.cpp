@@ -11,12 +11,14 @@
 #include <internal/pycore_pyerrors.h>
 #include <internal/pycore_abstract.h>
 #include <internal/pycore_interp.h>
+#include <internal/pycore_object.h>
 
 #include "shared_symbols.h"
 #include "general_utilities.h"
 
 using namespace std;
 
+// 不需要，反正c++20了
 #ifdef __has_cpp_attribute
 #if __has_cpp_attribute(likely) && __has_cpp_attribute(unlikely)
 #define LIKLEY [[likely]]
@@ -118,9 +120,16 @@ void raiseException() {
             auto name = PyTuple_GET_ITEM(code->co_freevars, oparg - cell_num);
             raiseUndefinedFree(tstate, name);
         }
+    } else if (opcode == GEN_START) {
+        if (oparg > 2) {
+            _PyErr_SetString(tstate, PyExc_SystemError, "Illegal kind for GEN_START");
+        } else {
+            static const char *gen_kind[3] = {"generator", "coroutine", "async generator"};
+            _PyErr_Format(tstate, PyExc_TypeError,
+                    "can't send non-None value to a just-started %s", gen_kind[oparg]);
+        }
     } else {
         assert(opcode == MAKE_FUNCTION);
-        // _PyErr_Format(tstate, PyExc_SystemError, "error block遇到了未知opcode");
     }
     gotoErrorHandler(tstate);
 }
@@ -1413,6 +1422,51 @@ PyObject *handle_WITH_EXCEPT_START(PyObject *exc, PyObject *val, PyObject *tb, P
     auto res = PyObject_Vectorcall(exit_func, stack + 1, 3 | PY_VECTORCALL_ARGUMENTS_OFFSET, nullptr);
     gotoErrorHandler(!res);
     return res;
+}
+
+
+static struct _Py_async_gen_state *
+get_async_gen_state(void) {
+    PyInterpreterState *interp = _PyInterpreterState_GET();
+    return &interp->async_gen;
+}
+
+typedef struct _PyAsyncGenWrappedValue {
+    PyObject_HEAD
+    PyObject *agw_val;
+} _PyAsyncGenWrappedValue;
+
+static PyObject *
+my_PyAsyncGenValueWrapperNew(PyObject *val) {
+    _PyAsyncGenWrappedValue *o;
+    assert(val);
+
+    struct _Py_async_gen_state *state = get_async_gen_state();
+#ifdef Py_DEBUG
+    // _PyAsyncGenValueWrapperNew() must not be called after _PyAsyncGen_Fini()
+    assert(state->value_numfree != -1);
+#endif
+    if (state->value_numfree) {
+        state->value_numfree--;
+        o = state->value_freelist[state->value_numfree];
+        assert(Py_IS_TYPE(o, &_PyAsyncGenWrappedValue_Type));
+        _Py_NewReference((PyObject *) o);
+    } else {
+        o = PyObject_GC_New(_PyAsyncGenWrappedValue, &_PyAsyncGenWrappedValue_Type);
+        if (o == NULL) {
+            return NULL;
+        }
+    }
+    o->agw_val = val;
+    Py_INCREF(val);
+    _PyObject_GC_TRACK((PyObject *) o);
+    return (PyObject *) o;
+}
+
+PyObject *handle_YIELD_VALUE(PyObject *retval) {
+    retval = my_PyAsyncGenValueWrapperNew(retval);
+    gotoErrorHandler(!retval);
+    return retval;
 }
 
 const array<const char *, external_symbol_count> symbol_names{apply(

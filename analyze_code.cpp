@@ -83,7 +83,7 @@ void CompileUnit::parseCFG() {
     for (auto vpc : IntRange(py_instr_num)) {
         auto instr = py_instr + vpc;
         auto opcode = instr.opcode();
-        if (opcode == POP_BLOCK) {
+        if (opcode == POP_BLOCK || opcode == YIELD_VALUE) {
             block_num += is_boundary.checkAndSet(vpc + 1);
         } else {
             auto is_try_setup = isTryBlockSetup(opcode);
@@ -106,19 +106,22 @@ void CompileUnit::parseCFG() {
 
     unsigned created_block_num = 0;
     unsigned start_index = 0;
+    bool is_handler = true;
     for (auto i : IntRange(BitArray::chunkNumber(py_instr_num + 1))) {
         unsigned j = 0;
         for (auto bits = is_boundary.getChunk(i); bits; bits >>= 1) {
             if (bits & 1) {
                 auto &b = blocks[created_block_num++];
                 b.end_index = i * BitArray::bits_per_chunk + j;
-                b.block = createBlock(useName("block_for_instr_.", start_index));
+                b.block = createBlock(useName("instr.", start_index));
+                b.is_handler = is_handler;
                 auto tail_instr = py_instr + (b.end_index - 1);
                 auto opcode = tail_instr.opcode();
-                if (opcode == POP_BLOCK) {
+                if (opcode == POP_BLOCK || opcode == YIELD_VALUE) {
                     b.fall_through = true;
                     b._branch_offset = py_instr_num;
-                    b.eh_body_exit = true;
+                    b.eh_body_exit = opcode == POP_BLOCK;
+                    is_handler = opcode == YIELD_VALUE;
                 } else {
                     b.fall_through = !isTerminator(opcode);
                     auto is_try_setup = isTryBlockSetup(opcode);
@@ -130,6 +133,7 @@ void CompileUnit::parseCFG() {
                         b._branch_offset = py_instr_num;
                     }
                     b.eh_body_enter = is_try_setup;
+                    is_handler = false;
                 }
                 start_index = b.end_index;
             }
@@ -138,7 +142,6 @@ void CompileUnit::parseCFG() {
     }
     assert(created_block_num == block_num);
 
-    blocks[0].is_handler = true;
     auto nlocals = py_code->co_nlocals;
     auto exception_block_index = block_num;
     for (auto &b : PtrRange(blocks.getPointer(), block_num)) {
@@ -600,7 +603,12 @@ void CompileUnit::doIntraBlockAnalysis() {
             break;
 
         case GEN_START:
+            stack.pop();
+            break;
         case YIELD_VALUE:
+            stack.push();
+            stack.pop();
+            break;
         case GET_YIELD_FROM_ITER:
         case YIELD_FROM:
         case GET_AWAITABLE:
@@ -688,7 +696,7 @@ void CompileUnit::doInterBlockAnalysis() {
     }
 
     worklist_head = &blocks[0];
-    worklist_head->initial_stack_height = 0;
+    worklist_head->initial_stack_height = !!(py_code->co_flags & (CO_GENERATOR | CO_COROUTINE | CO_ASYNC_GENERATOR));
     do {
         auto &b = *worklist_head;
         worklist_head = b.worklist_link;

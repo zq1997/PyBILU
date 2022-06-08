@@ -41,6 +41,6 @@ ELSE()
 ENDIF()
 
 add_subdirectory(test EXCLUDE_FROM_ALL)
-#add_subdirectory(/opt/cpython cpython EXCLUDE_FROM_ALL)
+add_subdirectory(/opt/cpython cpython EXCLUDE_FROM_ALL)
 # TODO: file(CREATE_LINK <original> <linkname> [...]) 来创建gdb_script的软链接'
 file(CREATE_LINK ${CPython_INC_DIR}/../../bin/python3 ${CMAKE_CURRENT_BINARY_DIR}/python3 SYMBOLIC)

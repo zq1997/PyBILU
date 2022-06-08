@@ -459,8 +459,11 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
             break;
         }
         case RETURN_VALUE: {
-            auto retval = fetchStackValue(1);
-            do_Py_INCREF(retval);
+            // TODO: 既然是耗尽栈了，应该想办法
+            auto retval = do_POP_with_newref();
+            assert(stack_height == 0);
+            storeFiledValue(asValue<PyFrameState>(FRAME_RETURNED), frame_obj, &PyFrameObject::f_state, context.tbaa_obj_field);
+            storeFiledValue(asValue<int>(0), frame_obj, &PyFrameObject::f_stackdepth, context.tbaa_obj_field);
             builder.CreateRet(retval);
             break;
         }
@@ -770,9 +773,8 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
         }
 
         case SETUP_FINALLY: {
-            auto &py_finally_block = *this_block.branch;
             auto block_addr_diff = builder.CreateSub(
-                    builder.CreatePtrToInt(BlockAddress::get(function, py_finally_block), context.type<uintptr_t>()),
+                    builder.CreatePtrToInt(BlockAddress::get(function, *this_block.branch), context.type<uintptr_t>()),
                     builder.CreatePtrToInt(BlockAddress::get(function, blocks[0]), context.type<uintptr_t>())
             );
             callSymbol<PyFrame_BlockSetup>(frame_obj,
@@ -827,11 +829,44 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
         }
 
         case GEN_START: {
-            throw runtime_error("unimplemented opcode");
+            auto should_be_none = do_POP();
+            do_Py_DECREF(should_be_none);
+            auto py_none = getSymbol(searchSymbol<_Py_NoneStruct>());
+            auto ok_block = appendBlock("GEN_START.OK");
+            builder.CreateCondBr(builder.CreateICmpEQ(should_be_none, py_none), ok_block, error_block, context.likely_true);
+            builder.SetInsertPoint(ok_block);
             break;
         }
         case YIELD_VALUE: {
-            throw runtime_error("unimplemented opcode");
+            // retval = POP();
+            //
+            // if (co->co_flags & CO_ASYNC_GENERATOR) {
+            //     PyObject *w = _PyAsyncGenValueWrapperNew(retval);
+            //     Py_DECREF(retval);
+            //     if (w == NULL) {
+            //         retval = NULL;
+            //         goto error;
+            //     }
+            //     retval = w;
+            // }
+            // f->f_state = FRAME_SUSPENDED;
+            // f->f_stackdepth = (int)(stack_pointer - f->f_valuestack);
+            // goto exiting;
+            //
+            auto retval = do_POP_with_newref();
+            if (py_code->co_flags & CO_ASYNC_GENERATOR) {
+                // TODO: 没有实现
+                // retval = callSymbol<handle_YIELD_VALUE>(retval);
+                assert(0);
+            }
+            auto block_addr_diff = builder.CreateSub(
+                    builder.CreatePtrToInt(BlockAddress::get(function, this_block.next()), context.type<uintptr_t>()),
+                    builder.CreatePtrToInt(BlockAddress::get(function, blocks[0]), context.type<uintptr_t>())
+            );
+            storeValue<ptrdiff_t>(block_addr_diff, function->getArg(3), nullptr);
+            storeFiledValue(asValue<PyFrameState>(FRAME_SUSPENDED), frame_obj, &PyFrameObject::f_state, context.tbaa_obj_field);
+            storeFiledValue(asValue<int>(stack_height), frame_obj, &PyFrameObject::f_stackdepth, context.tbaa_obj_field);
+            builder.CreateRet(retval);
             break;
         }
         case GET_YIELD_FROM_ITER: {
@@ -870,7 +905,8 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
             throw runtime_error("unexpected opcode");
         }
     }
-    if (this_block.fall_through && !this_block.branch) {
+    // 排除分支已经跳转或者yield回归
+    if (this_block.fall_through && !this_block.branch && !this_block.next().is_handler) {
         assert(!builder.GetInsertBlock()->getTerminator());
         builder.CreateBr(this_block.next());
     }

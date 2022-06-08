@@ -181,6 +181,8 @@ class CompileUnit {
 
     PoppedStackValue do_POP();
 
+    llvm::Value *do_POP_with_newref();
+
     void popAndSave(llvm::Value *slot, llvm::MDNode *tbaa_node);
 
     llvm::Value *do_POP_N(PyOparg n) {
@@ -263,7 +265,7 @@ class CompileUnit {
     template <typename T, typename M>
     auto storeFiledValue(llvm::Value *value, llvm::Value *instance, M T::* member, llvm::MDNode *tbaa_node) {
         auto ptr = getPointer(instance, member);
-        return storeValue<M>(ptr, ptr, tbaa_node);
+        return storeValue<M>(value, ptr, tbaa_node);
     }
 
     template <llvm::AttributeList Context::* Attr = &Context::attr_default_call>
