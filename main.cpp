@@ -33,11 +33,12 @@ PyObject *eval_func(PyThreadState *tstate, PyFrameObject *f, int throwflag) {
     tstate->cframe = &cframe;
     tstate->frame = f;
     PyObject *result;
-    ptrdiff_t resume_addr = f->f_lasti < 0 ? 0 : f->f_lineno;
+    if (f->f_lasti < 0) {
+        f->f_blockstack[CO_MAXBLOCKS - 1].b_handler = 0;
+    }
     if (!setjmp(cframe.frame_jmp_buf)) [[likely]] {
-        result = (*compiled_result)(&symbol_addresses[0], f, ptrdiff_t{resume_addr}, &resume_addr);
-        f->f_lineno = resume_addr;
-        // TODO: 为啥return的时候不要清理stack。答：嗷，因为是0
+        result = (*compiled_result)(&symbol_addresses[0], f);
+        assert(f->f_state != FRAME_RETURNED || f->f_stackdepth == 0);
     } else {
         f->f_stackdepth = compiled_result->sp_map[f->f_lasti];
         assert(_PyErr_Occurred(tstate));
@@ -117,7 +118,9 @@ PyObject *eval_func(PyThreadState *tstate, PyFrameObject *f, int throwflag) {
         }
 
         if (handler > 0) {
-            result = (*compiled_result)(&symbol_addresses[0], f, handler, &resume_addr);
+            f->f_blockstack[CO_MAXBLOCKS - 1].b_handler = handler;
+            result = (*compiled_result)(&symbol_addresses[0], f);
+            assert(f->f_state != FRAME_RETURNED || f->f_stackdepth == 0);
         } else {
             while (f->f_stackdepth) {
                 PyObject *v = f->f_valuestack[--f->f_stackdepth];

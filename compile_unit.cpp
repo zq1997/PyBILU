@@ -50,11 +50,23 @@ void CompileUnit::translate() {
     code_consts = getPointer(consts_tuple, &PyTupleObject::ob_item, "consts");
     rt_lasti = getPointer(frame_obj, &PyFrameObject::f_lasti, "lasti");
 
+    auto offset = offsetof(PyFrameObject, f_blockstack) +
+            sizeof(PyTryBlock) * (CO_MAXBLOCKS - 1) +
+            offsetof(PyTryBlock, b_handler);
+    coroutine_handler = getPointer<char>(frame_obj, offset, "coroutine_handler");
+    entry_jump = builder.CreateIndirectBr(builder.CreateInBoundsGEP(
+            context.type<char>(), BlockAddress::get(function, blocks[0]),
+            loadValue<int>(coroutine_handler, context.tbaa_frame_value, "jump_to_offset")
+    ), handler_num);
+    entry_jump->addDestination(blocks[0]);
+
     error_block = createBlock("raise_error");
 
     abstract_stack.reserve(py_code->co_stacksize);
-    for (auto &b : PtrRange(&blocks[0], block_num)) {
+    for (auto &b : PtrRange(blocks.getPointer(), block_num)) {
         abstract_stack_height = stack_height = b.initial_stack_height;
+        b.block->insertInto(function);
+        builder.SetInsertPoint(b);
         emitBlock(b);
     }
 
@@ -62,17 +74,6 @@ void CompileUnit::translate() {
     builder.SetInsertPoint(error_block);
     callSymbol<raiseException, &Context::attr_noreturn>();
     builder.CreateUnreachable();
-
-    // TODO: debug location有时候去除
-    builder.SetInsertPoint(entry_block);
-    auto indirect_br = builder.CreateIndirectBr(
-            builder.CreateInBoundsGEP(context.type<char>(), BlockAddress::get(blocks[0]),
-                    function->getArg(2)));
-    for (auto &b : PtrRange(blocks.getPointer(), block_num)) {
-        if (b.is_handler) {
-            indirect_br->addDestination(b);
-        }
-    }
 
     di_builder.finalize();
 }
@@ -125,10 +126,11 @@ std::pair<llvm::Value *, llvm::Value *> CompileUnit::do_GETLOCAL(PyOparg oparg) 
 
 Value *CompileUnit::getStackSlot(int i) {
     assert(stack_height >= i);
-    auto offset = offsetof(PyFrameObject, f_localsplus) + sizeof(PyObject *) * (stack_height - i +
-            py_code->co_nlocals +
-            PyTuple_GET_SIZE(py_code->co_cellvars) +
-            PyTuple_GET_SIZE(py_code->co_freevars)
+    auto offset = offsetof(PyFrameObject, f_localsplus) + sizeof(PyObject *) * (
+            stack_height - i +
+                    py_code->co_nlocals +
+                    PyTuple_GET_SIZE(py_code->co_cellvars) +
+                    PyTuple_GET_SIZE(py_code->co_freevars)
     );
     return getPointer<char>(frame_obj, offset, useName("stack.", i, "."));
 }

@@ -71,7 +71,6 @@ struct PyBasicBlock {
     bool fall_through{false};
     bool eh_body_enter{false};
     bool eh_body_exit{false};
-    bool is_handler{false};
 
     PyBasicBlock() {};
     PyBasicBlock(const PyBasicBlock &) = delete;
@@ -118,14 +117,17 @@ class CompileUnit {
     llvm::Argument *shared_symbols;
     llvm::Argument *frame_obj;
     llvm::Value *rt_lasti;
+    llvm::Value *coroutine_handler;
     llvm::BasicBlock *entry_block;
     llvm::BasicBlock *error_block;
     llvm::Value *code_names;
     llvm::Value *code_consts;
+    llvm::IndirectBrInst *entry_jump;
 
     PyCodeObject *py_code;
-    unsigned block_num{0};
-    unsigned try_block_num{0};
+    unsigned handler_num;
+    unsigned block_num;
+    unsigned try_block_num;
     DynamicArray<PyBasicBlock> blocks{};
     BitArray redundant_loads{};
 
@@ -215,7 +217,7 @@ class CompileUnit {
     llvm::Value *getSymbol(size_t offset);
 
     template <typename T>
-    std::enable_if_t<std::is_integral_v<T>, llvm::Constant *>
+    std::enable_if_t<std::is_integral_v<T> || std::is_enum_v<T>, llvm::Constant *>
     asValue(T t) { return llvm::ConstantInt::get(context.type<T>(), t); }
 
     auto createBlock(const llvm::Twine &name) {

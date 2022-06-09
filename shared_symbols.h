@@ -104,7 +104,8 @@ void handle_RERAISE(PyFrameObject *f, bool restore_lasti);
 void handle_SETUP_WITH(PyFrameObject *f, PyObject **sp, int handler);
 PyObject *handle_WITH_EXCEPT_START(PyObject *exc, PyObject *val, PyObject *tb, PyObject *exit_func);
 
-PyObject *handle_YIELD_VALUE(PyObject *retval);
+PyObject *handle_YIELD_VALUE(PyObject *val);
+PyObject *handle_GET_YIELD_FROM_ITER(PyObject *iterable, bool is_coroutine);
 
 bool castPyObjectToBool(PyObject *o);
 
@@ -203,6 +204,8 @@ constexpr std::tuple external_symbols{
         ENTRY(handle_WITH_EXCEPT_START),
 
         ENTRY(handle_YIELD_VALUE),
+        ENTRY(handle_GET_YIELD_FROM_ITER),
+        ENTRY(PyIter_Send),
 
         ENTRY(castPyObjectToBool),
 
@@ -236,7 +239,7 @@ constexpr auto searchSymbol() {
 
 extern const std::array<const char *, external_symbol_count> symbol_names;
 extern const std::array<void *, external_symbol_count> symbol_addresses;
-using CompiledFunction = PyObject *(void *const[], PyFrameObject *, ptrdiff_t, ptrdiff_t *);
+using CompiledFunction = PyObject *(void *const[], PyFrameObject *);
 
 template <typename T, typename = void>
 struct Normalizer;
@@ -250,7 +253,12 @@ struct Normalizer<T, std::enable_if_t<std::is_same_v<T, bool>>> {
 };
 
 template <typename T>
-struct Normalizer<T, std::enable_if_t<!std::is_same_v<T, bool> && std::is_integral_v<T>>> {
+struct Normalizer<T, std::enable_if_t<std::is_enum_v<T>>> {
+    using type = std::make_signed_t<std::underlying_type_t<T>>;
+};
+
+template <typename T>
+struct Normalizer<T, std::enable_if_t<std::is_integral_v<T> && !std::is_same_v<T, bool>>> {
     using type = std::make_signed_t<T>;
 };
 

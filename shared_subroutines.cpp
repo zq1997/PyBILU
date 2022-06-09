@@ -1424,49 +1424,46 @@ PyObject *handle_WITH_EXCEPT_START(PyObject *exc, PyObject *val, PyObject *tb, P
     return res;
 }
 
+PyObject *handle_YIELD_VALUE(PyObject *val) {
+    auto &state = _PyInterpreterState_GET()->async_gen;
+    assert(!Py_DEBUG || state.value_numfree != -1);
 
-static struct _Py_async_gen_state *
-get_async_gen_state(void) {
-    PyInterpreterState *interp = _PyInterpreterState_GET();
-    return &interp->async_gen;
-}
-
-typedef struct _PyAsyncGenWrappedValue {
-    PyObject_HEAD
-    PyObject *agw_val;
-} _PyAsyncGenWrappedValue;
-
-static PyObject *
-my_PyAsyncGenValueWrapperNew(PyObject *val) {
-    _PyAsyncGenWrappedValue *o;
-    assert(val);
-
-    struct _Py_async_gen_state *state = get_async_gen_state();
-#ifdef Py_DEBUG
-    // _PyAsyncGenValueWrapperNew() must not be called after _PyAsyncGen_Fini()
-    assert(state->value_numfree != -1);
-#endif
-    if (state->value_numfree) {
-        state->value_numfree--;
-        o = state->value_freelist[state->value_numfree];
+    PyObject *o;
+    if (state.value_numfree) {
+        o = reinterpret_cast<PyObject *>(state.value_freelist[--state.value_numfree]);
         assert(Py_IS_TYPE(o, &_PyAsyncGenWrappedValue_Type));
-        _Py_NewReference((PyObject *) o);
+        _Py_NewReference(o);
     } else {
-        o = PyObject_GC_New(_PyAsyncGenWrappedValue, &_PyAsyncGenWrappedValue_Type);
-        if (o == NULL) {
-            return NULL;
-        }
+        o = _PyObject_GC_New(&_PyAsyncGenWrappedValue_Type);
+        // 要不要DECREF
+        gotoErrorHandler(!o);
     }
-    o->agw_val = val;
+
+    struct _PyAsyncGenWrappedValueLayout {
+        PyObject_HEAD
+        PyObject *agw_val;
+    };
     Py_INCREF(val);
-    _PyObject_GC_TRACK((PyObject *) o);
-    return (PyObject *) o;
+    reinterpret_cast<_PyAsyncGenWrappedValueLayout *>(o)->agw_val = val;
+    _PyObject_GC_TRACK(o);
+    return o;
 }
 
-PyObject *handle_YIELD_VALUE(PyObject *retval) {
-    retval = my_PyAsyncGenValueWrapperNew(retval);
-    gotoErrorHandler(!retval);
-    return retval;
+PyObject *handle_GET_YIELD_FROM_ITER(PyObject *iterable, bool is_coroutine) {
+    if (PyCoro_CheckExact(iterable)) {
+        if (!is_coroutine) {
+            auto tstate = _PyThreadState_GET();
+            _PyErr_SetString(tstate, PyExc_TypeError,
+                    "cannot 'yield from' a coroutine object in a non-coroutine generator");
+            gotoErrorHandler(tstate);
+        }
+    } else if (!PyGen_CheckExact(iterable)) {
+        auto iter = PyObject_GetIter(iterable);
+        gotoErrorHandler(!iter);
+        return iter;
+    }
+    Py_INCREF(iterable);
+    return iterable;
 }
 
 const array<const char *, external_symbol_count> symbol_names{apply(

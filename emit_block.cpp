@@ -51,9 +51,6 @@ void CompileUnit::emitRotN(PyOparg n) {
 }
 
 void CompileUnit::emitBlock(PyBasicBlock &this_block) {
-    this_block.block->insertInto(function);
-    builder.SetInsertPoint(this_block);
-
     auto &defined_locals = this_block.locals_input;
 
     for (auto i : IntRange(1, stack_height + 1)) {
@@ -773,14 +770,12 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
         }
 
         case SETUP_FINALLY: {
-            auto block_addr_diff = builder.CreateSub(
+            entry_jump->addDestination(*this_block.branch);
+            auto block_addr_diff = builder.CreateIntCast(builder.CreateSub(
                     builder.CreatePtrToInt(BlockAddress::get(function, *this_block.branch), context.type<uintptr_t>()),
                     builder.CreatePtrToInt(BlockAddress::get(function, blocks[0]), context.type<uintptr_t>())
-            );
-            callSymbol<PyFrame_BlockSetup>(frame_obj,
-                    asValue<int>(SETUP_FINALLY),
-                    builder.CreateIntCast(block_addr_diff, context.type<int>(), true),
-                    asValue<int>(stack_height));
+            ), context.type<int>(), true);
+            callSymbol<PyFrame_BlockSetup>(frame_obj, asValue<int>(SETUP_FINALLY), block_addr_diff, asValue<int>(stack_height));
             builder.CreateBr(this_block.next());
             break;
         }
@@ -807,13 +802,12 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
             break;
         }
         case SETUP_WITH: {
-            auto &py_finally_block = *this_block.branch;
-            auto block_addr_diff = builder.CreateSub(
-                    builder.CreatePtrToInt(BlockAddress::get(function, py_finally_block), context.type<uintptr_t>()),
+            entry_jump->addDestination(*this_block.branch);
+            auto block_addr_diff = builder.CreateIntCast(builder.CreateSub(
+                    builder.CreatePtrToInt(BlockAddress::get(function, *this_block.branch), context.type<uintptr_t>()),
                     builder.CreatePtrToInt(BlockAddress::get(function, blocks[0]), context.type<uintptr_t>())
-            );
-            callSymbol<handle_SETUP_WITH>(frame_obj, getStackSlot(),
-                    builder.CreateIntCast(block_addr_diff, context.type<int>(), true));
+            ), context.type<int>(), true);
+            callSymbol<handle_SETUP_WITH>(frame_obj, getStackSlot(), block_addr_diff);
             stack_height += 1;
             builder.CreateBr(this_block.next());
             break;
@@ -838,43 +832,80 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
             break;
         }
         case YIELD_VALUE: {
-            // retval = POP();
-            //
-            // if (co->co_flags & CO_ASYNC_GENERATOR) {
-            //     PyObject *w = _PyAsyncGenValueWrapperNew(retval);
-            //     Py_DECREF(retval);
-            //     if (w == NULL) {
-            //         retval = NULL;
-            //         goto error;
-            //     }
-            //     retval = w;
-            // }
-            // f->f_state = FRAME_SUSPENDED;
-            // f->f_stackdepth = (int)(stack_pointer - f->f_valuestack);
-            // goto exiting;
-            //
-            auto retval = do_POP_with_newref();
+            Value *retval;
             if (py_code->co_flags & CO_ASYNC_GENERATOR) {
-                // TODO: 没有实现
-                // retval = callSymbol<handle_YIELD_VALUE>(retval);
-                assert(0);
+                auto poped = do_POP();
+                retval = callSymbol<handle_YIELD_VALUE>(retval);
+                do_Py_DECREF(poped);
+            } else {
+                retval = do_POP_with_newref();
             }
-            auto block_addr_diff = builder.CreateSub(
-                    builder.CreatePtrToInt(BlockAddress::get(function, this_block.next()), context.type<uintptr_t>()),
+            auto resume_block = appendBlock("YIELD_VALUE.resume");
+            entry_jump->addDestination(resume_block);
+            auto block_addr_diff = builder.CreateIntCast(builder.CreateSub(
+                    builder.CreatePtrToInt(BlockAddress::get(function, resume_block), context.type<uintptr_t>()),
                     builder.CreatePtrToInt(BlockAddress::get(function, blocks[0]), context.type<uintptr_t>())
-            );
-            storeValue<ptrdiff_t>(block_addr_diff, function->getArg(3), nullptr);
+            ), context.type<int>(), true);
+            storeValue<int>(block_addr_diff, coroutine_handler, context.tbaa_frame_value);
             storeFiledValue(asValue<PyFrameState>(FRAME_SUSPENDED), frame_obj, &PyFrameObject::f_state, context.tbaa_obj_field);
             storeFiledValue(asValue<int>(stack_height), frame_obj, &PyFrameObject::f_stackdepth, context.tbaa_obj_field);
             builder.CreateRet(retval);
+            builder.SetInsertPoint(resume_block);
+            stack_height++;
+            abstract_stack[abstract_stack_height++] =
+                    {loadValue<PyObject *>(getStackSlot(1), context.tbaa_frame_value), true};
             break;
         }
         case GET_YIELD_FROM_ITER: {
-            throw runtime_error("unimplemented opcode");
+            auto iterable = do_POP();
+            bool is_coroutine = py_code->co_flags & (CO_COROUTINE | CO_ITERABLE_COROUTINE);
+            auto iter = callSymbol<handle_GET_YIELD_FROM_ITER>(iterable, asValue(is_coroutine));
+            do_PUSH(iter);
+            do_Py_DECREF(iterable);
             break;
         }
         case YIELD_FROM: {
-            throw runtime_error("unimplemented opcode");
+            auto resume_block = appendBlock("YIELD_FROM.resume");
+            builder.CreateBr(resume_block);
+            builder.SetInsertPoint(resume_block);
+            entry_jump->addDestination(resume_block);
+
+            --abstract_stack_height;
+            --stack_height;
+            assert(abstract_stack[abstract_stack_height].really_pushed);
+            auto v = loadValue<PyObject *>(getStackSlot(), context.tbaa_frame_value, "YIELD_FROM.sending_value");
+            --abstract_stack_height;
+            --stack_height;
+            assert(abstract_stack[abstract_stack_height].really_pushed);
+            auto receiver = loadValue<PyObject *>(getStackSlot(), context.tbaa_frame_value, "YIELD_FROM.receiver");
+
+            // TODO: trace support when tstate->c_tracefunc != NULL
+            auto retval_ptr = builder.CreateAlloca(context.type<PyObject *>());
+            auto gen_status = callSymbol<PyIter_Send>(receiver, v, retval_ptr);
+            // TODO: ok_block叫b_ok吧，或者反过来，统一化
+            auto ok_block = appendBlock("YIELD_FROM.ok");
+            builder.CreateCondBr(builder.CreateICmpNE(gen_status, asValue(PYGEN_ERROR)), ok_block, error_block, context.likely_true);
+            builder.SetInsertPoint(ok_block);
+            auto retval = loadValue<PyObject *>(retval_ptr, nullptr, "retval");
+            do_Py_DECREF(v);
+            auto b_next = appendBlock("YIELD_FROM.next");
+            auto b_return = appendBlock("YIELD_FROM.return");
+            builder.CreateCondBr(builder.CreateICmpEQ(gen_status, asValue(PYGEN_NEXT)), b_next, b_return, context.likely_true);
+
+            builder.SetInsertPoint(b_next);
+            auto block_addr_diff = builder.CreateIntCast(builder.CreateSub(
+                    builder.CreatePtrToInt(BlockAddress::get(function, resume_block), context.type<uintptr_t>()),
+                    builder.CreatePtrToInt(BlockAddress::get(function, blocks[0]), context.type<uintptr_t>())
+            ), context.type<int>(), true);
+            storeValue<int>(block_addr_diff, coroutine_handler, context.tbaa_frame_value);
+            storeFiledValue(asValue<PyFrameState>(FRAME_SUSPENDED), frame_obj, &PyFrameObject::f_state, context.tbaa_obj_field);
+            storeFiledValue(asValue<int>(stack_height + 1), frame_obj, &PyFrameObject::f_stackdepth, context.tbaa_obj_field);
+            builder.CreateRet(retval);
+
+            // TODO: push/pop现在的实现，对处理多分支等情况不太友好，想办法改善
+            builder.SetInsertPoint(b_return);
+            do_Py_DECREF(receiver);
+            do_PUSH(retval);
             break;
         }
         case GET_AWAITABLE: {
@@ -905,8 +936,8 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
             throw runtime_error("unexpected opcode");
         }
     }
-    // 排除分支已经跳转或者yield回归
-    if (this_block.fall_through && !this_block.branch && !this_block.next().is_handler) {
+    // 排除分支已经跳转
+    if (this_block.fall_through && !this_block.branch) {
         assert(!builder.GetInsertBlock()->getTerminator());
         builder.CreateBr(this_block.next());
     }

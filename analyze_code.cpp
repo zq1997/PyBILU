@@ -77,13 +77,16 @@ void CompileUnit::parseCFG() {
     redundant_loads.reserve(py_instr_num, false);
 
     BitArray is_boundary(py_instr_num + 1);
+    handler_num = 1;
     block_num = 0;
+    try_block_num = 0;
 
     const PyInstrPointer py_instr{py_code};
     for (auto vpc : IntRange(py_instr_num)) {
         auto instr = py_instr + vpc;
         auto opcode = instr.opcode();
-        if (opcode == POP_BLOCK || opcode == YIELD_VALUE) {
+        handler_num += opcode == YIELD_VALUE;
+        if (opcode == POP_BLOCK) {
             block_num += is_boundary.checkAndSet(vpc + 1);
         } else {
             auto is_try_setup = isTryBlockSetup(opcode);
@@ -106,7 +109,6 @@ void CompileUnit::parseCFG() {
 
     unsigned created_block_num = 0;
     unsigned start_index = 0;
-    bool is_handler = true;
     for (auto i : IntRange(BitArray::chunkNumber(py_instr_num + 1))) {
         unsigned j = 0;
         for (auto bits = is_boundary.getChunk(i); bits; bits >>= 1) {
@@ -114,14 +116,12 @@ void CompileUnit::parseCFG() {
                 auto &b = blocks[created_block_num++];
                 b.end_index = i * BitArray::bits_per_chunk + j;
                 b.block = createBlock(useName("instr.", start_index));
-                b.is_handler = is_handler;
                 auto tail_instr = py_instr + (b.end_index - 1);
                 auto opcode = tail_instr.opcode();
-                if (opcode == POP_BLOCK || opcode == YIELD_VALUE) {
+                if (opcode == POP_BLOCK) {
                     b.fall_through = true;
                     b._branch_offset = py_instr_num;
                     b.eh_body_exit = opcode == POP_BLOCK;
-                    is_handler = opcode == YIELD_VALUE;
                 } else {
                     b.fall_through = !isTerminator(opcode);
                     auto is_try_setup = isTryBlockSetup(opcode);
@@ -133,7 +133,7 @@ void CompileUnit::parseCFG() {
                         b._branch_offset = py_instr_num;
                     }
                     b.eh_body_enter = is_try_setup;
-                    is_handler = false;
+                    handler_num += is_try_setup;
                 }
                 start_index = b.end_index;
             }
@@ -151,7 +151,6 @@ void CompileUnit::parseCFG() {
         if (b._branch_offset != py_instr_num) {
             auto branch_block = findPyBlock(blocks.getPointer(), block_num, b._branch_offset);
             if (b.eh_body_enter) {
-                branch_block->is_handler = true;
                 auto &eb = *(b.branch = &blocks[exception_block_index++]);
                 eb.locals_kept.reserve(nlocals, true);
                 eb.locals_set.reserve(nlocals, false);
@@ -610,7 +609,14 @@ void CompileUnit::doIntraBlockAnalysis() {
             stack.pop();
             break;
         case GET_YIELD_FROM_ITER:
+            stack.push();
+            stack.pop();
+            break;
         case YIELD_FROM:
+            stack.push();
+            stack.pop(stack.until_forever);
+            stack.pop(stack.until_forever);
+            break;
         case GET_AWAITABLE:
         case GET_AITER:
         case GET_ANEXT:
@@ -638,6 +644,9 @@ void analyzeEHBlock(PyBasicBlock &eb, unsigned nlocals, unsigned nesting_depth, 
     }
     nesting_depth = nesting_depth + b.eh_body_enter - b.eh_body_exit;
     if (b.fall_through && nesting_depth) {
+        if (nesting_depth >= CO_MAXBLOCKS - 1) {
+            throw runtime_error("too much nesting blocks");
+        }
         analyzeEHBlock(eb, nlocals, nesting_depth, b.next());
     }
 }
