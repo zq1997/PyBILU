@@ -53,10 +53,7 @@ void CompileUnit::emitRotN(PyOparg n) {
 void CompileUnit::emitBlock(PyBasicBlock &this_block) {
     auto &defined_locals = this_block.locals_input;
 
-    for (auto i : IntRange(1, stack_height + 1)) {
-        abstract_stack[abstract_stack_height - i]
-                = {loadValue<PyObject *>(getStackSlot(i), context.tbaa_frame_value), true};
-    }
+    declareStackGrowth(this_block.initial_stack_height);
 
     const PyInstrPointer py_instr{py_code};
     PyOparg extended_oparg = 0;
@@ -141,10 +138,12 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
                 Py_DECREF(repr);
             }
             auto is_redundant = redundant_loads.get(vpc);
-            if (!is_redundant) {
+            if (is_redundant) {
+                do_RedundantPUSH(value, false, oparg);
+            } else {
+                do_PUSH(value);
                 do_Py_INCREF(value);
             }
-            do_PUSH(value, !is_redundant);
             break;
         }
         case LOAD_FAST: {
@@ -159,7 +158,12 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
             if (!is_redundant) {
                 do_Py_INCREF(value);
             }
-            do_PUSH(value, !is_redundant);
+            if (is_redundant) {
+                do_RedundantPUSH(value, true, oparg);
+            } else {
+                do_PUSH(value);
+                do_Py_INCREF(value);
+            }
             defined_locals.set(oparg);
             break;
         }
@@ -258,11 +262,10 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
             break;
         }
         case LOAD_METHOD: {
-            callSymbol<handle_LOAD_METHOD>(getName(oparg), getStackSlot(1));
-            stack_height += 1;
-            abstract_stack_height += 1;
-            abstract_stack[abstract_stack_height - 1] = {nullptr, true};
-            abstract_stack[abstract_stack_height - 2] = {nullptr, true};
+            abstract_stack_height -= 1;
+            stack_height -= 1;
+            callSymbol<handle_LOAD_METHOD>(getName(oparg), getStackSlot(0));
+            declareStackGrowth(2);
             break;
         }
         case STORE_ATTR: {
@@ -851,9 +854,9 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
             storeFiledValue(asValue<int>(stack_height), frame_obj, &PyFrameObject::f_stackdepth, context.tbaa_obj_field);
             builder.CreateRet(retval);
             builder.SetInsertPoint(resume_block);
-            stack_height++;
-            abstract_stack[abstract_stack_height++] =
-                    {loadValue<PyObject *>(getStackSlot(1), context.tbaa_frame_value), true};
+            abstract_stack_height += 1;
+            stack_height += 1;
+            prepareAbstractStack();
             break;
         }
         case GET_YIELD_FROM_ITER: {
@@ -870,14 +873,10 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
             builder.SetInsertPoint(resume_block);
             entry_jump->addDestination(resume_block);
 
-            --abstract_stack_height;
-            --stack_height;
-            assert(abstract_stack[abstract_stack_height].really_pushed);
-            auto v = loadValue<PyObject *>(getStackSlot(), context.tbaa_frame_value, "YIELD_FROM.sending_value");
-            --abstract_stack_height;
-            --stack_height;
-            assert(abstract_stack[abstract_stack_height].really_pushed);
-            auto receiver = loadValue<PyObject *>(getStackSlot(), context.tbaa_frame_value, "YIELD_FROM.receiver");
+            prepareAbstractStack();
+
+            auto v = do_POP();
+            auto receiver = do_POP();
 
             // TODO: trace support when tstate->c_tracefunc != NULL
             auto retval_ptr = builder.CreateAlloca(context.type<PyObject *>());

@@ -137,6 +137,11 @@ class CompileUnit {
     struct StackValue {
         llvm::Value *value;
         bool really_pushed;
+        bool is_local;
+        PyOparg index;
+
+        // StackValue() = delete;
+        StackValue() {}
     };
 
     DynamicArray<StackValue> abstract_stack{};
@@ -152,15 +157,20 @@ class CompileUnit {
     void translate();
     void emitBlock(PyBasicBlock &this_block);
     void emitRotN(PyOparg n);
+    void prepareAbstractStack();
+    void declareStackGrowth(int n);
 
     std::pair<llvm::Value *, llvm::Value *> do_GETLOCAL(PyOparg oparg);
     llvm::Value *getName(int i);
     llvm::Value *getFreevar(int i);
     llvm::Value *getStackSlot(int i = 0);
-    void do_PUSH(llvm::Value *value, bool really_pushed = true);
+    void do_PUSH(llvm::Value *value);
+    void do_RedundantPUSH(llvm::Value *value, bool is_local, PyOparg index);
 
-    struct FetchedStackValue : public StackValue {
-        explicit FetchedStackValue(const StackValue &v) : StackValue{v} {}
+    struct FetchedStackValue {
+        llvm::Value *const value;
+
+        explicit FetchedStackValue(const StackValue &v) : value{v.value} {}
 
         FetchedStackValue(const FetchedStackValue &) = delete;
 
@@ -169,10 +179,12 @@ class CompileUnit {
 
     FetchedStackValue fetchStackValue(int i);
 
-    struct PoppedStackValue : public StackValue {
+    struct PoppedStackValue {
+        llvm::Value *const value;
+        const bool really_pushed;
         IF_DEBUG(bool has_decref{false};)
 
-        explicit PoppedStackValue(const StackValue &v) : StackValue{v} {}
+        explicit PoppedStackValue(const StackValue &v) : value{v.value}, really_pushed(v.really_pushed) {}
 
         PoppedStackValue(const PoppedStackValue &) = delete;
 

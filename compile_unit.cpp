@@ -64,7 +64,7 @@ void CompileUnit::translate() {
 
     abstract_stack.reserve(py_code->co_stacksize);
     for (auto &b : PtrRange(blocks.getPointer(), block_num)) {
-        abstract_stack_height = stack_height = b.initial_stack_height;
+        abstract_stack_height = stack_height = 0;
         b.block->insertInto(function);
         builder.SetInsertPoint(b);
         emitBlock(b);
@@ -80,17 +80,22 @@ void CompileUnit::translate() {
 
 void CompileUnit::do_Py_INCREF(Value *py_obj) {
     // callSymbol<handle_INCREF, &Translator::attr_refcnt_call>(py_obj);
-    auto ref = getPointer(py_obj, &PyObject::ob_refcnt);
+    Value *ref = py_obj;
+    if constexpr (offsetof(PyObject, ob_refcnt)) {
+        ref = getPointer(py_obj, &PyObject::ob_refcnt);
+    }
     auto old_value = loadValue<decltype(PyObject::ob_refcnt)>(ref, context.tbaa_refcnt);
     auto *delta_1 = asValue(decltype(PyObject::ob_refcnt){1});
     auto new_value = builder.CreateAdd(old_value, delta_1);
-    // builder.CreateAssumption(builder.CreateICmpSGT(new_value, delta_1)); // 需要么
     storeValue<decltype(PyObject::ob_refcnt)>(new_value, ref, context.tbaa_refcnt);
 }
 
 void CompileUnit::do_Py_DECREF(Value *py_obj) {
     // callSymbol<handle_DECREF, &Translator::attr_refcnt_call>(py_obj);
-    auto ref = getPointer(py_obj, &PyObject::ob_refcnt);
+    Value *ref = py_obj;
+    if constexpr (offsetof(PyObject, ob_refcnt)) {
+        ref = getPointer(py_obj, &PyObject::ob_refcnt);
+    }
     auto old_value = loadValue<decltype(PyObject::ob_refcnt)>(ref, context.tbaa_refcnt);
     auto *delta_1 = asValue(decltype(PyObject::ob_refcnt){1});
     auto *zero = asValue(decltype(PyObject::ob_refcnt){0});
@@ -158,12 +163,21 @@ void CompileUnit::popAndSave(llvm::Value *slot, llvm::MDNode *tbaa_node) {
     storeValue<PyObject *>(do_POP_with_newref(), slot, tbaa_node);
 }
 
-void CompileUnit::do_PUSH(llvm::Value *value, bool really_pushed) {
-    abstract_stack[abstract_stack_height++] = {value, really_pushed};
-    if (really_pushed) {
-        storeValue<PyObject *>(value, getStackSlot(), context.tbaa_frame_value);
-        stack_height++;
-    }
+void CompileUnit::do_PUSH(llvm::Value *value) {
+    auto &stack_value = abstract_stack[abstract_stack_height++];
+    stack_value.value = value;
+    stack_value.really_pushed = true;
+    storeValue<PyObject *>(value, getStackSlot(), context.tbaa_frame_value);
+    stack_height++;
+}
+
+void CompileUnit::do_RedundantPUSH(llvm::Value *value, bool is_local, PyOparg index) {
+    // TODO: 构造函数赋值吧
+    auto &stack_value = abstract_stack[abstract_stack_height++];
+    stack_value.value = value;
+    stack_value.really_pushed = false;
+    stack_value.is_local = is_local;
+    stack_value.index = index;
 }
 
 Value *CompileUnit::getName(int i) {
@@ -243,6 +257,34 @@ static void debugDumpObj(PyObject *py_code, Module &module, SmallVector<char> *o
             throw runtime_error("llvm module verification failed");
         }
     }
+}
+
+
+void CompileUnit::declareStackGrowth(int n) {
+    for ([[maybe_unused]]auto i : IntRange(n)) {
+        auto &v = abstract_stack[abstract_stack_height + i];
+        v.really_pushed = true;
+        v.value = loadValue<PyObject *>(getStackSlot(0), context.tbaa_frame_value);
+        abstract_stack_height++;
+        stack_height++;
+    }
+}
+
+void CompileUnit::prepareAbstractStack() {
+    auto j = 0;
+    for (auto i : IntRange(abstract_stack_height)) {
+        auto &v = abstract_stack[abstract_stack_height - i - 1];
+        if (v.really_pushed) {
+            v.value = loadValue<PyObject *>(getStackSlot(++j), context.tbaa_frame_value);
+        } else if (v.is_local) {
+            v.value = do_GETLOCAL(v.index).second;
+        } else {
+            // TODO: get const也作为函数
+            auto ptr = getPointer<PyObject *>(code_consts, v.index);
+            v.value = loadValue<PyObject *>(ptr, context.tbaa_code_const, "prepareAbstractStack");
+        }
+    }
+    assert(j == stack_height);
 }
 
 static void notifyCodeLoaded(PyObject *py_code, void *code_addr) {}

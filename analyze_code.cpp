@@ -573,6 +573,7 @@ void CompileUnit::doIntraBlockAnalysis() {
         case RAISE_VARARGS:
         case SETUP_ANNOTATIONS:
         case PRINT_EXPR:
+            throw runtime_error("尚未实现");
             break;
 
         case SETUP_FINALLY:
@@ -614,7 +615,7 @@ void CompileUnit::doIntraBlockAnalysis() {
             break;
         case YIELD_FROM:
             stack.push();
-            stack.pop(stack.until_forever);
+            stack.pop();
             stack.pop(stack.until_forever);
             break;
         case GET_AWAITABLE:
