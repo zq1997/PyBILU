@@ -297,6 +297,8 @@ public:
 
 
     auto operator+(ptrdiff_t offset) const { return PyInstrPointer{pointer + offset}; }
+
+    // TODO: 定义取下标为opcode，或者带偏移参数的opcode
 };
 
 // TODO: N-dim动态数组

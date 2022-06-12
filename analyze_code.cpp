@@ -619,9 +619,20 @@ void CompileUnit::doIntraBlockAnalysis() {
             stack.pop(stack.until_forever);
             break;
         case GET_AWAITABLE:
+            stack.push();
+            stack.pop();
+            break;
         case GET_AITER:
+            stack.push();
+            stack.pop();
+            break;
         case GET_ANEXT:
+            stack.push();
+            stack.pop();
+            break;
         case END_ASYNC_FOR:
+            stack.pop_n_consecutively(7);
+            break;
         case SETUP_ASYNC_WITH:
         case BEFORE_ASYNC_WITH:
         default:

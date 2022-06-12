@@ -49,12 +49,107 @@ void handle_XDECREF(PyObject *obj) {
 }
 
 // TODO: 在想，能不能设计俩版本，decref在这里实现
-// TODO: 很多函数是否应该展开，把Python的实现复制过来，降低调用层数
 // TODO: 能否设置hot inline等确保展开
 
-[[noreturn]] static void gotoErrorHandler(PyThreadState *tstate) {
+[[noreturn]] static void gotoUnwind(PyThreadState *tstate, PyFrameObject *f) {
     auto cframe = static_cast<ExtendedCFrame *>(tstate->cframe);
-    longjmp(cframe->frame_jmp_buf, 1);
+    f->f_state = FRAME_UNWINDING;
+    ptrdiff_t handler = -1;
+
+    while (f->f_iblock > 0) {
+        /* Pop the current block. */
+        PyTryBlock *b = &f->f_blockstack[--f->f_iblock];
+
+        if (b->b_type == EXCEPT_HANDLER) {
+            PyObject *type, *value, *traceback;
+            while (f->f_stackdepth > b->b_level + 3) {
+                Py_XDECREF(f->f_valuestack[--f->f_stackdepth]);
+            }
+            auto exc_info = tstate->exc_info;
+            type = exc_info->exc_type;
+            value = exc_info->exc_value;
+            traceback = exc_info->exc_traceback;
+            exc_info->exc_type = f->f_valuestack[--f->f_stackdepth];
+            exc_info->exc_value = f->f_valuestack[--f->f_stackdepth];
+            exc_info->exc_traceback = f->f_valuestack[--f->f_stackdepth];
+            Py_XDECREF(type);
+            Py_XDECREF(value);
+            Py_XDECREF(traceback);
+            continue;
+        }
+        while (f->f_stackdepth > b->b_level) {
+            PyObject *v = f->f_valuestack[--f->f_stackdepth];
+            Py_XDECREF(v);
+        }
+        assert(b->b_type == SETUP_FINALLY);
+        if (b->b_type == SETUP_FINALLY) {
+            PyObject *exc, *val, *tb;
+            handler = b->b_handler;
+            _PyErr_StackItem *exc_info = tstate->exc_info;
+            /* Beware, this invalidates all b->b_* fields */
+            PyFrame_BlockSetup(f, EXCEPT_HANDLER, f->f_lasti, f->f_stackdepth);
+            f->f_valuestack[f->f_stackdepth++] = exc_info->exc_traceback;
+            f->f_valuestack[f->f_stackdepth++] = exc_info->exc_value;
+            if (exc_info->exc_type) {
+                f->f_valuestack[f->f_stackdepth++] = exc_info->exc_type;
+            } else {
+                Py_INCREF(Py_None);
+                f->f_valuestack[f->f_stackdepth++] = Py_None;
+            }
+            _PyErr_Fetch(tstate, &exc, &val, &tb);
+            /* Make the raw exception data
+               available to the handler,
+               so a program can emulate the
+               Python main loop. */
+            _PyErr_NormalizeException(tstate, &exc, &val, &tb);
+            if (tb) {
+                PyException_SetTraceback(val, tb);
+            } else {
+                PyException_SetTraceback(val, Py_None);
+            }
+            Py_INCREF(exc);
+            exc_info->exc_type = exc;
+            Py_INCREF(val);
+            exc_info->exc_value = val;
+            exc_info->exc_traceback = tb;
+            if (!tb) {
+                tb = Py_None;
+            }
+            Py_INCREF(tb);
+            f->f_valuestack[f->f_stackdepth++] = tb;
+            f->f_valuestack[f->f_stackdepth++] = val;
+            f->f_valuestack[f->f_stackdepth++] = exc;
+            /* Resume normal execution */
+            f->f_state = FRAME_EXECUTING;
+            break;
+        }
+    }
+
+    if (handler >= 0) {
+        f->f_blockstack[CO_MAXBLOCKS - 1].b_handler = handler;
+        longjmp(cframe->frame_jmp_buf, 1);
+    } else {
+        while (f->f_stackdepth) {
+            PyObject *v = f->f_valuestack[--f->f_stackdepth];
+            Py_XDECREF(v);
+        }
+        f->f_state = FRAME_RAISED;
+        longjmp(cframe->frame_jmp_buf, 2);
+    }
+}
+
+static auto getStackDepth(PyThreadState *tstate, PyFrameObject *frame) {
+    assert(tstate->frame == frame);
+    return static_cast<ExtendedCFrame *>(tstate->cframe)->sp_map[frame->f_lasti];
+}
+
+[[noreturn]] static void gotoErrorHandler(PyThreadState *tstate) {
+    assert(_PyErr_Occurred(tstate));
+    auto f = tstate->frame;
+    PyTraceBack_Here(f);
+    assert(!tstate->c_tracefunc); // TODO: 要不要支持它
+    f->f_stackdepth = getStackDepth(tstate, f);
+    gotoUnwind(tstate, f);
 }
 
 [[noreturn]] static void gotoErrorHandler() {
@@ -1330,17 +1425,19 @@ void handle_POP_EXCEPT(PyFrameObject *f) {
         _PyErr_SetString(tstate, PyExc_SystemError, "popped block is not an except handler");
         gotoErrorHandler(tstate);
     }
-    assert(f->f_stackdepth >= (b)->b_level + 3 && f->f_stackdepth <= (b)->b_level + 4);
+    auto stackdepth = getStackDepth(tstate, f);
+    assert(stackdepth >= (b)->b_level + 3 && stackdepth <= (b)->b_level + 4);
     auto exc_info = tstate->exc_info;
     auto type = exc_info->exc_type;
     auto value = exc_info->exc_value;
     auto traceback = exc_info->exc_traceback;
-    exc_info->exc_type = f->f_valuestack[--f->f_stackdepth];
-    exc_info->exc_value = f->f_valuestack[--f->f_stackdepth];
-    exc_info->exc_traceback = f->f_valuestack[--f->f_stackdepth];
+    exc_info->exc_type = f->f_valuestack[--stackdepth];
+    exc_info->exc_value = f->f_valuestack[--stackdepth];
+    exc_info->exc_traceback = f->f_valuestack[--stackdepth];
     Py_XDECREF(type);
     Py_XDECREF(value);
     Py_XDECREF(traceback);
+    f->f_stackdepth = stackdepth;
 }
 
 bool handle_JUMP_IF_NOT_EXC_MATCH(PyObject *left, PyObject *right) {
@@ -1370,15 +1467,17 @@ void handle_RERAISE(PyFrameObject *f, bool restore_lasti) {
     assert(f->f_iblock > 0);
     const auto &try_block = f->f_blockstack[f->f_iblock - 1];
     f->f_lasti = restore_lasti ? try_block.b_handler : f->f_lasti;
-    assert(f->f_stackdepth == try_block.b_level + 6);
-    // TODO: 直接传arr[3]进来如何
-    PyObject *exc = f->f_valuestack[--f->f_stackdepth];
-    PyObject *val = f->f_valuestack[--f->f_stackdepth];
-    PyObject *tb = f->f_valuestack[--f->f_stackdepth];
-    assert(PyExceptionClass_Check(exc));
     auto tstate = _PyThreadState_GET();
+    auto stackdepth = getStackDepth(tstate, f);
+    assert(stackdepth == try_block.b_level + 6);
+    // TODO: 直接传arr[3]进来如何
+    PyObject *exc = f->f_valuestack[--stackdepth];
+    PyObject *val = f->f_valuestack[--stackdepth];
+    PyObject *tb = f->f_valuestack[--stackdepth];
+    f->f_stackdepth = stackdepth;
+    assert(PyExceptionClass_Check(exc));
     _PyErr_Restore(tstate, exc, val, tb);
-    gotoErrorHandler();
+    gotoUnwind(tstate, f);
 }
 
 void handle_SETUP_WITH(PyFrameObject *f, PyObject **sp, int handler) {
@@ -1464,6 +1563,154 @@ PyObject *handle_GET_YIELD_FROM_ITER(PyObject *iterable, bool is_coroutine) {
     }
     Py_INCREF(iterable);
     return iterable;
+}
+
+PyObject *getAwaitableIter(PyObject *obj) {
+    const auto gen_is_coroutine = [](PyObject *o) {
+        if (PyGen_CheckExact(o)) {
+            auto code = reinterpret_cast<PyCodeObject *>(reinterpret_cast<PyGenObject *>(o)->gi_code);
+            if (code->co_flags & CO_ITERABLE_COROUTINE) {
+                return true;
+            }
+        }
+        return !!PyCoro_CheckExact(o);
+    };
+
+    if (gen_is_coroutine(obj)) {
+        Py_INCREF(obj);
+        return obj;
+    }
+
+    auto type = Py_TYPE(obj);
+    if (!type->tp_as_async || !type->tp_as_async->am_await) [[unlikely]] {
+        PyErr_Format(PyExc_TypeError, "object %.100s can't be used in 'await' expression", type->tp_name);
+        return nullptr;
+
+    }
+    PyObject *res = type->tp_as_async->am_await(obj);
+    if (!res) [[unlikely]] {
+        return nullptr;
+    }
+    if (gen_is_coroutine(res)) [[unlikely]] {
+        PyErr_SetString(PyExc_TypeError, "__await__() returned a coroutine");
+        Py_DECREF(res);
+        return nullptr;
+    }
+    auto res_type = Py_TYPE(res);
+    if (!res_type->tp_iternext && res_type->tp_iternext == &_PyObject_NextNotImplemented) [[unlikely]] {
+        PyErr_Format(PyExc_TypeError, "__await__() returned non-iterator of type '%.100s'", Py_TYPE(res)->tp_name);
+        Py_DECREF(res);
+        return nullptr;
+    }
+    return res;
+}
+
+PyObject *handle_GET_AWAITABLE(PyObject *iterable, int error_hint) {
+    auto iter = getAwaitableIter(iterable);
+
+    auto type = Py_TYPE(iterable);
+    if (!iter) {
+        if (error_hint && (!type->tp_as_async || !type->tp_as_async->am_await)) {
+            auto tstate = _PyThreadState_GET();
+            static const char *const error_messages[]{
+                    "'async with' received an object from __aenter__ that does not implement __await__: %.100s",
+                    "'async with' received an object from __aexit__ that does not implement __await__: %.100s"
+            };
+            _PyErr_Format(tstate, PyExc_TypeError, error_messages[error_hint - 1], type->tp_name);
+        }
+        gotoErrorHandler(!iter);
+    }
+    // TODO: 为什么 /* Even if it's NULL */
+    /* The original implementation calls _PyGen_yf to check,
+     * but _PyCoro_GetAwaitableIter never returns a coroutine object.
+     * Therefore, we omit it. */
+    return iter;
+}
+
+PyObject *handle_GET_AITER(PyObject *obj) {
+    PyTypeObject *type = Py_TYPE(obj);
+    if (!type->tp_as_async || !type->tp_as_async->am_aiter) [[unlikely]] {
+        auto tstate = _PyThreadState_GET();
+        _PyErr_Format(tstate, PyExc_TypeError,
+                "'async for' requires an object with __aiter__ method, got %.100s",
+                type->tp_name);
+        gotoErrorHandler(tstate);
+    }
+
+    auto iter = type->tp_as_async->am_aiter(obj);
+    gotoErrorHandler(!iter);
+    auto iter_type = Py_TYPE(iter);
+
+    if (!iter_type->tp_as_async || !iter_type->tp_as_async->am_anext) [[unlikely]] {
+        auto tstate = _PyThreadState_GET();
+        _PyErr_Format(tstate, PyExc_TypeError,
+                "'async for' received an object from __aiter__ that does not implement __anext__: %.100s",
+                iter_type->tp_name);
+        Py_DECREF(iter);
+        gotoErrorHandler(tstate);
+    }
+    return iter;
+}
+
+PyObject *handle_GET_ANEXT(PyObject *aiter) {
+    PyTypeObject *type = Py_TYPE(aiter);
+    if (PyAsyncGen_CheckExact(aiter)) {
+        auto awaitable = type->tp_as_async->am_anext(aiter);
+        gotoErrorHandler(!awaitable);
+        return awaitable;
+    } else {
+        if (!type->tp_as_async || !type->tp_as_async->am_anext) [[unlikely]] {
+            auto tstate = _PyThreadState_GET();
+            _PyErr_Format(tstate, PyExc_TypeError,
+                    "'async for' requires an iterator with __anext__ method, got %.100s",
+                    type->tp_name);
+            gotoErrorHandler(tstate);
+        }
+        auto next_iter = type->tp_as_async->am_anext(aiter);
+        gotoErrorHandler(!next_iter);
+
+        auto awaitable = getAwaitableIter(next_iter);
+        if (!awaitable) [[unlikely]] {
+            _PyErr_FormatFromCause(PyExc_TypeError, "'async for' received an invalid object from __anext__: %.100s",
+                    Py_TYPE(next_iter)->tp_name);
+            Py_DECREF(next_iter);
+            gotoErrorHandler();
+        }
+        Py_DECREF(next_iter);
+        return awaitable;
+    }
+}
+
+void handle_END_ASYNC_FOR(PyFrameObject *f) {
+    auto tstate = _PyThreadState_GET();
+    PyObject *exc = f->f_valuestack[--f->f_stackdepth];
+    assert(PyExceptionClass_Check(exc));
+    if (PyErr_GivenExceptionMatches(exc, PyExc_StopAsyncIteration)) {
+        PyTryBlock *b = PyFrame_BlockPop(f);
+        assert(b->b_type == EXCEPT_HANDLER);
+        Py_DECREF(exc);
+
+        PyObject *type, *value, *traceback;
+        while (f->f_stackdepth > b->b_level + 3) {
+            Py_XDECREF(f->f_valuestack[--f->f_stackdepth]);
+        }
+        auto exc_info = tstate->exc_info;
+        type = exc_info->exc_type;
+        value = exc_info->exc_value;
+        traceback = exc_info->exc_traceback;
+        exc_info->exc_type = f->f_valuestack[--f->f_stackdepth];
+        exc_info->exc_value = f->f_valuestack[--f->f_stackdepth];
+        exc_info->exc_traceback = f->f_valuestack[--f->f_stackdepth];
+        Py_XDECREF(type);
+        Py_XDECREF(value);
+        Py_XDECREF(traceback);
+        Py_DECREF(f->f_valuestack[--f->f_stackdepth]);
+    } else {
+        PyObject *val = f->f_valuestack[--f->f_stackdepth];
+        PyObject *tb = f->f_valuestack[--f->f_stackdepth];
+        _PyErr_Restore(tstate, exc, val, tb);
+        gotoUnwind(tstate, f);
+    }
 }
 
 const array<const char *, external_symbol_count> symbol_names{apply(

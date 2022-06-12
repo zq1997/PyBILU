@@ -13,6 +13,7 @@
 
 struct ExtendedCFrame : CFrame {
     jmp_buf frame_jmp_buf;
+    int *sp_map;
 };
 
 void handle_dealloc(PyObject *obj) [[clang::preserve_most]];
@@ -106,6 +107,10 @@ PyObject *handle_WITH_EXCEPT_START(PyObject *exc, PyObject *val, PyObject *tb, P
 
 PyObject *handle_YIELD_VALUE(PyObject *val);
 PyObject *handle_GET_YIELD_FROM_ITER(PyObject *iterable, bool is_coroutine);
+PyObject *handle_GET_AWAITABLE(PyObject *iterable, int error_hint);
+PyObject *handle_GET_AITER(PyObject *obj);
+PyObject *handle_GET_ANEXT(PyObject *aiter);
+void handle_END_ASYNC_FOR(PyFrameObject *f);
 
 bool castPyObjectToBool(PyObject *o);
 
@@ -206,6 +211,10 @@ constexpr std::tuple external_symbols{
         ENTRY(handle_YIELD_VALUE),
         ENTRY(handle_GET_YIELD_FROM_ITER),
         ENTRY(PyIter_Send),
+        ENTRY(handle_GET_AWAITABLE),
+        ENTRY(handle_GET_AITER),
+        ENTRY(handle_GET_ANEXT),
+        ENTRY(handle_END_ASYNC_FOR),
 
         ENTRY(castPyObjectToBool),
 

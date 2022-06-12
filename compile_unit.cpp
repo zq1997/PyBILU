@@ -259,10 +259,9 @@ static void debugDumpObj(PyObject *py_code, Module &module, SmallVector<char> *o
     }
 }
 
-
 void CompileUnit::declareStackGrowth(int n) {
     for ([[maybe_unused]]auto i : IntRange(n)) {
-        auto &v = abstract_stack[abstract_stack_height + i];
+        auto &v = abstract_stack[abstract_stack_height];
         v.really_pushed = true;
         v.value = loadValue<PyObject *>(getStackSlot(0), context.tbaa_frame_value);
         abstract_stack_height++;
@@ -270,7 +269,7 @@ void CompileUnit::declareStackGrowth(int n) {
     }
 }
 
-void CompileUnit::prepareAbstractStack() {
+void CompileUnit::refreshAbstractStack() {
     auto j = 0;
     for (auto i : IntRange(abstract_stack_height)) {
         auto &v = abstract_stack[abstract_stack_height - i - 1];
@@ -281,7 +280,7 @@ void CompileUnit::prepareAbstractStack() {
         } else {
             // TODO: get const也作为函数
             auto ptr = getPointer<PyObject *>(code_consts, v.index);
-            v.value = loadValue<PyObject *>(ptr, context.tbaa_code_const, "prepareAbstractStack");
+            v.value = loadValue<PyObject *>(ptr, context.tbaa_code_const, "refreshAbstractStack");
         }
     }
     assert(j == stack_height);

@@ -96,25 +96,28 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
         }
         case DUP_TOP: {
             auto top = abstract_stack[abstract_stack_height - 1];
-            abstract_stack[abstract_stack_height++] = top;
             if (top.really_pushed) {
                 do_Py_INCREF(top.value);
                 do_PUSH(top.value);
+            } else {
+                abstract_stack[abstract_stack_height++] = top;
             }
             break;
         }
         case DUP_TOP_TWO: {
             auto second = abstract_stack[abstract_stack_height - 2];
             auto top = abstract_stack[abstract_stack_height - 1];
-            abstract_stack[abstract_stack_height++] = second;
-            abstract_stack[abstract_stack_height++] = top;
             if (second.really_pushed) {
                 do_Py_INCREF(second.value);
                 do_PUSH(second.value);
+            } else {
+                abstract_stack[abstract_stack_height++] = second;
             }
             if (top.really_pushed) {
                 do_Py_INCREF(top.value);
                 do_PUSH(top.value);
+            } else {
+                abstract_stack[abstract_stack_height++] = top;
             }
             break;
         }
@@ -854,9 +857,9 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
             storeFiledValue(asValue<int>(stack_height), frame_obj, &PyFrameObject::f_stackdepth, context.tbaa_obj_field);
             builder.CreateRet(retval);
             builder.SetInsertPoint(resume_block);
-            abstract_stack_height += 1;
-            stack_height += 1;
-            prepareAbstractStack();
+            abstract_stack[abstract_stack_height++].really_pushed = true;
+            stack_height++;
+            refreshAbstractStack();
             break;
         }
         case GET_YIELD_FROM_ITER: {
@@ -873,7 +876,7 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
             builder.SetInsertPoint(resume_block);
             entry_jump->addDestination(resume_block);
 
-            prepareAbstractStack();
+            refreshAbstractStack();
 
             auto v = do_POP();
             auto receiver = do_POP();
@@ -908,19 +911,36 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
             break;
         }
         case GET_AWAITABLE: {
-            throw runtime_error("unimplemented opcode");
+            auto iterable = do_POP();
+            auto prevopcode = (py_instr + (vpc - 1)).opcode();
+            int error_hint = 0;
+            if (prevopcode == BEFORE_ASYNC_WITH) {
+                error_hint = 1;
+            } else if (prevopcode == WITH_EXCEPT_START ||
+                    (prevopcode == CALL_FUNCTION && vpc >= 2 && (py_instr + (vpc - 2)).opcode() == DUP_TOP)) {
+                error_hint = 2;
+            }
+            auto iter = callSymbol<handle_GET_AWAITABLE>(iterable, asValue(error_hint));
+            do_PUSH(iter);
+            do_Py_DECREF(iterable);
             break;
         }
         case GET_AITER: {
-            throw runtime_error("unimplemented opcode");
+            auto obj = do_POP();
+            auto iter = callSymbol<handle_GET_AITER>(obj);
+            do_PUSH(iter);
+            do_Py_DECREF(obj);
             break;
         }
         case GET_ANEXT: {
-            throw runtime_error("unimplemented opcode");
+            auto aiter = do_POP();
+            auto awaitable = callSymbol<handle_GET_ANEXT>(aiter);
+            do_PUSH(awaitable);
+            do_Py_DECREF(aiter);
             break;
         }
         case END_ASYNC_FOR: {
-            throw runtime_error("unimplemented opcode");
+            callSymbol<handle_END_ASYNC_FOR>(frame_obj);
             break;
         }
         case SETUP_ASYNC_WITH: {

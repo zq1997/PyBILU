@@ -157,7 +157,7 @@ class CompileUnit {
     void translate();
     void emitBlock(PyBasicBlock &this_block);
     void emitRotN(PyOparg n);
-    void prepareAbstractStack();
+    void refreshAbstractStack();
     void declareStackGrowth(int n);
 
     std::pair<llvm::Value *, llvm::Value *> do_GETLOCAL(PyOparg oparg);
