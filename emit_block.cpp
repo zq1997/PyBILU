@@ -20,10 +20,10 @@ void CompileUnit::emitRotN(PyOparg n) {
         auto dest_begin = getStackSlot(1);
         auto dest_end = getStackSlot(n);
         auto top = loadValue<PyObject *>(dest_begin, context.tbaa_frame_value);
-        if (n_lift <= 16 + 1) {
+        if (n_lift < 8 + 2) {
             auto dest = dest_begin;
-            for (auto i : IntRange(1U, n_lift - 1)) {
-                auto src = getStackSlot(i + 1);
+            for (auto i : IntRange(2, n_lift)) {
+                auto src = getStackSlot(i);
                 auto value = loadValue<PyObject *>(src, context.tbaa_frame_value);
                 storeValue<PyObject *>(value, dest, context.tbaa_frame_value);
                 dest = src;
@@ -841,7 +841,7 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
             Value *retval;
             if (py_code->co_flags & CO_ASYNC_GENERATOR) {
                 auto poped = do_POP();
-                retval = callSymbol<handle_YIELD_VALUE>(retval);
+                retval = callSymbol<handle_YIELD_VALUE>(poped);
                 do_Py_DECREF(poped);
             } else {
                 retval = do_POP_with_newref();
@@ -933,22 +933,32 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
             break;
         }
         case GET_ANEXT: {
-            auto aiter = do_POP();
+            auto aiter = fetchStackValue(1);
             auto awaitable = callSymbol<handle_GET_ANEXT>(aiter);
             do_PUSH(awaitable);
-            do_Py_DECREF(aiter);
             break;
         }
         case END_ASYNC_FOR: {
             callSymbol<handle_END_ASYNC_FOR>(frame_obj);
+            abstract_stack_height -= 7;
+            stack_height -= 7;
             break;
         }
         case SETUP_ASYNC_WITH: {
-            throw runtime_error("unimplemented opcode");
+            assert(abstract_stack[abstract_stack_height - 1].really_pushed);
+            entry_jump->addDestination(*this_block.branch);
+            auto block_addr_diff = builder.CreateIntCast(builder.CreateSub(
+                    builder.CreatePtrToInt(BlockAddress::get(function, *this_block.branch), context.type<uintptr_t>()),
+                    builder.CreatePtrToInt(BlockAddress::get(function, blocks[0]), context.type<uintptr_t>())
+            ), context.type<int>(), true);
+            callSymbol<PyFrame_BlockSetup>(frame_obj, asValue<int>(SETUP_FINALLY), block_addr_diff, asValue<int>(stack_height - 1));
+            builder.CreateBr(this_block.next());
             break;
         }
         case BEFORE_ASYNC_WITH: {
-            throw runtime_error("unimplemented opcode");
+            callSymbol<handle_BEFORE_ASYNC_WITH>(getStackSlot());
+            stack_height += 1;
+            builder.CreateBr(this_block.next());
             break;
         }
         default:
@@ -956,6 +966,7 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
         }
     }
     // 排除分支已经跳转
+    assert(!this_block.fall_through || stack_height == this_block.next().initial_stack_height);
     if (this_block.fall_through && !this_block.branch) {
         assert(!builder.GetInsertBlock()->getTerminator());
         builder.CreateBr(this_block.next());

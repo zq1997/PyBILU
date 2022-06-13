@@ -596,7 +596,7 @@ void CompileUnit::doIntraBlockAnalysis() {
             block->branch_stack_difference = 5;
             stack.push();
             stack.push();
-            stack.pop();
+            stack.pop(stack.until_forever); // TODO: 想办法直接返回
             break;
         case WITH_EXCEPT_START:
             stack.push();
@@ -628,15 +628,20 @@ void CompileUnit::doIntraBlockAnalysis() {
             break;
         case GET_ANEXT:
             stack.push();
-            stack.pop();
             break;
         case END_ASYNC_FOR:
             stack.pop_n_consecutively(7);
             break;
         case SETUP_ASYNC_WITH:
+            block->branch_stack_difference = -1 + 6;
+            break;
         case BEFORE_ASYNC_WITH:
+            stack.push();
+            stack.push();
+            stack.pop(stack.until_forever);
+            break;
         default:
-            throw runtime_error("尚未实现");
+            Py_UNREACHABLE();
             break;
         }
     }

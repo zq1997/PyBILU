@@ -111,6 +111,7 @@ PyObject *handle_GET_AWAITABLE(PyObject *iterable, int error_hint);
 PyObject *handle_GET_AITER(PyObject *obj);
 PyObject *handle_GET_ANEXT(PyObject *aiter);
 void handle_END_ASYNC_FOR(PyFrameObject *f);
+void handle_BEFORE_ASYNC_WITH(PyObject **sp);
 
 bool castPyObjectToBool(PyObject *o);
 
@@ -215,6 +216,7 @@ constexpr std::tuple external_symbols{
         ENTRY(handle_GET_AITER),
         ENTRY(handle_GET_ANEXT),
         ENTRY(handle_END_ASYNC_FOR),
+        ENTRY(handle_BEFORE_ASYNC_WITH),
 
         ENTRY(castPyObjectToBool),
 

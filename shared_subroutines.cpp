@@ -224,7 +224,7 @@ void raiseException() {
                     "can't send non-None value to a just-started %s", gen_kind[oparg]);
         }
     } else {
-        assert(opcode == MAKE_FUNCTION);
+        assert(opcode == MAKE_FUNCTION || opcode == YIELD_FROM);
     }
     gotoErrorHandler(tstate);
 }
@@ -1565,7 +1565,7 @@ PyObject *handle_GET_YIELD_FROM_ITER(PyObject *iterable, bool is_coroutine) {
     return iterable;
 }
 
-PyObject *getAwaitableIter(PyObject *obj) {
+static PyObject *getAwaitableIter(PyObject *obj) {
     const auto gen_is_coroutine = [](PyObject *o) {
         if (PyGen_CheckExact(o)) {
             auto code = reinterpret_cast<PyCodeObject *>(reinterpret_cast<PyGenObject *>(o)->gi_code);
@@ -1620,7 +1620,6 @@ PyObject *handle_GET_AWAITABLE(PyObject *iterable, int error_hint) {
         }
         gotoErrorHandler(!iter);
     }
-    // TODO: 为什么 /* Even if it's NULL */
     /* The original implementation calls _PyGen_yf to check,
      * but _PyCoro_GetAwaitableIter never returns a coroutine object.
      * Therefore, we omit it. */
@@ -1711,6 +1710,38 @@ void handle_END_ASYNC_FOR(PyFrameObject *f) {
         _PyErr_Restore(tstate, exc, val, tb);
         gotoUnwind(tstate, f);
     }
+}
+
+void handle_BEFORE_ASYNC_WITH(PyObject **sp) {
+    // TODO：考虑到load消除可能有问题
+    static _Py_Identifier PyId___aenter__{"__aenter__", -1};
+    static _Py_Identifier PyId___aexit__{"__aexit__", -1};
+
+    auto mgr = *--sp;
+    auto enter = _PyObject_LookupSpecial(mgr, &PyId___aenter__);
+    if (!enter) {
+        auto tstate = _PyThreadState_GET();
+        if (!_PyErr_Occurred(tstate)) {
+            _PyErr_SetObject(tstate, PyExc_AttributeError, _PyUnicode_FromId(&PyId___aenter__));
+        }
+        gotoErrorHandler(tstate);
+    }
+
+    auto exit = _PyObject_LookupSpecial(mgr, &PyId___aexit__);
+    if (!exit) {
+        auto tstate = _PyThreadState_GET();
+        if (!_PyErr_Occurred(tstate)) {
+            _PyErr_SetObject(tstate, PyExc_AttributeError, _PyUnicode_FromId(&PyId___aexit__));
+        }
+        Py_DECREF(enter);
+        gotoErrorHandler(tstate);
+    }
+    *sp++ = exit;
+    Py_DECREF(mgr);
+    auto res = _PyObject_CallNoArg(enter);
+    Py_DECREF(enter);
+    gotoErrorHandler(!res);
+    *sp++ = res;
 }
 
 const array<const char *, external_symbol_count> symbol_names{apply(

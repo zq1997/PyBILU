@@ -43,7 +43,7 @@ PyObject *eval_func(PyThreadState *tstate, PyFrameObject *f, int throwflag) {
     } else {
         result = nullptr;
     }
-    assert(f->f_stackdepth == 0);
+    assert(f->f_state == FRAME_SUSPENDED || f->f_stackdepth == 0);
     tstate->cframe = prev_cframe;
     tstate->frame = f->f_back;
     assert(!!result ^ !!_PyErr_Occurred(tstate));
