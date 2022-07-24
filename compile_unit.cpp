@@ -259,6 +259,7 @@ static void debugDumpObj(PyObject *py_code, Module &module, SmallVector<char> *o
     }
 }
 
+// TODO: 直接加载不好，最好延迟
 void CompileUnit::declareStackGrowth(int n) {
     for ([[maybe_unused]]auto i : IntRange(n)) {
         auto &v = abstract_stack[abstract_stack_height];

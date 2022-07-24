@@ -1201,6 +1201,104 @@ PyObject *handle_FORMAT_VALUE(PyObject *value, PyObject *fmt_spec, int which_con
     return fmt_value;
 }
 
+void handle_UNPACK_EX(PyObject *seq, int before_star, int after_star, PyObject **ptr) {
+    assert(seq);
+    PyObject **ptr_end = ptr;
+    auto tstate = _PyThreadState_GET();
+    auto iter = PyObject_GetIter(seq);
+    const auto &clear_and_exit = [&]() {
+        Py_DECREF(iter);
+        while (ptr != ptr_end) {
+            Py_DECREF(*ptr++);
+        }
+        gotoErrorHandler(tstate);
+    };
+
+    if (!iter) {
+        if (_PyErr_ExceptionMatches(tstate, PyExc_TypeError) && !Py_TYPE(seq)->tp_iter && !PySequence_Check(seq)) {
+            _PyErr_Format(tstate, PyExc_TypeError,
+                    "cannot unpack non-iterable %.200s object",
+                    Py_TYPE(seq)->tp_name);
+        }
+        gotoErrorHandler();
+    }
+
+    for (int i = 0; i < before_star; i++) {
+        if (auto next = PyIter_Next(iter)) {
+            *--ptr = next;
+            continue;
+        }
+        /* Iterator done, via error or exhaustion. */
+        if (!_PyErr_Occurred(tstate)) {
+            if (after_star == -1) {
+                _PyErr_Format(tstate, PyExc_ValueError,
+                        "not enough values to unpack (expected %d, got %d)", before_star, i);
+            } else {
+                _PyErr_Format(tstate, PyExc_ValueError,
+                        "not enough values to unpack (expected at least %d, got %d)", before_star + after_star, i);
+            }
+        }
+        clear_and_exit();
+    }
+
+    if (after_star == -1) {
+        /* We better have exhausted the iterator now. */
+        auto w = PyIter_Next(iter);
+        if (w) {
+            Py_DECREF(w);
+            _PyErr_Format(tstate, PyExc_ValueError, "too many values to unpack (expected %d)", before_star);
+            clear_and_exit();
+        }
+        if (_PyErr_Occurred(tstate)) {
+            clear_and_exit();
+        }
+        Py_DECREF(iter);
+        return;
+    }
+
+    auto l = PySequence_List(iter);
+    if (!l) {
+        clear_and_exit();
+    }
+    *--ptr = l;
+
+    auto list_size = PyList_GET_SIZE(l);
+    if (list_size < after_star) {
+        _PyErr_Format(tstate, PyExc_ValueError,
+                "not enough values to unpack (expected at least %d, got %zd)",
+                before_star + after_star, before_star + list_size);
+        clear_and_exit();
+    }
+
+    /* Pop the "after-variable" args off the list. */
+    for (int j = after_star; j > 0; j--) {
+        *--ptr = PyList_GET_ITEM(l, list_size - j);
+    }
+    /* Resize the list. */
+    Py_SET_SIZE(l, list_size - after_star);
+    Py_DECREF(iter);
+}
+
+void handle_UNPACK_SEQUENCE(PyObject *seq, Py_ssize_t num, PyObject **dest) {
+    if (PyTuple_CheckExact(seq) && PyTuple_GET_SIZE(seq) == num) {
+        auto items = (reinterpret_cast<PyTupleObject *>(seq))->ob_item;
+        while (num--) {
+            auto item = items[num];
+            Py_INCREF(item);
+            *dest++ = item;
+        }
+    } else if (PyList_CheckExact(seq) && PyList_GET_SIZE(seq) == num) {
+        auto items = (reinterpret_cast<PyListObject *>(seq))->ob_item;
+        while (num--) {
+            auto item = items[num];
+            Py_INCREF(item);
+            *dest++ = item;
+        }
+    } else {
+        handle_UNPACK_EX(seq, num, -1, dest + num);
+    }
+}
+
 PyObject *handle_LOAD_BUILD_CLASS(PyObject *builtins) {
     static _Py_Identifier PyId___build_class__{"__build_class__", -1};
     PyObject *build_class_str = _PyUnicode_FromId(&PyId___build_class__);

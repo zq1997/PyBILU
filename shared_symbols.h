@@ -99,6 +99,9 @@ PyObject *handle_LIST_TO_TUPLE(PyObject *list);
 
 PyObject *handle_FORMAT_VALUE(PyObject *value, PyObject *fmt_spec, int which_conversion);
 
+void handle_UNPACK_EX(PyObject *seq, int before_star, int after_star, PyObject **ptr);
+void handle_UNPACK_SEQUENCE(PyObject *seq, Py_ssize_t num, PyObject **dest);
+
 void handle_POP_EXCEPT(PyFrameObject *f);
 bool handle_JUMP_IF_NOT_EXC_MATCH(PyObject *left, PyObject *right);
 void handle_RERAISE(PyFrameObject *f, bool restore_lasti);
@@ -200,6 +203,9 @@ constexpr std::tuple external_symbols{
         ENTRY(handle_LIST_TO_TUPLE),
 
         ENTRY(handle_FORMAT_VALUE),
+
+        ENTRY(handle_UNPACK_EX),
+        ENTRY(handle_UNPACK_SEQUENCE),
 
         ENTRY(PyFrame_BlockSetup),
         ENTRY(PyFrame_BlockPop),

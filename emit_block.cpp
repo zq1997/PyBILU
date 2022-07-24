@@ -721,11 +721,20 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
         }
 
         case UNPACK_SEQUENCE: {
-            throw runtime_error("unimplemented opcode");
+            auto seq = do_POP();
+            callSymbol<handle_UNPACK_SEQUENCE>(seq, asValue<Py_ssize_t>(oparg), getStackSlot());
+            do_Py_DECREF(seq);
+            declareStackGrowth(oparg);
             break;
         }
         case UNPACK_EX: {
-            throw runtime_error("unimplemented opcode");
+            int before_star = oparg & 0xFF;
+            int after_star = oparg >> 8;
+            auto seq = do_POP();
+            callSymbol<handle_UNPACK_EX>(seq, asValue(before_star), asValue(after_star),
+                    getStackSlot(-1 - before_star - after_star));
+            do_Py_DECREF(seq);
+            declareStackGrowth(1 + before_star + after_star);
             break;
         }
 
