@@ -561,8 +561,9 @@ void CompileUnit::doIntraBlockAnalysis() {
             break;
         }
         case SETUP_ANNOTATIONS:
+            break;
         case PRINT_EXPR:
-            throw runtime_error("尚未实现");
+            stack.pop();
             break;
 
         case UNPACK_SEQUENCE: {

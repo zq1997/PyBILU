@@ -1272,6 +1272,59 @@ void handle_RAISE_VARARGS(PyObject *cause, PyObject *exc) {
     gotoErrorHandler(tstate);
 }
 
+void handle_SETUP_ANNOTATIONS(PyFrameObject *f) {
+    _Py_IDENTIFIER(__annotations__);
+    if (!f->f_locals) {
+        auto tstate = _PyThreadState_GET();
+        _PyErr_Format(tstate, PyExc_SystemError, "no locals found when setting up annotations");
+        gotoErrorHandler(tstate);
+    }
+    /* check if __annotations__ in locals()... */
+    if (PyDict_CheckExact(f->f_locals)) {
+        auto ann_dict = _PyDict_GetItemIdWithError(f->f_locals, &PyId___annotations__);
+        if (!ann_dict) {
+            auto tstate = _PyThreadState_GET();
+            gotoErrorHandler(_PyErr_Occurred(tstate));
+            /* ...if not, create a new one */
+            ann_dict = PyDict_New();
+            gotoErrorHandler(!ann_dict);
+            auto err = _PyDict_SetItemId(f->f_locals, &PyId___annotations__, ann_dict);
+            Py_DECREF(ann_dict);
+            gotoErrorHandler(err);
+        }
+    } else {
+        /* do the same if locals() is not a dict */
+        PyObject *ann_str = _PyUnicode_FromId(&PyId___annotations__);
+        gotoErrorHandler(!ann_str);
+        auto ann_dict = PyObject_GetItem(f->f_locals, ann_str);
+        if (!ann_dict) {
+            auto tstate = _PyThreadState_GET();
+            gotoErrorHandler(!_PyErr_ExceptionMatches(tstate, PyExc_KeyError));
+            _PyErr_Clear(tstate);
+            ann_dict = PyDict_New();
+            gotoErrorHandler(!ann_dict);
+            auto err = PyObject_SetItem(f->f_locals, ann_str, ann_dict);
+            Py_DECREF(ann_dict);
+            gotoErrorHandler(err);
+        } else {
+            Py_DECREF(ann_dict);
+        }
+    }
+}
+
+void handle_PRINT_EXPR(PyObject *value) {
+    _Py_IDENTIFIER(displayhook);
+    PyObject *hook = _PySys_GetObjectId(&PyId_displayhook);
+    if (!hook) {
+        auto tstate = _PyThreadState_GET();
+        _PyErr_SetString(tstate, PyExc_RuntimeError, "lost sys.displayhook");
+        gotoErrorHandler(tstate);
+    }
+    auto res = PyObject_CallOneArg(hook, value);
+    gotoErrorHandler(!res);
+    Py_DECREF(res);
+}
+
 void handle_UNPACK_EX(PyObject *seq, int before_star, int after_star, PyObject **ptr) {
     assert(seq);
     PyObject **ptr_end = ptr;

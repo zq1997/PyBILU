@@ -765,11 +765,13 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
             break;
         }
         case SETUP_ANNOTATIONS: {
-            throw runtime_error("unimplemented opcode");
+            callSymbol<handle_SETUP_ANNOTATIONS>(frame_obj);
             break;
         }
         case PRINT_EXPR: {
-            throw runtime_error("unimplemented opcode");
+            auto value = do_POP();
+            callSymbol<handle_PRINT_EXPR>(value);
+            do_Py_DECREF(value);
             break;
         }
 
