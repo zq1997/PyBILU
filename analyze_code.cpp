@@ -498,6 +498,7 @@ void CompileUnit::doIntraBlockAnalysis() {
             stack.push();
             break;
 
+        case BUILD_STRING:
         case BUILD_TUPLE:
         case BUILD_LIST:
         case BUILD_SET:
@@ -538,9 +539,30 @@ void CompileUnit::doIntraBlockAnalysis() {
                 stack.pop();
             }
             break;
-        case BUILD_STRING:
+        case BUILD_SLICE:
             stack.push();
-            stack.pop_n_consecutively(instr.oparg(py_instr));
+            stack.pop();
+            stack.pop();
+            if (instr.oparg(py_instr) == 3) {
+                stack.pop();
+            }
+            break;
+        case LOAD_ASSERTION_ERROR:
+            stack.push();
+            break;
+        case RAISE_VARARGS: {
+            auto oparg = instr.oparg(py_instr);
+            if (oparg == 2) {
+                stack.pop();
+                stack.pop();
+            } else if (oparg == 1) {
+                stack.pop();
+            }
+            break;
+        }
+        case SETUP_ANNOTATIONS:
+        case PRINT_EXPR:
+            throw runtime_error("尚未实现");
             break;
 
         case UNPACK_SEQUENCE: {
@@ -567,12 +589,6 @@ void CompileUnit::doIntraBlockAnalysis() {
         case MATCH_KEYS:
         case MATCH_CLASS:
         case COPY_DICT_WITHOUT_KEYS:
-
-        case BUILD_SLICE:
-        case LOAD_ASSERTION_ERROR:
-        case RAISE_VARARGS:
-        case SETUP_ANNOTATIONS:
-        case PRINT_EXPR:
             throw runtime_error("尚未实现");
             break;
 

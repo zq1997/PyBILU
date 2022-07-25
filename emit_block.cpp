@@ -719,6 +719,59 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
             do_Py_DECREF(value);
             break;
         }
+        case BUILD_SLICE: {
+            llvm::Value *step = context.c_null;
+            bool really_pushed;
+            if (oparg == 3) {
+                auto poped_step = do_POP();
+                step = poped_step;
+                really_pushed = poped_step.really_pushed;
+                IF_DEBUG(poped_step.has_decref = true;)
+            }
+            auto stop = do_POP();
+            auto start = do_POP();
+            auto slice = callSymbol<handle_BUILD_SLICE>(start, stop, step);
+            do_PUSH(slice);
+            do_Py_DECREF(start);
+            do_Py_DECREF(stop);
+            if (oparg == 3 && really_pushed) {
+                // TODO: 好难看
+                do_Py_DECREF(step);
+            }
+            break;
+        }
+        case LOAD_ASSERTION_ERROR: {
+            auto ptr = getSymbol(searchSymbol<PyExc_AssertionError>());
+            auto value = loadValue<void *>(ptr, context.tbaa_symbols);
+            do_Py_INCREF(value);
+            do_PUSH(value);
+            break;
+        }
+        case RAISE_VARARGS: {
+            llvm::Value *cause = context.c_null;
+            llvm::Value *exc = context.c_null;
+            if (oparg) {
+                if (oparg == 2) {
+                    auto poped_cause = do_POP();
+                    cause = poped_cause;
+                    IF_DEBUG(poped_cause.has_decref = true;)
+                }
+                auto poped_exc = do_POP();
+                exc = poped_exc;
+                IF_DEBUG(poped_exc.has_decref = true;)
+            }
+            callSymbol<handle_RAISE_VARARGS>(cause, exc);
+            builder.CreateUnreachable();
+            break;
+        }
+        case SETUP_ANNOTATIONS: {
+            throw runtime_error("unimplemented opcode");
+            break;
+        }
+        case PRINT_EXPR: {
+            throw runtime_error("unimplemented opcode");
+            break;
+        }
 
         case UNPACK_SEQUENCE: {
             auto seq = do_POP();
@@ -759,27 +812,6 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
             break;
         }
         case COPY_DICT_WITHOUT_KEYS: {
-            throw runtime_error("unimplemented opcode");
-            break;
-        }
-
-        case BUILD_SLICE: {
-            throw runtime_error("unimplemented opcode");
-            break;
-        }
-        case LOAD_ASSERTION_ERROR: {
-            throw runtime_error("unimplemented opcode");
-            break;
-        }
-        case RAISE_VARARGS: {
-            throw runtime_error("unimplemented opcode");
-            break;
-        }
-        case SETUP_ANNOTATIONS: {
-            throw runtime_error("unimplemented opcode");
-            break;
-        }
-        case PRINT_EXPR: {
             throw runtime_error("unimplemented opcode");
             break;
         }

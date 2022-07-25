@@ -215,6 +215,7 @@ llvm::Value *CompileUnit::getSymbol(size_t offset) {
 
 void CompileUnit::pyJumpIF(PyBasicBlock &current, bool pop_if_jump, bool jump_cond) {
     auto cond_obj = do_POP();
+    IF_DEBUG(cond_obj.has_decref = true;)
 
     auto fall_block = cond_obj.really_pushed ? appendBlock("") : current.next();
     auto jump_block = cond_obj.really_pushed && pop_if_jump ? appendBlock("") : *current.branch;

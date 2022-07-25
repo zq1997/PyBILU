@@ -98,6 +98,8 @@ void handle_DICT_MERGE(PyObject *func, PyObject *dict, PyObject *update);
 PyObject *handle_LIST_TO_TUPLE(PyObject *list);
 
 PyObject *handle_FORMAT_VALUE(PyObject *value, PyObject *fmt_spec, int which_conversion);
+PyObject *handle_BUILD_SLICE(PyObject *start, PyObject *stop, PyObject *step);
+void handle_RAISE_VARARGS(PyObject *cause, PyObject *exc);
 
 void handle_UNPACK_EX(PyObject *seq, int before_star, int after_star, PyObject **ptr);
 void handle_UNPACK_SEQUENCE(PyObject *seq, Py_ssize_t num, PyObject **dest);
@@ -203,6 +205,8 @@ constexpr std::tuple external_symbols{
         ENTRY(handle_LIST_TO_TUPLE),
 
         ENTRY(handle_FORMAT_VALUE),
+        ENTRY(handle_BUILD_SLICE),
+        ENTRY(handle_RAISE_VARARGS),
 
         ENTRY(handle_UNPACK_EX),
         ENTRY(handle_UNPACK_SEQUENCE),
@@ -228,7 +232,8 @@ constexpr std::tuple external_symbols{
 
         ENTRY(_Py_FalseStruct),
         ENTRY(_Py_TrueStruct),
-        ENTRY(_Py_NoneStruct)
+        ENTRY(_Py_NoneStruct),
+        ENTRY(PyExc_AssertionError),
 };
 
 constexpr auto external_symbol_count = std::tuple_size_v<decltype(external_symbols)>;

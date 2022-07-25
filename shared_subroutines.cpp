@@ -1201,6 +1201,77 @@ PyObject *handle_FORMAT_VALUE(PyObject *value, PyObject *fmt_spec, int which_con
     return fmt_value;
 }
 
+PyObject *handle_BUILD_SLICE(PyObject *start, PyObject *stop, PyObject *step) {
+    auto slice = PySlice_New(start, stop, step);
+    gotoErrorHandler(!slice);
+    return slice;
+}
+
+/* Logic for the raise statement (too complicated for inlining).
+   This *consumes* a reference count to each of its arguments. */
+void handle_RAISE_VARARGS(PyObject *cause, PyObject *exc) {
+    auto tstate = _PyThreadState_GET();
+    if (!exc) {
+        auto exc_info = _PyErr_GetTopmostException(tstate);
+        if (Py_IsNone(exc_info->exc_type) || !exc_info->exc_type) {
+            _PyErr_SetString(tstate, PyExc_RuntimeError, "No active exception to reraise");
+            gotoErrorHandler(tstate);
+        }
+        Py_INCREF(exc_info->exc_type);
+        Py_XINCREF(exc_info->exc_value);
+        Py_XINCREF(exc_info->exc_traceback);
+        _PyErr_Restore(tstate, exc_info->exc_type, exc_info->exc_value, exc_info->exc_traceback);
+        gotoErrorHandler(tstate);
+    }
+
+    PyObject *type = nullptr, *value = nullptr;
+    if (PyExceptionClass_Check(exc)) {
+        value = _PyObject_CallNoArg(exc);
+        gotoErrorHandler(!value, tstate);
+        if (!PyExceptionInstance_Check(value)) {
+            _PyErr_Format(tstate, PyExc_TypeError,
+                    "calling %R should have returned an instance of BaseException, not %R",
+                    type, Py_TYPE(value));
+            Py_DECREF(value);
+            gotoErrorHandler(tstate);
+        }
+        type = exc;
+    } else if (PyExceptionInstance_Check(exc)) {
+        value = exc;
+        Py_INCREF(value);
+        type = PyExceptionInstance_Class(exc);
+    } else {
+        /* Not something you can raise.  You get an exception anyway, just not what you specified :-) */
+        _PyErr_SetString(tstate, PyExc_TypeError, "exceptions must derive from BaseException");
+        gotoErrorHandler(tstate);
+    }
+
+    if (cause) {
+        if (PyExceptionClass_Check(cause)) {
+            auto fixed_cause = _PyObject_CallNoArg(cause);
+            if (!fixed_cause) {
+                Py_DECREF(value);
+                gotoErrorHandler(tstate);
+            }
+            PyException_SetCause(value, fixed_cause);
+        } else if (PyExceptionInstance_Check(cause)) {
+            Py_INCREF(cause);
+            PyException_SetCause(value, cause);
+        } else if (Py_IsNone(cause)) {
+            PyException_SetCause(value, nullptr);
+        } else {
+            _PyErr_SetString(tstate, PyExc_TypeError, "exception causes must derive from BaseException");
+            Py_DECREF(value);
+            gotoErrorHandler(tstate);
+        }
+    }
+
+    _PyErr_SetObject(tstate, type, value);
+    /* _PyErr_SetObject incref's its arguments */
+    Py_DECREF(value);
+    gotoErrorHandler(tstate);
+}
+
 void handle_UNPACK_EX(PyObject *seq, int before_star, int after_star, PyObject **ptr) {
     assert(seq);
     PyObject **ptr_end = ptr;
