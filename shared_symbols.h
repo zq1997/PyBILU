@@ -103,8 +103,13 @@ void handle_RAISE_VARARGS(PyObject *cause, PyObject *exc);
 void handle_SETUP_ANNOTATIONS(PyFrameObject *f);
 void handle_PRINT_EXPR(PyObject *value);
 
-void handle_UNPACK_EX(PyObject *seq, int before_star, int after_star, PyObject **ptr);
 void handle_UNPACK_SEQUENCE(PyObject *seq, Py_ssize_t num, PyObject **dest);
+void handle_UNPACK_EX(PyObject *seq, Py_ssize_t before_star, Py_ssize_t after_star, PyObject **ptr);
+
+PyObject *hanlde_GET_LEN(PyObject *value);
+void hanlde_MATCH_KEYS(PyObject *map, PyObject *keys, PyObject **result);
+void hanlde_MATCH_CLASS(Py_ssize_t nargs, PyObject *kwargs, PyObject **result);
+PyObject *handle_COPY_DICT_WITHOUT_KEYS(PyObject *subject, PyObject *keys);
 
 void handle_POP_EXCEPT(PyFrameObject *f);
 bool handle_JUMP_IF_NOT_EXC_MATCH(PyObject *left, PyObject *right);
@@ -214,6 +219,11 @@ constexpr std::tuple external_symbols{
 
         ENTRY(handle_UNPACK_EX),
         ENTRY(handle_UNPACK_SEQUENCE),
+
+        ENTRY(hanlde_GET_LEN),
+        ENTRY(hanlde_MATCH_KEYS),
+        ENTRY(hanlde_MATCH_CLASS),
+        ENTRY(handle_COPY_DICT_WITHOUT_KEYS),
 
         ENTRY(PyFrame_BlockSetup),
         ENTRY(PyFrame_BlockPop),

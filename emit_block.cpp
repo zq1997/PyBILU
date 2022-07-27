@@ -783,38 +783,55 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
             break;
         }
         case UNPACK_EX: {
-            int before_star = oparg & 0xFF;
-            int after_star = oparg >> 8;
+            Py_ssize_t before_star = oparg & 0xFF;
+            Py_ssize_t after_star = oparg >> 8;
+            auto count = 1 + before_star + after_star;
             auto seq = do_POP();
-            callSymbol<handle_UNPACK_EX>(seq, asValue(before_star), asValue(after_star),
-                    getStackSlot(-1 - before_star - after_star));
+            callSymbol<handle_UNPACK_EX>(seq, asValue(before_star), asValue(after_star), getStackSlot(-count));
             do_Py_DECREF(seq);
-            declareStackGrowth(1 + before_star + after_star);
+            declareStackGrowth(count);
             break;
         }
 
         case GET_LEN: {
-            throw runtime_error("unimplemented opcode");
+            auto value = fetchStackValue(1);
+            auto len = callSymbol<hanlde_GET_LEN>(value);
+            do_PUSH(len);
             break;
         }
-        case MATCH_MAPPING: {
-            throw runtime_error("unimplemented opcode");
-            break;
-        }
+        case MATCH_MAPPING:
         case MATCH_SEQUENCE: {
-            throw runtime_error("unimplemented opcode");
+            auto test_flag = opcode == MATCH_SEQUENCE ? Py_TPFLAGS_SEQUENCE : Py_TPFLAGS_MAPPING;
+            auto subject = fetchStackValue(1);
+            auto ob_type = loadFieldValue(subject, &PyObject::ob_type, context.tbaa_obj_field);
+            auto tp_flags = loadFieldValue(ob_type, &_typeobject::tp_flags, context.tbaa_obj_field);
+            auto match = builder.CreateAnd(tp_flags, asValue<decltype(_typeobject::tp_flags)>(test_flag));
+            auto match_bool = builder.CreateICmpNE(match, asValue<decltype(_typeobject::tp_flags)>(0));
+            auto py_true = getSymbol(searchSymbol<_Py_TrueStruct>());
+            auto py_false = getSymbol(searchSymbol<_Py_FalseStruct>());
+            auto res = builder.CreateSelect(match_bool, py_true, py_false);
+            do_Py_INCREF(res);
+            do_PUSH(res);
             break;
         }
         case MATCH_KEYS: {
-            throw runtime_error("unimplemented opcode");
+            auto keys = fetchStackValue(1);
+            auto subject = fetchStackValue(2);
+            callSymbol<hanlde_MATCH_KEYS>(subject, keys, getStackSlot(0));
+            declareStackGrowth(2);
             break;
         }
         case MATCH_CLASS: {
-            throw runtime_error("unimplemented opcode");
+            auto kwargs = do_POP();
+            callSymbol<hanlde_MATCH_CLASS>(asValue<Py_ssize_t>(oparg), kwargs, getStackSlot(0));
             break;
         }
         case COPY_DICT_WITHOUT_KEYS: {
-            throw runtime_error("unimplemented opcode");
+            auto keys = do_POP();
+            auto subject = fetchStackValue(1);
+            auto rest = callSymbol<handle_COPY_DICT_WITHOUT_KEYS>(subject, keys);
+            do_PUSH(rest);
+            do_Py_DECREF(keys);
             break;
         }
 

@@ -1325,7 +1325,27 @@ void handle_PRINT_EXPR(PyObject *value) {
     Py_DECREF(res);
 }
 
-void handle_UNPACK_EX(PyObject *seq, int before_star, int after_star, PyObject **ptr) {
+void handle_UNPACK_SEQUENCE(PyObject *seq, Py_ssize_t num, PyObject **dest) {
+    if (PyTuple_CheckExact(seq) && PyTuple_GET_SIZE(seq) == num) {
+        auto items = (reinterpret_cast<PyTupleObject *>(seq))->ob_item;
+        while (num--) {
+            auto item = items[num];
+            Py_INCREF(item);
+            *dest++ = item;
+        }
+    } else if (PyList_CheckExact(seq) && PyList_GET_SIZE(seq) == num) {
+        auto items = (reinterpret_cast<PyListObject *>(seq))->ob_item;
+        while (num--) {
+            auto item = items[num];
+            Py_INCREF(item);
+            *dest++ = item;
+        }
+    } else {
+        handle_UNPACK_EX(seq, num, -1, dest + num);
+    }
+}
+
+void handle_UNPACK_EX(PyObject *seq, Py_ssize_t before_star, Py_ssize_t after_star, PyObject **ptr) {
     assert(seq);
     PyObject **ptr_end = ptr;
     auto tstate = _PyThreadState_GET();
@@ -1403,25 +1423,217 @@ void handle_UNPACK_EX(PyObject *seq, int before_star, int after_star, PyObject *
     Py_DECREF(iter);
 }
 
-void handle_UNPACK_SEQUENCE(PyObject *seq, Py_ssize_t num, PyObject **dest) {
-    if (PyTuple_CheckExact(seq) && PyTuple_GET_SIZE(seq) == num) {
-        auto items = (reinterpret_cast<PyTupleObject *>(seq))->ob_item;
-        while (num--) {
-            auto item = items[num];
-            Py_INCREF(item);
-            *dest++ = item;
-        }
-    } else if (PyList_CheckExact(seq) && PyList_GET_SIZE(seq) == num) {
-        auto items = (reinterpret_cast<PyListObject *>(seq))->ob_item;
-        while (num--) {
-            auto item = items[num];
-            Py_INCREF(item);
-            *dest++ = item;
-        }
-    } else {
-        handle_UNPACK_EX(seq, num, -1, dest + num);
-    }
+PyObject *hanlde_GET_LEN(PyObject *value) {
+    auto len_i = PyObject_Length(value);
+    gotoErrorHandler(len_i < 0);
+    auto len_o = PyLong_FromSsize_t(len_i);
+    gotoErrorHandler(!len_o);
+    return len_o;
 }
+
+void hanlde_MATCH_KEYS(PyObject *map, PyObject *keys, PyObject **result) {
+    static PyObject dummy = {_PyObject_EXTRA_INIT 1, &PyBaseObject_Type};
+
+    assert(PyTuple_CheckExact(keys));
+    Py_ssize_t nkeys = PyTuple_GET_SIZE(keys);
+    if (!nkeys) {
+        result[0] = PyTuple_New(0);;
+        result[1] = Py_NewRef(Py_True);
+        return;
+    }
+    PyObject *get = nullptr;
+    PyObject *seen = nullptr;
+    PyObject *values = nullptr;
+
+    _Py_IDENTIFIER(get);
+    if (!(get = _PyObject_GetAttrId(map, &PyId_get))) [[unlikely]] {
+        goto fail;
+    }
+    if (!(seen = PySet_New(nullptr))) [[unlikely]] {
+        goto fail;
+    }
+    if (!(values = PyList_New(0))) [[unlikely]] {
+        goto fail;
+    }
+    for (auto i : IntRange(nkeys)) {
+        auto key = PyTuple_GET_ITEM(keys, i);
+        if (PySet_Contains(seen, key) || PySet_Add(seen, key)) [[unlikely]] {
+            auto tstate = _PyThreadState_GET();
+            if (!_PyErr_Occurred(tstate)) {
+                _PyErr_Format(tstate, PyExc_ValueError, "mapping pattern checks duplicate key (%R)", key);
+            }
+            goto fail;
+        }
+        auto value = PyObject_CallFunctionObjArgs(get, key, &dummy, nullptr);
+        if (!value) [[unlikely]] {
+            goto fail;
+        }
+        if (value == &dummy) {
+            Py_DECREF(value);
+            Py_DECREF(get);
+            Py_DECREF(seen);
+            Py_DECREF(values);
+            result[0] = Py_NewRef(Py_None);
+            result[1] = Py_NewRef(Py_False);
+            return;
+        }
+        PyList_Append(values, value);
+        Py_DECREF(value);
+    }
+    Py_SETREF(values, PyList_AsTuple(values));
+    Py_DECREF(get);
+    Py_DECREF(seen);
+    result[0] = values;
+    result[1] = Py_NewRef(Py_True);
+    return;
+
+fail:
+    Py_XDECREF(get);
+    Py_XDECREF(seen);
+    Py_XDECREF(values);
+    gotoErrorHandler();
+}
+
+void hanlde_MATCH_CLASS(Py_ssize_t nargs, PyObject *kwargs, PyObject **result) {
+    auto tstate = _PyThreadState_GET();
+    PyObject *seen = nullptr;
+    PyObject *attrs = nullptr;
+    PyObject *match_args = nullptr;
+    auto subject = result[-2];
+    auto type = result[-1];
+    auto type_ = reinterpret_cast<PyTypeObject *>(type);
+    assert(PyTuple_CheckExact(kwargs));
+
+    const auto &match_class_attr = [&](PyObject *name) {
+        if (PySet_Contains(seen, name) || PySet_Add(seen, name)) {
+            if (!_PyErr_Occurred(tstate)) {
+                _PyErr_Format(tstate, PyExc_TypeError,
+                        "%s() got multiple sub-patterns for attribute %R", type_->tp_name, name);
+            }
+            return false;
+        }
+        auto attr = PyObject_GetAttr(subject, name);
+        if (attr) {
+            PyList_Append(attrs, attr);
+            Py_DECREF(attr);
+            return true;
+        }
+        if (_PyErr_ExceptionMatches(tstate, PyExc_AttributeError)) {
+            _PyErr_Clear(tstate);
+        }
+        return false;
+    };
+
+    if (!PyType_Check(type)) {
+        _PyErr_Format(tstate, PyExc_TypeError, "called match pattern must be a type");
+        goto fail;
+    }
+    // First, an isinstance check:
+    if (PyObject_IsInstance(subject, type) <= 0) {
+        goto fail;
+    }
+    // So far so good:
+    if (!(seen = PySet_New(nullptr))) {
+        goto fail;
+    }
+    if (!(attrs = PyList_New(0))) {
+        goto fail;
+    }
+
+    // NOTE: From this point on, goto fail on failure:
+    // First, the positional subpatterns:
+    if (nargs) {
+        bool match_self = false;
+        match_args = PyObject_GetAttrString(type, "__match_args__");
+        if (match_args) {
+            if (!PyTuple_CheckExact(match_args)) {
+                _PyErr_Format(tstate, PyExc_TypeError, "%s.__match_args__ must be a tuple (got %s)",
+                        type_->tp_name,
+                        Py_TYPE(match_args)->tp_name);
+                goto fail;
+            }
+        } else if (_PyErr_ExceptionMatches(tstate, PyExc_AttributeError)) {
+            _PyErr_Clear(tstate);
+            // _Py_TPFLAGS_MATCH_SELF is only acknowledged if the type does not
+            // define __match_args__. This is natural behavior for subclasses:
+            // it's as if __match_args__ is some "magic" value that is lost as
+            // soon as they redefine it.
+            match_args = PyTuple_New(0);
+            match_self = PyType_HasFeature(type_, _Py_TPFLAGS_MATCH_SELF);
+        } else {
+            goto fail;
+        }
+        assert(PyTuple_CheckExact(match_args));
+        auto allowed = match_self ? 1 : PyTuple_GET_SIZE(match_args);
+        if (allowed < nargs) {
+            _PyErr_Format(tstate, PyExc_TypeError,
+                    "%s() accepts %d positional sub-pattern%s (%d given)",
+                    type_->tp_name,
+                    allowed, (allowed == 1) ? "" : "s", nargs);
+            goto fail;
+        }
+        if (match_self) {
+            // Easy. Copy the subject itself, and move on to kwargs.
+            PyList_Append(attrs, subject);
+        } else {
+            for (auto i : IntRange(nargs)) {
+                PyObject *name = PyTuple_GET_ITEM(match_args, i);
+                if (!PyUnicode_CheckExact(name)) {
+                    _PyErr_Format(tstate, PyExc_TypeError,
+                            "__match_args__ elements must be strings (got %s)", Py_TYPE(name)->tp_name);
+                    goto fail;
+                }
+                if (!match_class_attr(name)) {
+                    goto fail;
+                }
+            }
+        }
+        Py_CLEAR(match_args);
+    }
+
+    // Finally, the keyword subpatterns:
+    for (auto i : IntRange(PyTuple_GET_SIZE(kwargs))) {
+        PyObject *name = PyTuple_GET_ITEM(kwargs, i);
+        if (!match_class_attr(name)) {
+            goto fail;
+        }
+    }
+    Py_SETREF(attrs, PyList_AsTuple(attrs));
+    Py_DECREF(seen);
+    result[-2] = attrs;
+    result[-1] = Py_NewRef(Py_True);
+    Py_DECREF(subject);
+    Py_DECREF(type);
+    return;
+
+fail:
+    // We really don't care whether an error was raised or not... that's our
+    // caller's problem. All we know is that the match failed.
+    Py_XDECREF(seen);
+    Py_XDECREF(attrs);
+    Py_XDECREF(match_args);
+    gotoErrorHandler(_PyErr_Occurred(tstate), tstate);
+    result[-1] = Py_NewRef(Py_False);
+    Py_DECREF(type);
+}
+
+PyObject *handle_COPY_DICT_WITHOUT_KEYS(PyObject *subject, PyObject *keys) {
+    PyObject *rest = PyDict_New();
+    gotoErrorHandler(!rest);
+    if (PyDict_Update(rest, subject)) [[unlikely]] {
+        Py_DECREF(rest);
+        gotoErrorHandler();
+    }
+    assert(PyTuple_CheckExact(keys));
+    for (auto i : IntRange(PyTuple_GET_SIZE(keys))) {
+        if (PyDict_DelItem(rest, PyTuple_GET_ITEM(keys, i))) {
+            Py_DECREF(rest);
+            gotoErrorHandler();
+        }
+    }
+    return rest;
+}
+
 
 PyObject *handle_LOAD_BUILD_CLASS(PyObject *builtins) {
     static _Py_Identifier PyId___build_class__{"__build_class__", -1};

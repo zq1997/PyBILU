@@ -585,12 +585,28 @@ void CompileUnit::doIntraBlockAnalysis() {
         }
 
         case GET_LEN:
+            stack.push();
+            break;
         case MATCH_MAPPING:
+            stack.push();
+            break;
         case MATCH_SEQUENCE:
+            stack.push();
+            break;
         case MATCH_KEYS:
+            stack.push();
+            stack.push();
+            break;
         case MATCH_CLASS:
+            stack.push();
+            stack.push();
+            stack.pop(stack.until_forever);
+            stack.pop(stack.until_forever);
+            stack.pop();
+            break;
         case COPY_DICT_WITHOUT_KEYS:
-            throw runtime_error("尚未实现");
+            stack.push();
+            stack.pop();
             break;
 
         case SETUP_FINALLY:
