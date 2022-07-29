@@ -8,7 +8,7 @@ using namespace std;
 using namespace llvm;
 
 void CompileUnit::emitRotN(PyOparg n) {
-    auto &abs_top = abstract_stack[abstract_stack_height - 1];
+    auto abs_top = abstract_stack[abstract_stack_height - 1];
     unsigned n_lift = 0;
     for (auto i : IntRange(1, n)) {
         auto v = abstract_stack[abstract_stack_height - i] = abstract_stack[abstract_stack_height - (i + 1)];
@@ -18,11 +18,11 @@ void CompileUnit::emitRotN(PyOparg n) {
 
     if (abs_top.really_pushed && n_lift) {
         auto dest_begin = getStackSlot(1);
-        auto dest_end = getStackSlot(n);
+        auto dest_end = getStackSlot(n_lift + 1);
         auto top = loadValue<PyObject *>(dest_begin, context.tbaa_frame_value);
         if (n_lift < 8 + 2) {
             auto dest = dest_begin;
-            for (auto i : IntRange(2, n_lift)) {
+            for (auto i : IntRange(2, n_lift + 2)) {
                 auto src = getStackSlot(i);
                 auto value = loadValue<PyObject *>(src, context.tbaa_frame_value);
                 storeValue<PyObject *>(value, dest, context.tbaa_frame_value);

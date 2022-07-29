@@ -1,3 +1,5 @@
+import re
+
 import lldb
 
 
@@ -18,7 +20,11 @@ def get_lldb_thread() -> lldb.SBThread:
 
 
 def get_lldb_frame() -> lldb.SBFrame:
-    return get_lldb_thread().GetSelectedFrame()
+    res = lldb.SBCommandReturnObject()
+    get_lldb_debugger().GetCommandInterpreter().HandleCommand('frame info', res)
+    frame_id = int(re.search(r'frame #(\d+)', res.GetOutput()).group(1))
+    return get_lldb_thread().GetFrameAtIndex(frame_id)
+    # return get_lldb_thread().GetSelectedFrame()
 
 
 class Frame:
@@ -136,10 +142,13 @@ class Value:
         self.is_optimized_out = False
 
     def __getitem__(self, item):
-        if self.type.lldb_type.is_pointer or self.type.lldb_type.IsArrayType():
-            return Value(self.lldb_value.GetValueForExpressionPath('[%d]' % item))
-        elif self.type.lldb_type.num_fields:
-            return Value(self.lldb_value.GetChildMemberWithName(item))
+        try:
+            if isinstance(item, str):
+                return Value(self.lldb_value.GetChildMemberWithName(item))
+            elif isinstance(item, int):
+                return Value(self.lldb_value.GetValueForExpressionPath('[%d]' % item))
+        except AssertionError:
+            raise RuntimeError
         assert False
 
     def __int__(self):

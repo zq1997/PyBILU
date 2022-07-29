@@ -310,10 +310,12 @@ void CompileUnit::doIntraBlockAnalysis() {
             break;
         case LOAD_CONST:
             redundant_loads.setIf(vpc, code_instr_num > stack.push());
+            // stack.push();
             break;
         case LOAD_FAST: {
             auto oparg = instr.oparg(py_instr);
             redundant_loads.setIf(vpc, locals[oparg] > stack.push());
+            // stack.push();
             locals_touched.set(oparg);
             break;
         }
