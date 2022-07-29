@@ -31,7 +31,17 @@ auto useName(const T &arg) {
             return std::to_string(arg);
         }
         if constexpr (std::is_same_v<T, PyObject *>) {
-            return std::string(PyUnicode_AsUTF8(arg));
+            if (PyUnicode_Check(arg)) {
+                return std::string(PyUnicode_AsUTF8(arg));
+            } else {
+                auto repr = PyObject_Repr(arg);
+                if (!repr) {
+                    return "<repr_error>";
+                }
+                auto &&repr_str = std::string(PyUnicode_AsUTF8(repr));
+                Py_DECREF(repr);
+                return repr_str;
+            }
         }
     } else {
         return llvm::Twine::createNull();
@@ -182,13 +192,10 @@ class CompileUnit {
     struct PoppedStackValue {
         llvm::Value *const value;
         const bool really_pushed;
-        IF_DEBUG(bool has_decref{false};)
 
         explicit PoppedStackValue(const StackValue &v) : value{v.value}, really_pushed(v.really_pushed) {}
 
         PoppedStackValue(const PoppedStackValue &) = delete;
-
-        ~PoppedStackValue() { assert(has_decref); }
 
         operator llvm::Value *() { return value; }
     };
@@ -218,7 +225,6 @@ class CompileUnit {
         if (v.really_pushed) {
             do_Py_DECREF(v.value);
         }
-        IF_DEBUG(v.has_decref = true;)
     }
 
     void do_Py_XDECREF(llvm::Value *v);

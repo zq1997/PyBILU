@@ -7,49 +7,6 @@
 using namespace std;
 using namespace llvm;
 
-void CompileUnit::emitRotN(PyOparg n) {
-    auto abs_top = abstract_stack[abstract_stack_height - 1];
-    unsigned n_lift = 0;
-    for (auto i : IntRange(1, n)) {
-        auto v = abstract_stack[abstract_stack_height - i] = abstract_stack[abstract_stack_height - (i + 1)];
-        n_lift += v.really_pushed;
-    }
-    abstract_stack[abstract_stack_height - n] = abs_top;
-
-    if (abs_top.really_pushed && n_lift) {
-        auto dest_begin = getStackSlot(1);
-        auto dest_end = getStackSlot(n_lift + 1);
-        auto top = loadValue<PyObject *>(dest_begin, context.tbaa_frame_value);
-        if (n_lift < 8 + 2) {
-            auto dest = dest_begin;
-            for (auto i : IntRange(2, n_lift + 2)) {
-                auto src = getStackSlot(i);
-                auto value = loadValue<PyObject *>(src, context.tbaa_frame_value);
-                storeValue<PyObject *>(value, dest, context.tbaa_frame_value);
-                dest = src;
-            }
-        } else {
-            auto loop_block = appendBlock("ROT_N.loop");
-            auto end_block = appendBlock("ROT_N.end");
-            builder.CreateBr(loop_block);
-            builder.SetInsertPoint(loop_block);
-            auto dest = builder.CreatePHI(context.type<PyObject *>(), 2);
-            dest->addIncoming(dest_begin, builder.GetInsertBlock());
-            auto src = builder.CreatePHI(context.type<PyObject *>(), 2);
-            src->addIncoming(getStackSlot(2), builder.GetInsertBlock());
-            auto value = loadValue<PyObject *>(src, context.tbaa_frame_value);
-            storeValue<PyObject *>(value, dest, context.tbaa_frame_value);
-            auto next_src = getPointer<PyObject *>(src, -1);
-            builder.CreateCondBr(builder.CreateICmpEQ(dest, dest_end), end_block, loop_block);
-            dest->addIncoming(src, loop_block);
-            src->addIncoming(next_src, loop_block);
-            builder.SetInsertPoint(end_block);
-        }
-        storeValue<PyObject *>(top, dest_end, context.tbaa_frame_value);
-        return;
-    }
-}
-
 void CompileUnit::emitBlock(PyBasicBlock &this_block) {
     auto &defined_locals = this_block.locals_input;
 
@@ -129,17 +86,8 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
         case LOAD_CONST: {
             // TODO: 添加non null属性
             PyObject *repr{};
-            if constexpr (debug_build) {
-                repr = PyObject_Repr(PyTuple_GET_ITEM(py_code->co_consts, oparg));
-                if (!repr) {
-                    throw std::runtime_error("cannot get const object repr");
-                }
-            }
             auto ptr = getPointer<PyObject *>(code_consts, oparg);
-            auto value = loadValue<PyObject *>(ptr, context.tbaa_code_const, useName(repr));
-            if constexpr (debug_build) {
-                Py_DECREF(repr);
-            }
+            auto value = loadValue<PyObject *>(ptr, context.tbaa_code_const, useName(PyTuple_GET_ITEM(py_code->co_consts, oparg)));
             auto is_redundant = redundant_loads.get(vpc);
             if (is_redundant) {
                 do_RedundantPUSH(value, false, oparg);
@@ -726,7 +674,6 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
                 auto poped_step = do_POP();
                 step = poped_step;
                 really_pushed = poped_step.really_pushed;
-                IF_DEBUG(poped_step.has_decref = true;)
             }
             auto stop = do_POP();
             auto start = do_POP();
@@ -754,11 +701,9 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
                 if (oparg == 2) {
                     auto poped_cause = do_POP();
                     cause = poped_cause;
-                    IF_DEBUG(poped_cause.has_decref = true;)
                 }
                 auto poped_exc = do_POP();
                 exc = poped_exc;
-                IF_DEBUG(poped_exc.has_decref = true;)
             }
             callSymbol<handle_RAISE_VARARGS>(cause, exc);
             builder.CreateUnreachable();

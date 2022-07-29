@@ -215,7 +215,6 @@ llvm::Value *CompileUnit::getSymbol(size_t offset) {
 
 void CompileUnit::pyJumpIF(PyBasicBlock &current, bool pop_if_jump, bool jump_cond) {
     auto cond_obj = do_POP();
-    IF_DEBUG(cond_obj.has_decref = true;)
 
     auto fall_block = cond_obj.really_pushed ? appendBlock("") : current.next();
     auto jump_block = cond_obj.really_pushed && pop_if_jump ? appendBlock("") : *current.branch;
@@ -282,7 +281,7 @@ void CompileUnit::refreshAbstractStack() {
         } else {
             // TODO: get const也作为函数
             auto ptr = getPointer<PyObject *>(code_consts, v.index);
-            v.value = loadValue<PyObject *>(ptr, context.tbaa_code_const, "refreshAbstractStack");
+            v.value = loadValue<PyObject *>(ptr, context.tbaa_code_const);
         }
     }
     assert(j == stack_height);
@@ -305,4 +304,49 @@ CompileUnit::TranslatedResult *CompileUnit::emit(Translator &translator, PyObjec
     notifyCodeLoaded(py_code, memory.base());
 
     return new CompileUnit::TranslatedResult{memory, move(cu.vpc_to_stack_height)};
+}
+
+void CompileUnit::emitRotN(PyOparg n) {
+    auto abs_top = abstract_stack[abstract_stack_height - 1];
+    unsigned n_lift = 0;
+    for (auto i : IntRange(1, n)) {
+        auto v = abstract_stack[abstract_stack_height - i] = abstract_stack[abstract_stack_height - (i + 1)];
+        n_lift += v.really_pushed;
+    }
+    abstract_stack[abstract_stack_height - n] = abs_top;
+
+    if (abs_top.really_pushed && n_lift) {
+        auto dest_begin = getStackSlot(1);
+        auto dest_end = getStackSlot(n_lift + 1);
+        auto top = loadValue<PyObject *>(dest_begin, context.tbaa_frame_value);
+        if (n_lift <= 8) {
+            auto dest = dest_begin;
+            for (auto i : IntRange(2, n_lift + 2)) {
+                auto src = getStackSlot(i);
+                auto value = loadValue<PyObject *>(src, context.tbaa_frame_value);
+                storeValue<PyObject *>(value, dest, context.tbaa_frame_value);
+                dest = src;
+            }
+        } else {
+            auto src_start = getStackSlot(2);
+            auto current_block = builder.GetInsertBlock();
+            auto loop_block = appendBlock("ROT_N.loop");
+            auto end_block = appendBlock("ROT_N.end");
+            builder.CreateBr(loop_block);
+            builder.SetInsertPoint(loop_block);
+            auto dest = builder.CreatePHI(context.type<PyObject *>(), 2);
+            dest->addIncoming(dest_begin, current_block);
+            auto src = builder.CreatePHI(context.type<PyObject *>(), 2);
+            src->addIncoming(src_start, current_block);
+            auto value = loadValue<PyObject *>(src, context.tbaa_frame_value);
+            storeValue<PyObject *>(value, dest, context.tbaa_frame_value);
+            auto next_src = getPointer<PyObject *>(src, -1);
+            builder.CreateCondBr(builder.CreateICmpEQ(dest, dest_end), end_block, loop_block);
+            dest->addIncoming(src, loop_block);
+            src->addIncoming(next_src, loop_block);
+            builder.SetInsertPoint(end_block);
+        }
+        storeValue<PyObject *>(top, dest_end, context.tbaa_frame_value);
+        return;
+    }
 }
