@@ -27,7 +27,7 @@ using namespace std;
 #endif
 
 static PyObject *const python_bool_values[]{Py_False, Py_True};
-static _Py_Identifier PyId___name__{"__name__", -1};
+_Py_IDENTIFIER(__name__);
 
 void handle_dealloc(PyObject *obj) {
 #ifdef Py_TRACE_REFS
@@ -176,7 +176,7 @@ static void raiseUndefinedName(PyThreadState *tstate, PyObject *name,
     PyErr_Fetch(&type, &value, &traceback);
     PyErr_NormalizeException(&type, &value, &traceback);
     if (PyErr_GivenExceptionMatches(value, PyExc_NameError)) {
-        static _Py_Identifier PyId_name{"name", -1};
+        _Py_IDENTIFIER(name);
         _PyObject_SetAttrId(value, &PyId_name, name);
     }
     PyErr_Restore(type, value, traceback);
@@ -891,7 +891,6 @@ PyObject *handle_COMPARE_OP(PyObject *v, PyObject *w, int op) {
             type_w->tp_name);
     gotoErrorHandler(tstate);
 }
-
 
 bool handle_CONTAINS_OP(PyObject *container, PyObject *value) {
     auto sqm = Py_TYPE(container)->tp_as_sequence;
@@ -1636,7 +1635,7 @@ PyObject *handle_COPY_DICT_WITHOUT_KEYS(PyObject *subject, PyObject *keys) {
 
 
 PyObject *handle_LOAD_BUILD_CLASS(PyObject *builtins) {
-    static _Py_Identifier PyId___build_class__{"__build_class__", -1};
+    _Py_IDENTIFIER(__build_class__);
     PyObject *build_class_str = _PyUnicode_FromId(&PyId___build_class__);
     gotoErrorHandler(!build_class_str);
 
@@ -1668,7 +1667,7 @@ PyObject *handle_LOAD_BUILD_CLASS(PyObject *builtins) {
 PyObject *handle_IMPORT_NAME(PyFrameObject *f, PyObject *name, PyObject *fromlist, PyObject *level) {
     auto tstate = _PyThreadState_GET();
 
-    static _Py_Identifier PyId___import__{"__import__", -1};
+    _Py_IDENTIFIER(__import__);
     PyObject *import_str = _PyUnicode_FromId(&PyId___import__);
     gotoErrorHandler(!import_str, tstate);
 
@@ -1739,7 +1738,7 @@ PyObject *handle_IMPORT_FROM(PyObject *from, PyObject *name) {
     auto pkgpath = PyModule_GetFilenameObject(from);
     PyObject *errmsg;
     if (pkgpath) {
-        static _Py_Identifier PyId___spec__{"__spec__", -1};
+        _Py_IDENTIFIER(__spec__);
         PyObject *spec = _PyObject_GetAttrId(from, &PyId___spec__);
         errmsg = PyUnicode_FromFormat(_PyModuleSpec_IsInitializing(spec) ?
                         "cannot import name %R from partially initialized module %R "
@@ -1772,11 +1771,11 @@ void handle_IMPORT_STAR(PyFrameObject *f, PyObject *from) {
 
     bool skip_leading_underscores = false;
     PyObject *all;
-    static _Py_Identifier PyId___all__{"__all__", -1};
+    _Py_IDENTIFIER(__all__);
     gotoErrorHandler(_PyObject_LookupAttrId(from, &PyId___all__, &all) < 0);
     if (!all) {
         PyObject *dict;
-        static _Py_Identifier PyId___dict__{"__dict__", -1};
+        _Py_IDENTIFIER(__dict__);
         if (_PyObject_LookupAttrId(from, &PyId___dict__, &dict) < 0) {
             gotoErrorHandler();
         }
@@ -1916,8 +1915,8 @@ void handle_RERAISE(PyFrameObject *f, bool restore_lasti) {
 
 void handle_SETUP_WITH(PyFrameObject *f, PyObject **sp, int handler) {
     // TODO：考虑到load消除可能有问题
-    static _Py_Identifier PyId___enter__{"__enter__", -1};
-    static _Py_Identifier PyId___exit__{"__exit__", -1};
+    _Py_IDENTIFIER(__enter__);
+    _Py_IDENTIFIER(__exit__);
 
     auto mgr = *--sp;
     auto enter = _PyObject_LookupSpecial(mgr, &PyId___enter__);
@@ -2148,8 +2147,8 @@ void handle_END_ASYNC_FOR(PyFrameObject *f) {
 
 void handle_BEFORE_ASYNC_WITH(PyObject **sp) {
     // TODO：考虑到load消除可能有问题
-    static _Py_Identifier PyId___aenter__{"__aenter__", -1};
-    static _Py_Identifier PyId___aexit__{"__aexit__", -1};
+    _Py_IDENTIFIER(__aenter__);
+    _Py_IDENTIFIER(__aexit__);
 
     auto mgr = *--sp;
     auto enter = _PyObject_LookupSpecial(mgr, &PyId___aenter__);

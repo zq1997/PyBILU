@@ -13,6 +13,14 @@ def get_pydis_path(co):
     return get_save_prefix(co) + '.pydis'
 
 
+def dump_pydis(co):
+    with open(get_save_prefix(co) + '.pydis', 'wt') as f:
+        disassemble_code(co, f)
+
+def dump_binary(co, suffix, data):
+    with open(get_save_prefix(co) + suffix, 'wb') as f:
+        f.write(data)
+
 def dump(co, ll, obj):
     assert os.path.isfile(co.co_filename)
     save_prefix = get_save_prefix(co)

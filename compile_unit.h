@@ -34,13 +34,8 @@ auto useName(const T &arg) {
             if (PyUnicode_Check(arg)) {
                 return std::string(PyUnicode_AsUTF8(arg));
             } else {
-                auto repr = PyObject_Repr(arg);
-                if (!repr) {
-                    return "<repr_error>";
-                }
-                auto &&repr_str = std::string(PyUnicode_AsUTF8(repr));
-                Py_DECREF(repr);
-                return repr_str;
+                PyObjectRef repr{PyObject_Repr(arg)};
+                return std::string(PyUnicode_AsUTF8(repr));
             }
         }
     } else {
@@ -119,6 +114,8 @@ public:
     void finalize() {}
 };
 
+#define PRELOAD
+
 class CompileUnit {
     Context &context;
     llvm::Module llvm_module{"the_module", context.llvm_context};
@@ -130,8 +127,6 @@ class CompileUnit {
     llvm::Value *coroutine_handler;
     llvm::BasicBlock *entry_block;
     llvm::BasicBlock *error_block;
-    llvm::Value *code_names;
-    llvm::Value *code_consts;
     llvm::IndirectBrInst *entry_jump;
 
     PyCodeObject *py_code;
@@ -140,6 +135,18 @@ class CompileUnit {
     unsigned try_block_num;
     DynamicArray<PyBasicBlock> blocks{};
     BitArray redundant_loads{};
+
+#ifdef PRELOAD
+    DynamicArray<llvm::Value *> value_pointers{};
+    llvm::Value **name_slots;
+    llvm::Value **const_slots;
+    llvm::Value **local_slots;
+    llvm::Value **free_slots;
+    llvm::Value **stack_slots;
+#else
+    llvm::Value *code_names;
+    llvm::Value *code_consts;
+#endif
 
     decltype(PyFrameObject::f_stackdepth) stack_height;
     DynamicArray<decltype(stack_height)> vpc_to_stack_height{};

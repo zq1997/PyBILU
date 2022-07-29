@@ -85,8 +85,12 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
         }
         case LOAD_CONST: {
             // TODO: 添加non null属性
-            PyObject *repr{};
+            // TODO: repr
+#ifdef PRELOAD
+            auto ptr = const_slots[oparg];
+#else
             auto ptr = getPointer<PyObject *>(code_consts, oparg);
+#endif
             auto value = loadValue<PyObject *>(ptr, context.tbaa_code_const, useName(PyTuple_GET_ITEM(py_code->co_consts, oparg)));
             auto is_redundant = redundant_loads.get(vpc);
             if (is_redundant) {
@@ -795,7 +799,10 @@ void CompileUnit::emitBlock(PyBasicBlock &this_block) {
             break;
         }
         case POP_EXCEPT: {
+            // TODO: 直接指明stack高度
             callSymbol<handle_POP_EXCEPT>(frame_obj);
+            abstract_stack_height -= 3;
+            stack_height -= 3;
             break;
         }
         case JUMP_IF_NOT_EXC_MATCH: {

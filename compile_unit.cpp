@@ -43,11 +43,55 @@ void CompileUnit::translate() {
     entry_block->insertInto(function);
     builder.SetInsertPoint(entry_block);
 
-    auto code_obj = loadFieldValue(frame_obj, &PyFrameObject::f_code, context.tbaa_frame_value, useName("code"));
-    auto names_tuple = loadFieldValue(code_obj, &PyCodeObject::co_names, context.tbaa_frame_value);
-    code_names = getPointer(names_tuple, &PyTupleObject::ob_item, "names");
-    auto consts_tuple = loadFieldValue(code_obj, &PyCodeObject::co_consts, context.tbaa_code_const);
-    code_consts = getPointer(consts_tuple, &PyTupleObject::ob_item, "consts");
+    auto rt_code = loadFieldValue(frame_obj, &PyFrameObject::f_code, context.tbaa_frame_value, useName("code"));
+#ifdef PRELOAD
+    auto num_of_names = PyTuple_GET_SIZE(py_code->co_names);
+    auto num_of_consts = PyTuple_GET_SIZE(py_code->co_consts);
+    auto num_of_locals = py_code->co_nlocals;
+    auto num_of_frees = PyTuple_GET_SIZE(py_code->co_cellvars) + PyTuple_GET_SIZE(py_code->co_freevars);
+    auto num_of_stack_values = py_code->co_stacksize;
+    value_pointers.reserve(num_of_names + num_of_consts + num_of_locals + num_of_frees + num_of_stack_values);
+
+    name_slots = value_pointers.getPointer(0);
+    auto rt_code_names_items = getPointer(
+            loadFieldValue(rt_code, &PyCodeObject::co_names, context.tbaa_frame_value),
+            &PyTupleObject::ob_item);
+    for (auto i : IntRange(num_of_names)) {
+        name_slots[i] = getPointer<PyObject *>(rt_code_names_items, i, useName("name_slots.", i));
+    }
+
+    const_slots = name_slots + num_of_names;
+    auto rt_co_consts_items = getPointer(
+            loadFieldValue(rt_code, &PyCodeObject::co_consts, context.tbaa_code_const),
+            &PyTupleObject::ob_item);
+    for (auto i : IntRange(num_of_consts)) {
+        const_slots[i] = getPointer<PyObject *>(rt_co_consts_items, i, useName("const_slots.", i));
+    }
+
+    auto offset_in_frame = offsetof(PyFrameObject, f_localsplus);
+    local_slots = const_slots + num_of_consts;
+    for (auto i : IntRange(num_of_locals)) {
+        local_slots[i] = getPointer<char>(frame_obj, offset_in_frame, useName("local_slots.", i));
+        offset_in_frame += sizeof(PyObject *);
+    }
+
+    free_slots = local_slots + num_of_locals;
+    for (auto i : IntRange(num_of_frees)) {
+        free_slots[i] = getPointer<char>(frame_obj, offset_in_frame, useName("cell_free_slots.", i));
+        offset_in_frame += sizeof(PyObject *);
+    }
+
+    stack_slots = free_slots + num_of_frees;
+    for (auto i : IntRange(num_of_stack_values)) {
+        stack_slots[i] = getPointer<char>(frame_obj, offset_in_frame, useName("cell_slots.", i));
+        offset_in_frame += sizeof(PyObject *);
+    }
+#else
+    code_names = getPointer(loadFieldValue(rt_code, &PyCodeObject::co_names,
+            context.tbaa_frame_value), &PyTupleObject::ob_item, "co_names");
+    code_consts = getPointer(loadFieldValue(rt_code, &PyCodeObject::co_consts,
+            context.tbaa_code_const), &PyTupleObject::ob_item, "consts");
+#endif
     rt_lasti = getPointer(frame_obj, &PyFrameObject::f_lasti, "lasti");
 
     auto offset = offsetof(PyFrameObject, f_blockstack) +
@@ -131,6 +175,9 @@ std::pair<llvm::Value *, llvm::Value *> CompileUnit::do_GETLOCAL(PyOparg oparg) 
 
 Value *CompileUnit::getStackSlot(int i) {
     assert(stack_height >= i);
+#ifdef PRELOAD
+    return stack_slots[stack_height - i];
+#else
     auto offset = offsetof(PyFrameObject, f_localsplus) + sizeof(PyObject *) * (
             stack_height - i +
                     py_code->co_nlocals +
@@ -138,6 +185,7 @@ Value *CompileUnit::getStackSlot(int i) {
                     PyTuple_GET_SIZE(py_code->co_freevars)
     );
     return getPointer<char>(frame_obj, offset, useName("stack.", i, "."));
+#endif
 }
 
 CompileUnit::FetchedStackValue CompileUnit::fetchStackValue(int i) {
@@ -181,17 +229,34 @@ void CompileUnit::do_RedundantPUSH(llvm::Value *value, bool is_local, PyOparg in
 }
 
 Value *CompileUnit::getName(int i) {
-    PyObject *repr{};
+#ifdef PRELOAD
+    return loadValue<PyObject *>(value_pointers[i], context.tbaa_code_const,
+            useName("name.", PyTuple_GET_ITEM(py_code->co_names, i)));
+#else
+    PyObject * repr{};
     if constexpr (debug_build) {
         repr = PyTuple_GET_ITEM(py_code->co_names, i);
     }
     auto ptr = getPointer<PyObject *>(code_names, i);
     return loadValue<PyObject *>(ptr, context.tbaa_code_const, useName(repr, "$"));
+#endif
 }
 
 Value *CompileUnit::getFreevar(int i) {
+#ifdef PRELOAD
+    PyObject * name{};
+    if constexpr (debug_build) {
+        if (i < PyTuple_GET_SIZE(py_code->co_cellvars)) {
+            name = PyTuple_GET_ITEM(py_code->co_cellvars, i);
+        } else {
+            name = PyTuple_GET_ITEM(py_code->co_freevars, i - PyTuple_GET_SIZE(py_code->co_cellvars));
+        }
+    }
+    // TODO: tbaa_frame_value还是const
+    return loadValue<PyObject *>(free_slots[i], context.tbaa_frame_value, useName(name));
+#else
     auto offset = offsetof(PyFrameObject, f_localsplus) + sizeof(PyObject *) * (py_code->co_nlocals + i);
-    PyObject *name{};
+    PyObject * name{};
     if constexpr (debug_build) {
         if (i < PyTuple_GET_SIZE(py_code->co_cellvars)) {
             name = PyTuple_GET_ITEM(py_code->co_cellvars, i);
@@ -202,6 +267,7 @@ Value *CompileUnit::getFreevar(int i) {
     auto slot = getPointer<char>(frame_obj, offset, useName("free.", name, "."));
     // TODO: tbaa_frame_value还是const
     return loadValue<PyObject *>(slot, context.tbaa_frame_value, useName(name));
+#endif
 }
 
 llvm::Value *CompileUnit::getSymbol(size_t offset) {
@@ -243,22 +309,6 @@ void CompileUnit::pyJumpIF(PyBasicBlock &current, bool pop_if_jump, bool jump_co
     }
 }
 
-
-static void debugDumpObj(PyObject *py_code, Module &module, SmallVector<char> *obj_vec = nullptr) {
-    if constexpr (debug_build) {
-        SmallVector<char> ll_vec{};
-        raw_svector_ostream os{ll_vec};
-        module.print(os, nullptr);
-        callDebugHelperFunction("dump", py_code,
-                PyObjectRef{PyMemoryView_FromMemory(ll_vec.data(), ll_vec.size(), PyBUF_READ)},
-                PyObjectRef{obj_vec ? PyMemoryView_FromMemory(obj_vec->data(), obj_vec->size(), PyBUF_READ) :
-                        Py_NewRef(Py_None)});
-        if (!obj_vec && verifyModule(module, &errs())) {
-            throw runtime_error("llvm module verification failed");
-        }
-    }
-}
-
 // TODO: 直接加载不好，最好延迟
 void CompileUnit::declareStackGrowth(int n) {
     for ([[maybe_unused]]auto i : IntRange(n)) {
@@ -280,25 +330,50 @@ void CompileUnit::refreshAbstractStack() {
             v.value = do_GETLOCAL(v.index).second;
         } else {
             // TODO: get const也作为函数
+#ifdef PRELOAD
+            auto ptr = const_slots[v.index];
+#else
             auto ptr = getPointer<PyObject *>(code_consts, v.index);
+#endif
             v.value = loadValue<PyObject *>(ptr, context.tbaa_code_const);
         }
     }
     assert(j == stack_height);
 }
 
-static void notifyCodeLoaded(PyObject *py_code, void *code_addr) {}
+static void notifyCodeLoaded(PyObject * py_code, void * code_addr) {}
 
 CompileUnit::TranslatedResult *CompileUnit::emit(Translator &translator, PyObject *py_code) {
+    if constexpr (debug_build) {
+        callDebugHelperFunction("dump_pydis", py_code);
+    }
+
     CompileUnit cu{translator};
     cu.py_code = reinterpret_cast<PyCodeObject *>(py_code);
     cu.llvm_module.setDataLayout(translator.machine->createDataLayout());
     cu.translate();
 
-    debugDumpObj(py_code, cu.llvm_module, nullptr);
+    if constexpr (debug_build) {
+        SmallVector<char> ll_vec{};
+        raw_svector_ostream os{ll_vec};
+        cu.llvm_module.print(os, nullptr);
+        callDebugHelperFunction("dump_binary", py_code,
+                PyObjectRef{PyUnicode_FromString(".ll")},
+                PyObjectRef{PyMemoryView_FromMemory(ll_vec.data(), ll_vec.size(), PyBUF_READ)});
+    }
     auto &obj = translator.compile(cu.llvm_module);
+    if constexpr (debug_build) {
+        SmallVector<char> ll_vec{};
+        raw_svector_ostream os{ll_vec};
+        cu.llvm_module.print(os, nullptr);
+        callDebugHelperFunction("dump_binary", py_code,
+                PyObjectRef{PyUnicode_FromString(".opt.ll")},
+                PyObjectRef{PyMemoryView_FromMemory(ll_vec.data(), ll_vec.size(), PyBUF_READ)});
+        callDebugHelperFunction("dump_binary", py_code,
+                PyObjectRef{PyUnicode_FromString(".o")},
+                PyObjectRef{PyMemoryView_FromMemory(obj.data(), obj.size(), PyBUF_READ)});
+    }
     auto memory = loadCode(obj);
-    debugDumpObj(py_code, cu.llvm_module, &obj);
     obj.resize(0);
     // TODO: cout capcity
     notifyCodeLoaded(py_code, memory.base());
